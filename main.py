@@ -16,6 +16,6 @@ df["year"] = df["year"].astype (int)
 
 df.drop(df[df["genres"] == "['Hentai']"].index, inplace=True) 
 
-df.drop(df["animeID"] == 8020, inplace=True)
+df.drop(df[df["animeID"] == 8020].index, inplace=True) # One Punch Man S3
 
 df.to_csv("cleaned_animes.csv", index=False)
