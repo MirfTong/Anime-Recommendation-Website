@@ -8,6 +8,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Home</title>
     <style>
+        h1 {
+            text-align:center;
+            font-weight:600;
+            font-family: "Fredoka", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+            font-size: 50px;
+        }
+        
         h2 {
             text-align:center;
             font-weight:300;
@@ -90,10 +97,6 @@
             text-align: center;
         }
 
-        .search_bar button:hover {
-            border-color: white;
-        }
-
         .search_bar input:focus::placeholder {
             color: transparent;
         }
@@ -114,10 +117,10 @@
     </style>
 </head>
 <body>
+    <h1>Browse Animes</h1>
     <a href="{{ url_for('random_anime') }}">
         <button>Random Animes</button>
     </a>
-
     <form class="search_bar" action="/home" method="get">
         <span class="search_icon">🔍</span>
         <input type="text" placeholder="Search Anime" name="search">
