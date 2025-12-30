@@ -20,8 +20,8 @@ def anime():
     message = None
     if query:
         anime_list = df[
-            df["title"].astype(str).str.lower().str.contains(query, na=False, regex=False) | 
-            df["alternative_title"].astype(str).str.lower().str.contains(query, na=False, regex=False)]
+            df["title"].str.lower().str.contains(query, na=False, regex=False) | 
+            df["alternative_title"].str.lower().str.contains(query, na=False, regex=False)]
         anime_list = anime_list.to_dict(orient="records")
         if not anime_list:
             message = f"No results found for '{query}'"
