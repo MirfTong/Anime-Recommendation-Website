@@ -18,13 +18,11 @@ def random_anime():
 def anime():
     query = request.args.get("search","").lower()
     if query:
-        anime_searched = df[df["title"].str.lower().str.contains(query, na=False)]
-        alt_anime = df[df["alternative_title"].str.lower().str.contains(query, na=False)]
-        alt_anime = alt_anime.to_dict(orient='records')
-        
-        anime_list = anime_searched.to_dict(orient='records')
-        anime_list.extend(alt_anime)
-        # anime_list = clean_alternative_titles(anime_list)
+        anime_list = df[
+                df["title"].astype(str).str.lower().str.contains(query, na=False)
+                | 
+                df["alternative_title"].astype(str).str.lower().str.contains(query, na=False)
+            ].to_dict(orient="records")
     else:
         # anime_list = df.nlargest(21, "score")
         anime_list = df.sort_values(by="score", ascending=False)[:100].iloc[1:]
