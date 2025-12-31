@@ -1,8 +1,10 @@
 from flask import Flask, render_template, url_for, request
 import pandas as pd
+import ast
 
 app = Flask(__name__)
 df = pd.read_csv("cleaned_animes.csv")
+genre_list = pd.read_csv("genres.csv")
 
 @app.route("/random-anime")
 def random_anime(): 
@@ -21,6 +23,10 @@ def anime():
     score = request.args.get("score", 0, type=float)
     year = request.args.get("year", 0, type=int)
     types = request.args.getlist("type")
+    genre = request.args.getlist("genre")
+
+    genre_list = df["genres"].apply(ast.literal_eval).explode().dropna().str.strip().unique()
+    genre_list = genre_list[genre_list != "Hentai"]
 
     if query:
         anime_list = df[
@@ -38,11 +44,14 @@ def anime():
             anime_list = anime_list[anime_list["year"] <= year]
         if types:
             anime_list = anime_list[anime_list["type"].isin(types)]
+        if genre:
+            for g in genre:
+                anime_list = anime_list[anime_list["genres"].str.contains(g)]
 
     else:   
         anime_list = df
         
-        if (eps or score or year or types):
+        if (eps or score or year or types or genre):
             if eps:
                 anime_list = anime_list[anime_list["episodes"] >= eps]
             if score:
@@ -51,6 +60,9 @@ def anime():
                 anime_list = anime_list[anime_list["year"] <= year]
             if types:
                 anime_list = anime_list[anime_list["type"].isin(types)]
+            if genre:
+                for g in genre: 
+                    anime_list = anime_list[anime_list["genres"].str.contains(g)]
 
         else: 
             anime_list = df.sort_values(by="score", ascending=False)[:100].iloc[1:]
@@ -61,7 +73,7 @@ def anime():
     anime_list = anime_list.to_dict(orient='records')
     anime_list = clean_alternative_titles(anime_list)
 
-    return render_template('index1.html', anime=anime_list, message=message)
+    return render_template('index1.html', anime=anime_list, message=message, genre=genre_list)
 
 def clean_alternative_titles(clean_list):
     for data in clean_list:

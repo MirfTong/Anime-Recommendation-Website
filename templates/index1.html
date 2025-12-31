@@ -259,6 +259,13 @@
             <label for="MOVIE"> Movie</label><br>
         </div>
 
+        {% for g in genre %}
+            <div class="genre">
+                <input type="checkbox" id="{{ g }}" name="genre" value="{{ g }}">
+                <label for="{{ g }}"> {{ g }}</label><br>
+            </div>
+        {% endfor %}
+
         <input type="submit" value="Submit">
     </form>
 
