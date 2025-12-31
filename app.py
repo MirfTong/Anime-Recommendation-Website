@@ -26,6 +26,7 @@ def anime():
 
     genre_list = df["genres"].apply(ast.literal_eval).explode().dropna().str.strip().unique()
     genre_list = genre_list[genre_list != "Hentai"]
+    genre_list.sort()
 
     if query:
         anime_list = df[
@@ -64,10 +65,8 @@ def anime():
                     anime_list = anime_list[anime_list["genres"].str.contains(g)]
 
         else: 
-            anime_list = df.sort_values(by="score", ascending=False)[:100].iloc[1:]
-        
-        # TODO: Filters Genres
-    
+            anime_list = df.sort_values(by="score", ascending=False)[:101].iloc[1:]
+            
     anime_list = anime_list.sort_values(by="score", ascending=False)
     anime_list = anime_list.to_dict(orient='records')
     anime_list = clean_alternative_titles(anime_list)

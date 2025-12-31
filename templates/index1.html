@@ -9,21 +9,21 @@
     <title>Home</title>
     <style>
         h1 {
-            text-align:center;
-            font-weight:600;
+            text-align: center;
+            font-weight: 600;
             font-family: "Fredoka", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
             font-size: 50px;
         }
 
         h2 {
-            text-align:center;
-            font-weight:300;
+            text-align: center;
+            font-weight: 300;
             font-size: 20px
         }
 
         h4 {
-            text-align:center;
-            font-weight:300;
+            text-align: center;
+            font-weight: 300;
             font-size: 15px
         }
         
@@ -31,23 +31,23 @@
             background:#242424;
             font-family: "Fredoka", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
             color: white;
-            font-weight:300;
+            font-weight: 300;
         
         }
         .anime_grid {
             display: grid;
-            grid-template-columns: repeat(3,1fr);
+            grid-template-columns: repeat(5,1fr);
             gap: 16px;
             max-width: 1100px;
             margin: 0 auto;
-            padding: 2px
+            padding: 2px;
         }
 
         .anime_card {
             align-content: center;
             border-radius: 25px;
             box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.745);
-            text-align:center;
+            text-align: center;
             padding: -20px;
         }
 
@@ -66,13 +66,13 @@
         }
 
         figcaption {
-            font-size:larger;
+            font-size: larger;
         }
 
         .search {
             --padding: 6px;
             margin-top: 10px;
-            width:250px;
+            width: 250px;
             display: flex;
             align-items: center;
             padding: var(--padding);
@@ -87,7 +87,7 @@
             color:#333333;
             outline: none;
             border-color: white;
-            border:none;
+            border: none;
             background: transparent;
             text-align: center;
         }
@@ -107,7 +107,7 @@
             font-family: "Fredoka", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;            font-size: 12px;
             font-weight: 600;
             font-size: 18px;
-            color:#333333;
+            color: #333333;
             outline: none;
             border-color: white;
             border:none;
@@ -133,7 +133,7 @@
             color:#333333;
             outline: none;
             border-color: white;
-            border:none;
+            border: none;
             background: transparent;
             text-align: center;
         }
@@ -153,10 +153,10 @@
             font-family: "Fredoka", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;            font-size: 12px;
             font-weight: 600;
             font-size: 18px;
-            color:#333333;
+            color: #333333;
             outline: none;
             border-color: white;
-            border:none;
+            border: none;
             background: transparent;
             text-align: center;
         }
@@ -190,6 +190,9 @@
             background: grey;
             border: 2px solid transparent;
             cursor: pointer;
+            top: 1em;
+            left: 1em;
+            position: fixed;
         }
 
         a button:hover {
@@ -206,7 +209,7 @@
             text-align: center;
             cursor: pointer;
             margin-top: 10px;
-            display:block;
+            display: block;
         }
 
         input[type="checkbox"] {
@@ -219,7 +222,16 @@
         }
 
         .type {
-            display:inline-block;
+            display: inline-block;
+        }
+
+        .filter {
+            padding: 15px;
+        }
+
+        .main-container {
+            display: inline-flex;
+            width: 70%;
         }
     </style>
 </head>
@@ -229,69 +241,73 @@
         <button>Random Animes</button>
     </a>
 
-    <form class="search_bar" action="/home" method="get">
-        <div class="search">
-            <span class="search_icon">🔍</span>
-            <input type="text" placeholder="Search Anime" name="search">
+    <main class="main-container">
+        <div class="filter">
+            <form class="search_bar" action="/home" method="get">
+                <div class="search">
+                    <span class="search_icon">🔍</span>
+                    <input type="text" placeholder="Search Anime" name="search">
+                </div>
+
+                <div class="episode_bar">
+                    <span class="search_icon">▶️</span>
+                    <input type="number" placeholder="Min Episodes" name="eps">
+                </div>
+        
+                <div class="score_bar">
+                    <span class="search_icon">⭐</span>
+                    <input type="number" step="0.01" placeholder="Min Score" name="score">
+                </div>
+
+                <div class="year_bar">
+                    <span class="search_icon">📆</span>
+                    <input type="number" placeholder="Max Year" name="year">
+                </div>
+
+                <div class="type">
+                    <input type="checkbox" id="TV" name="type" value="TV">
+                    <label for="TV"> TV</label><br>
+                </div>
+                <div class="type">
+                    <input type="checkbox" id="MOVIE" name="type" value="MOVIE">
+                    <label for="MOVIE"> Movie</label><br>
+                </div>
+
+                {% for g in genre %}
+                    <div class="genre">
+                        <input type="checkbox" id="{{ g }}" name="genre" value="{{ g }}">
+                        <label for="{{ g }}"> {{ g }}</label><br>
+                    </div>
+                {% endfor %}
+
+                <input type="submit" value="Submit">
+            </form>
+
+            {% if message %}
+                <p>{{ message }}</p>
+            {% endif %}
         </div>
 
-        <div class="episode_bar">
-            <span class="search_icon">▶️</span>
-            <input type="number" placeholder="Min Episodes" name="eps">
+        <div class="anime_grid">
+            {% for a in anime %}
+                <div class="anime_card">
+                    <a href="{{ a.mal_url }}" target="_blank">
+                    <figure>
+                        <img  src="{{ a.image_url }}" alt="{{ a.title }}">
+                        <figcaption>⭐ {{ a.score }}</figcaption>
+                    </figure>
+                    </a>
+                    <h2>{{ a.title }}</h2>
+                    <h4>{{ a.alternative_title }}</h4>
+
+                    <p>
+                        {{ a.type }}, {{ a.year }}, {{ a.episodes }} eps, Genres: {{ a.genres }}
+                    </p>
+                    
+                </div>
+        
+            {% endfor %}
         </div>
-   
-        <div class="score_bar">
-            <span class="search_icon">⭐</span>
-            <input type="number" step="0.01" placeholder="Min Score" name="score">
-        </div>
-
-        <div class="year_bar">
-            <span class="search_icon">📆</span>
-            <input type="number" placeholder="Max Year" name="year">
-        </div>
-
-        <div class="type">
-            <input type="checkbox" id="TV" name="type" value="TV">
-            <label for="TV"> TV</label><br>
-        </div>
-        <div class="type">
-            <input type="checkbox" id="MOVIE" name="type" value="MOVIE">
-            <label for="MOVIE"> Movie</label><br>
-        </div>
-
-        {% for g in genre %}
-            <div class="genre">
-                <input type="checkbox" id="{{ g }}" name="genre" value="{{ g }}">
-                <label for="{{ g }}"> {{ g }}</label><br>
-            </div>
-        {% endfor %}
-
-        <input type="submit" value="Submit">
-    </form>
-
-    {% if message %}
-        <p>{{ message }}</p>
-    {% endif %}
-    
-    <div class="anime_grid">
-        {% for a in anime %}
-            <div class="anime_card">
-                <a href="{{ a.mal_url }}" target="_blank">
-                <figure>
-                    <img  src="{{ a.image_url }}" alt="{{ a.title }}">
-                    <figcaption>⭐ {{ a.score }}</figcaption>
-                </figure>
-                </a>
-                <h2>{{ a.title }}</h2>
-                <h4>{{ a.alternative_title }}</h4>
-
-                <p>
-                    {{ a.type }}, {{ a.year }}, {{ a.episodes }} eps, Genres: {{ a.genres }}
-                </p>
-                
-            </div>
-    
-        {% endfor %}
-    </div>
+    </main>
 </body>
 </html>
