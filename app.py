@@ -18,9 +18,9 @@ def random_anime():
 def anime():
     query = request.args.get("search","").lower()
     message = None
-    eps = request.args.get("eps", 0, type=int)
-    score = request.args.get("score", 0, type=float)
-    year = request.args.get("year", 0, type=int)
+    eps = request.args.get("eps", type=int)
+    score = request.args.get("score", type=float)
+    year = request.args.get("year", type=int)
     types = request.args.getlist("type")
     genre = request.args.getlist("genre")
 
@@ -71,7 +71,7 @@ def anime():
     anime_list = anime_list.to_dict(orient='records')
     anime_list = clean_alternative_titles(anime_list)
 
-    return render_template('index1.html', anime=anime_list, message=message, genre=genre_list)
+    return render_template('index1.html', anime=anime_list, message=message, genre=genre_list, query=query, eps=eps, score=score, year=year,)
 
 def clean_alternative_titles(clean_list):
     for data in clean_list:

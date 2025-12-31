@@ -246,22 +246,22 @@
             <form class="search_bar" action="/home" method="get">
                 <div class="search">
                     <span class="search_icon">🔍</span>
-                    <input type="text" placeholder="Search Anime" name="search">
+                    <input type="text" placeholder="Search Anime" name="search" value="{{ query }}">
                 </div>
 
                 <div class="episode_bar">
                     <span class="search_icon">▶️</span>
-                    <input type="number" placeholder="Min Episodes" name="eps">
+                    <input type="number" placeholder="Min Episodes" name="eps" value="{{ eps }}">
                 </div>
         
                 <div class="score_bar">
                     <span class="search_icon">⭐</span>
-                    <input type="number" step="0.01" placeholder="Min Score" name="score">
+                    <input type="number" step="0.01" placeholder="Min Score" name="score" value="{{ score }}">
                 </div>
 
                 <div class="year_bar">
                     <span class="search_icon">📆</span>
-                    <input type="number" placeholder="Max Year" name="year">
+                    <input type="number" placeholder="Max Year" name="year" value="{{ year }}">
                 </div>
 
                 <div class="type">
