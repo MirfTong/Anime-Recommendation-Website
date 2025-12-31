@@ -189,15 +189,42 @@
             color: white;
             background: grey;
             border: 2px solid transparent;
+            cursor: pointer;
         }
 
         a button:hover {
             border-color: white;
         }
+
+        input[type="submit"] {
+            font-family: "Fredoka", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+            font-size: 16px;
+            font-weight: 600;
+            background-color: white;
+            border-radius: 10px;
+            color: #333333;
+            text-align: center;
+            cursor: pointer;
+            margin-top: 10px;
+            display:block;
+        }
+
+        input[type="checkbox"] {
+            font-family: "Fredoka", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+            font-size: 16px;
+            font-weight: 600;
+            border-radius: 10px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+
+        .type {
+            display:inline-block;
+        }
     </style>
 </head>
 <body>
-    <h1>Browse Animes</h1>
+    <h1>🏠 Browse Animes</h1>
     <a href="{{ url_for('random_anime') }}">
         <button>Random Animes</button>
     </a>
@@ -221,6 +248,15 @@
         <div class="year_bar">
             <span class="search_icon">📆</span>
             <input type="number" placeholder="Max Year" name="year">
+        </div>
+
+        <div class="type">
+            <input type="checkbox" id="TV" name="type" value="TV">
+            <label for="TV"> TV</label><br>
+        </div>
+        <div class="type">
+            <input type="checkbox" id="MOVIE" name="type" value="MOVIE">
+            <label for="MOVIE"> Movie</label><br>
         </div>
 
         <input type="submit" value="Submit">

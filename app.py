@@ -20,6 +20,7 @@ def anime():
     eps = request.args.get("eps", 0, type=int)
     score = request.args.get("score", 0, type=float)
     year = request.args.get("year", 0, type=int)
+    types = request.args.getlist("type")
 
     if query:
         anime_list = df[
@@ -35,23 +36,28 @@ def anime():
             anime_list = anime_list[anime_list["score"] >= score]
         if year:
             anime_list = anime_list[anime_list["year"] <= year]
+        if types:
+            anime_list = anime_list[anime_list["type"].isin(types)]
 
     else:   
         anime_list = df
         
-        if (eps or score or year):
+        if (eps or score or year or types):
             if eps:
                 anime_list = anime_list[anime_list["episodes"] >= eps]
             if score:
                 anime_list = anime_list[anime_list["score"] >= score]
             if year:
                 anime_list = anime_list[anime_list["year"] <= year]
+            if types:
+                anime_list = anime_list[anime_list["type"].isin(types)]
 
         else: 
             anime_list = df.sort_values(by="score", ascending=False)[:100].iloc[1:]
         
-        # TODO: Filters for TV/Movie, Year, & Genres
+        # TODO: Filters Genres
     
+    anime_list = anime_list.sort_values(by="score", ascending=False)
     anime_list = anime_list.to_dict(orient='records')
     anime_list = clean_alternative_titles(anime_list)
 
