@@ -34,7 +34,7 @@ def anime():
         if score:
             anime_list = anime_list[anime_list["score"] >= score]
         if year:
-            anime_list = anime_list[anime_list["year"] >= year]
+            anime_list = anime_list[anime_list["year"] <= year]
 
     else:   
         anime_list = df
@@ -45,7 +45,7 @@ def anime():
             if score:
                 anime_list = anime_list[anime_list["score"] >= score]
             if year:
-                anime_list = anime_list[anime_list["year"] >= year]
+                anime_list = anime_list[anime_list["year"] <= year]
 
         else: 
             anime_list = df.sort_values(by="score", ascending=False)[:100].iloc[1:]
