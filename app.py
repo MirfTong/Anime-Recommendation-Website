@@ -14,7 +14,7 @@ def random_anime():
 
     return render_template('index.html', anime=anime_list)
 
-@app.route("/home")
+@app.route("/")
 def anime():
     query = request.args.get("search","").lower()
     message = None
