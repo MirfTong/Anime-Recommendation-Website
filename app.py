@@ -1,82 +1,86 @@
-from flask import Flask, render_template, url_for, request
-import pandas as pd
-import ast
+import os
+
+from dotenv import load_dotenv
+from flask import Flask, render_template, request
+from sqlalchemy import func, or_, select
+
+from models import Anime, db
+
+load_dotenv()
 
 app = Flask(__name__)
-df = pd.read_csv("cleaned_animes.csv")
+app.config["SQLALCHEMY_DATABASE_URI"] = os.environ["DATABASE_URL"]
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+db.init_app(app)
+
 
 @app.route("/random-anime")
-def random_anime(): 
-    anime_list = df.sample(n=6)
-    anime_list = anime_list.to_dict(orient='records')
+def random_anime():
+    anime_list = db.session.scalars(
+        select(Anime).order_by(func.random()).limit(6)
+    ).all()
+    return render_template("index.html", anime=anime_list)
 
-    anime_list = clean_alternative_titles(anime_list)
-
-    return render_template('index.html', anime=anime_list)
 
 @app.route("/")
 def anime():
-    query = request.args.get("search","").lower()
-    message = None
+    query = request.args.get("search", "").strip()
     eps = request.args.get("eps", type=int)
     score = request.args.get("score", type=float)
     year = request.args.get("year", type=int)
     types = request.args.getlist("type")
-    genre = request.args.getlist("genre")
+    genres = request.args.getlist("genre")
 
-    genre_list = df["genres"].apply(ast.literal_eval).explode().dropna().str.strip().unique()
-    genre_list = genre_list[genre_list != "Hentai"]
-    genre_list.sort()
+    genre_list = db.session.scalars(
+        select(func.distinct(func.unnest(Anime.genres)))
+        .where(~Anime.genres.any("Hentai"))
+        .order_by(func.unnest(Anime.genres))
+    ).all()
+
+    statement = select(Anime)
+    has_filters = any((eps, score, year, types, genres))
 
     if query:
-        anime_list = df[
-            df["title"].str.lower().str.contains(query, na=False, regex=False) | 
-            df["alternative_title"].str.lower().str.contains(query, na=False, regex=False)]
+        escaped_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped_query}%"
+        statement = statement.where(
+            or_(
+                Anime.title.ilike(pattern, escape="\\"),
+                Anime.alternative_title.ilike(pattern, escape="\\"),
+            )
+        )
+    if eps:
+        statement = statement.where(Anime.episodes >= eps)
+    if score:
+        statement = statement.where(Anime.score >= score)
+    if year:
+        statement = statement.where(Anime.year <= year)
+    if types:
+        statement = statement.where(Anime.type.in_(types))
+    for genre in genres:
+        statement = statement.where(Anime.genres.any(genre))
 
-        if eps:
-            anime_list = anime_list[anime_list["episodes"] >= eps]
-        if score:
-            anime_list = anime_list[anime_list["score"] >= score]
-        if year:
-            anime_list = anime_list[anime_list["year"] <= year]
-        if types:
-            anime_list = anime_list[anime_list["type"].isin(types)]
-        if genre:
-            for g in genre:
-                anime_list = anime_list[anime_list["genres"].str.contains(g)]
+    if not query and not has_filters:
+        statement = statement.order_by(Anime.score.desc()).offset(1).limit(100)
+    else:
+        statement = statement.order_by(Anime.score.desc())
 
-        if anime_list.empty or (eps or score or year or types or genre):
-            message = f"No results found for '{ query }'"
-    else:   
-        anime_list = df
-        
-        if (eps or score or year or types or genre):
-            if eps:
-                anime_list = anime_list[anime_list["episodes"] >= eps]
-            if score:
-                anime_list = anime_list[anime_list["score"] >= score]
-            if year:
-                anime_list = anime_list[anime_list["year"] <= year]
-            if types:
-                anime_list = anime_list[anime_list["type"].isin(types)]
-            if genre:
-                for g in genre: 
-                    anime_list = anime_list[anime_list["genres"].str.contains(g)]
-           
-        else: 
-            anime_list = df.sort_values(by="score", ascending=False)[:100].iloc[1:]
-            
-    anime_list = anime_list.sort_values(by="score", ascending=False)
-    anime_list = anime_list.to_dict(orient='records')
-    anime_list = clean_alternative_titles(anime_list)
+    anime_list = db.session.scalars(statement).all()
+    message = None
+    if (query or has_filters) and not anime_list:
+        message = f"No results found for '{query}'" if query else "No results found"
 
-    return render_template('index1.html', anime=anime_list, message=message, genre=genre_list, query=query, eps=eps, score=score, year=year)
+    return render_template(
+        "index1.html",
+        anime=anime_list,
+        message=message,
+        genre=genre_list,
+        query=query,
+        eps=eps,
+        score=score,
+        year=year,
+    )
 
-def clean_alternative_titles(clean_list):
-    for data in clean_list:
-        if pd.isna(data.get("alternative_title")):
-            data["alternative_title"] = ""
-    return clean_list
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run(debug=True, port=8000)
