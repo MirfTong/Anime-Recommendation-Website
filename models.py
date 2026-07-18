@@ -18,6 +18,9 @@ class Anime(db.Model):
     __tablename__ = "anime"
 
     animeID: Mapped[int] = mapped_column("anime_id", primary_key=True)
+    # The CSV's anime_id is a dataset row ID. Jikan must use this separate
+    # MyAnimeList ID instead.
+    mal_id: Mapped[int | None] = mapped_column(unique=True, index=True)
     title: Mapped[str] = mapped_column(index=True)
     alternative_title: Mapped[str | None]
     type: Mapped[str] = mapped_column(index=True)

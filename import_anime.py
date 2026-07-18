@@ -2,6 +2,7 @@
 
 import ast
 import csv
+import re
 from pathlib import Path
 
 from sqlalchemy import select
@@ -11,10 +12,19 @@ from app import app
 from models import Anime, AnimeGenre, Genre, db
 
 CSV_PATH = Path(__file__).with_name("cleaned_animes.csv")
+MAL_ID_PATTERN = re.compile(r"/anime/(\d+)")
 
 
 def parse_list(value: str) -> list[str]:
     return ast.literal_eval(value) if value else []
+
+
+def parse_mal_id(mal_url: str) -> int:
+    """Extract the MyAnimeList ID used by the Jikan API from a MAL URL."""
+    match = MAL_ID_PATTERN.search(mal_url)
+    if match is None:
+        raise ValueError(f"Could not extract a MyAnimeList ID from {mal_url!r}")
+    return int(match.group(1))
 
 
 def import_anime() -> tuple[int, int]:
@@ -44,6 +54,7 @@ def import_anime() -> tuple[int, int]:
                 genres = parse_list(row["genres"])
                 anime = anime_by_id.get(anime_id)
                 fields = {
+                    "mal_id": parse_mal_id(row["mal_url"]),
                     "title": row["title"],
                     "alternative_title": row["alternative_title"] or None,
                     "type": row["type"],
