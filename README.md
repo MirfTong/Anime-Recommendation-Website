@@ -60,6 +60,9 @@ season and refreshes the 1,000 anime that have gone longest without a Jikan
 sync. Each successful refresh updates its rating and timestamp, so later runs
 rotate through the full catalogue.
 
+The importer stores the CSV dataset row ID and the MyAnimeList ID separately.
+Jikan requests always use the MyAnimeList ID parsed from `mal_url`.
+
 Before enabling the workflow, add a repository Actions secret named
 `DATABASE_URL` containing the external Render PostgreSQL URL. Do not commit
 that URL to the repository.

@@ -108,8 +108,12 @@ def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) 
 def _new_anime(data: dict[str, Any]) -> Anime:
     """Create a row from Jikan data, including safe values for sparse records."""
     images = (data.get("images") or {}).get("jpg") or {}
+    mal_id = data["mal_id"]
     return Anime(
-        animeID=data["mal_id"],
+        # Dataset row IDs are positive. Negative IDs keep seasonal additions
+        # distinct without colliding with rows imported from the CSV.
+        animeID=-mal_id,
+        mal_id=mal_id,
         title=data.get("title") or f"MAL anime {data['mal_id']}",
         alternative_title=data.get("title_english") or data.get("title_japanese"),
         type=data.get("type") or "Unknown",
@@ -135,6 +139,15 @@ def _ensure_schema() -> None:
         text(
             "ALTER TABLE anime ADD COLUMN IF NOT EXISTS "
             "last_jikan_sync TIMESTAMP WITH TIME ZONE"
+        )
+    )
+    db.session.execute(
+        text("ALTER TABLE anime ADD COLUMN IF NOT EXISTS mal_id INTEGER")
+    )
+    db.session.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_anime_mal_id "
+            "ON anime (mal_id)"
         )
     )
     db.session.commit()
@@ -178,7 +191,10 @@ def refresh_catalogue(
         updated = skipped = 0
         for anime in anime_rows:
             try:
-                payload = fetch_anime(anime.animeID)
+                if anime.mal_id is None:
+                    skipped += 1
+                    continue
+                payload = fetch_anime(anime.mal_id)
             except HTTPError as error:
                 if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
                     db.session.rollback()
@@ -189,7 +205,7 @@ def refresh_catalogue(
             data = payload.get("data")
             if not isinstance(data, dict):
                 db.session.rollback()
-                raise ValueError(f"Jikan returned no anime data for MAL ID {anime.animeID}")
+                raise ValueError(f"Jikan returned no anime data for MAL ID {anime.mal_id}")
             _update_anime(anime, data, genres)
             updated += 1
             if updated % batch_size == 0:
@@ -226,10 +242,10 @@ def sync_season(
     with app.app_context():
         _ensure_schema()
         existing = {
-            anime.animeID: anime
+            anime.mal_id: anime
             for anime in db.session.scalars(
                 select(Anime)
-                .where(Anime.animeID.in_(seasonal_ids))
+                .where(Anime.mal_id.in_(seasonal_ids))
                 .options(selectinload(Anime.genre_links).selectinload(AnimeGenre.genre))
             )
         }
