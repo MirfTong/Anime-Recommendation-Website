@@ -61,8 +61,13 @@
             text-decoration: none;
         }
 
-        img {
+        .anime_card img {
+            display: block;
+            width: min(100%, 225px);
+            height: 320px;
+            margin: 0 auto;
             border-radius: 8px;
+            object-fit: cover;
         }
 
         figcaption {
@@ -102,7 +107,9 @@
                 <a href="{{ a.mal_url }}" target="_blank">
                 <figure>
                     <img  src="{{ a.image_url }}" alt="{{ a.title }}">
-                    <figcaption>⭐ {{ a.score }}</figcaption>
+                    <figcaption>
+                        ⭐ {% if a.score is not none %}{{ "%.2f"|format(a.score) }}{% else %}Not yet rated{% endif %}
+                    </figcaption>
                 </figure>
                 </a>
                 <h2>{{ a.title }}</h2>
