@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import warnings
 from collections import deque
 from collections.abc import Callable
 from typing import Any
@@ -43,7 +44,7 @@ class JikanClient:
         self._lock = threading.Lock()
 
     def get_anime_full(self, mal_id: int) -> dict[str, Any]:
-        """Return the parsed response from ``GET /anime/{mal_id}/full``.
+        """Return Jikan anime data, preferring ``GET /anime/{mal_id}/full``.
 
         Rate-limit and temporary server errors are retried up to
         ``MAX_429_RETRIES`` times. A 429 response honors the server's
@@ -52,7 +53,17 @@ class JikanClient:
         if isinstance(mal_id, bool) or not isinstance(mal_id, int) or mal_id <= 0:
             raise ValueError("mal_id must be a positive integer")
 
-        return self._get(f"/anime/{mal_id}/full")
+        try:
+            # The full endpoint occasionally times out while the basic anime
+            # endpoint remains available. Do not delay a catalogue sync when
+            # that happens; the basic response contains the fields we store.
+            return self._get(
+                f"/anime/{mal_id}/full", retryable_status_codes=frozenset({429})
+            )
+        except HTTPError as error:
+            if error.code not in RETRYABLE_STATUS_CODES - {429}:
+                raise
+            return self._get(f"/anime/{mal_id}")
 
     def get_season_anime(
         self, year: int | None = None, season: str | None = None
@@ -64,10 +75,25 @@ class JikanClient:
             raise ValueError("season must be winter, spring, summer, or fall")
 
         path = "/seasons/now" if year is None else f"/seasons/{year}/{season}"
+        # Jikan's current-season endpoint serves its first page without a query
+        # string; some deployments return a 504 for the equivalent ``?page=1``.
+        # Keep the first request query-free, then paginate normally if needed.
         page = 1
         anime: list[dict[str, Any]] = []
         while True:
-            payload = self._get(f"{path}?page={page}")
+            request_path = path if page == 1 else f"{path}?page={page}"
+            try:
+                payload = self._get(request_path)
+            except HTTPError as error:
+                if year is None and page > 1 and error.code in RETRYABLE_STATUS_CODES:
+                    warnings.warn(
+                        "Jikan could not return additional current-season pages; "
+                        "using the available first page.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    return anime
+                raise
             data = payload.get("data")
             if not isinstance(data, list):
                 raise ValueError("Jikan seasonal response did not contain an anime list")
@@ -76,7 +102,12 @@ class JikanClient:
                 return anime
             page += 1
 
-    def _get(self, path: str) -> dict[str, Any]:
+    def _get(
+        self,
+        path: str,
+        *,
+        retryable_status_codes: frozenset[int] = RETRYABLE_STATUS_CODES,
+    ) -> dict[str, Any]:
         """Fetch one Jikan JSON response, applying retries and rate limits."""
         url = f"{BASE_URL}{path}"
         for attempt in range(MAX_429_RETRIES + 1):
@@ -86,7 +117,7 @@ class JikanClient:
                 with self._opener(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                     return json.load(response)
             except HTTPError as error:
-                if error.code not in RETRYABLE_STATUS_CODES or attempt == MAX_429_RETRIES:
+                if error.code not in retryable_status_codes or attempt == MAX_429_RETRIES:
                     error.close()
                     raise
                 delay = self._retry_delay(error, attempt)

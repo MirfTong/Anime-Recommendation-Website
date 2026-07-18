@@ -24,6 +24,9 @@ from jikan_client import get_anime_full, get_season_anime
 from models import Anime, AnimeGenre, Genre, db
 
 
+SKIPPABLE_JIKAN_STATUS_CODES = frozenset({404, 500, 502, 503, 504})
+
+
 def _names(entries: list[dict[str, Any]] | None) -> list[str]:
     """Return unique, non-empty Jikan category names in API order."""
     return list(
@@ -66,9 +69,11 @@ def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) 
         or jpg_images.get("image_url")
         or anime.image_url
     )
-    anime.sequel = any(
-        relation.get("relation") == "Sequel" for relation in data.get("relations") or []
-    )
+    if "relations" in data:
+        anime.sequel = any(
+            relation.get("relation") == "Sequel"
+            for relation in data.get("relations") or []
+        )
 
     genre_names = _names(data.get("genres"))
     if genre_names:
@@ -127,8 +132,8 @@ def refresh_catalogue(
 ) -> tuple[int, int]:
     """Fetch and update existing anime rows; return ``(updated, skipped)``.
 
-    A missing Jikan record (HTTP 404) is skipped. Other HTTP errors are raised
-    so an operator can retry the command instead of silently losing updates.
+    Missing records and temporary Jikan failures are skipped after the client's
+    retries. Other HTTP errors are raised for operator attention.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -153,7 +158,7 @@ def refresh_catalogue(
             try:
                 payload = fetch_anime(anime.animeID)
             except HTTPError as error:
-                if error.code != 404:
+                if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
                     db.session.rollback()
                     raise
                 skipped += 1
@@ -212,7 +217,7 @@ def sync_season(
             try:
                 payload = fetch_anime(mal_id)
             except HTTPError as error:
-                if error.code != 404:
+                if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
                     db.session.rollback()
                     raise
                 skipped += 1

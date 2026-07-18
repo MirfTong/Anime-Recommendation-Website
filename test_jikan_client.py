@@ -90,7 +90,7 @@ class JikanClientTests(unittest.TestCase):
         self.assertEqual(
             requested_urls,
             [
-                "https://api.jikan.moe/v4/seasons/2026/summer?page=1",
+                "https://api.jikan.moe/v4/seasons/2026/summer",
                 "https://api.jikan.moe/v4/seasons/2026/summer?page=2",
             ],
         )
