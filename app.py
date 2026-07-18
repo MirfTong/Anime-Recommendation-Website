@@ -17,7 +17,10 @@ db.init_app(app)
 @app.route("/random-anime")
 def random_anime():
     anime_list = db.session.scalars(
-        select(Anime).order_by(func.random()).limit(6)
+        select(Anime)
+        .where(Anime.score.is_not(None))
+        .order_by(func.random())
+        .limit(6)
     ).all()
     return render_template("index.html", anime=anime_list)
 
@@ -35,7 +38,9 @@ def anime():
         select(Genre.name).where(Genre.name != "Hentai").order_by(Genre.name)
     ).all()
 
-    statement = select(Anime)
+    # Unreleased shows often have no score yet and should not appear in
+    # recommendation/browse cards until Jikan publishes one.
+    statement = select(Anime).where(Anime.score.is_not(None))
     has_filters = any((eps, score, year, types, genres))
 
     if query:
