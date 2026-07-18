@@ -1,6 +1,6 @@
 import unittest
 
-from jikan_etl import _detailed_genres, _names
+from jikan_etl import _detailed_genres, _names, _valid_score
 
 
 class JikanEtlTests(unittest.TestCase):
@@ -21,6 +21,11 @@ class JikanEtlTests(unittest.TestCase):
             _detailed_genres(data, ["existing tag", "action"]),
             ["existing tag", "action", "school", "shounen"],
         )
+
+    def test_treats_jikan_zero_as_an_unknown_score(self):
+        self.assertEqual(_valid_score(8.25), 8.25)
+        self.assertIsNone(_valid_score(0))
+        self.assertIsNone(_valid_score(None))
 
 
 if __name__ == "__main__":

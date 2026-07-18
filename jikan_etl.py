@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Iterable
+from datetime import datetime, timezone
 from typing import Any
 from urllib.error import HTTPError
 
@@ -46,6 +47,13 @@ def _detailed_genres(data: dict[str, Any], current: list[str]) -> list[str]:
     return list(dict.fromkeys([*current, *jikan_names]))
 
 
+def _valid_score(value: Any) -> float | None:
+    """Return a published Jikan score; Jikan uses zero for an unknown score."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(value)
+
+
 def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) -> None:
     """Map a Jikan ``data`` object onto one existing ``Anime`` row."""
     anime.title = data.get("title") or anime.title
@@ -56,7 +64,9 @@ def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) 
     )
     anime.type = data.get("type") or anime.type
     anime.year = data.get("year") or anime.year
-    anime.score = data.get("score") if data.get("score") is not None else anime.score
+    score = _valid_score(data.get("score"))
+    if score is not None:
+        anime.score = score
     anime.episodes = (
         data.get("episodes") if data.get("episodes") is not None else anime.episodes
     )
@@ -92,6 +102,7 @@ def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) 
                 db.session.delete(link)
 
     anime.genres_detailed = _detailed_genres(data, anime.genres_detailed)
+    anime.last_jikan_sync = datetime.now(timezone.utc)
 
 
 def _new_anime(data: dict[str, Any]) -> Anime:
@@ -103,7 +114,7 @@ def _new_anime(data: dict[str, Any]) -> Anime:
         alternative_title=data.get("title_english") or data.get("title_japanese"),
         type=data.get("type") or "Unknown",
         year=data.get("year"),
-        score=data.get("score"),
+        score=_valid_score(data.get("score")),
         episodes=data.get("episodes"),
         mal_url=data.get("url") or f"https://myanimelist.net/anime/{data['mal_id']}",
         sequel=False,
@@ -120,6 +131,12 @@ def _ensure_schema() -> None:
         db.session.execute(
             text(f"ALTER TABLE anime ALTER COLUMN {column} DROP NOT NULL")
         )
+    db.session.execute(
+        text(
+            "ALTER TABLE anime ADD COLUMN IF NOT EXISTS "
+            "last_jikan_sync TIMESTAMP WITH TIME ZONE"
+        )
+    )
     db.session.commit()
 
 
@@ -147,7 +164,12 @@ def refresh_catalogue(
         )
         if anime_ids is not None:
             statement = statement.where(Anime.animeID.in_(list(anime_ids)))
-        statement = statement.order_by(Anime.animeID)
+        if anime_ids is None:
+            statement = statement.order_by(
+                Anime.last_jikan_sync.asc().nullsfirst(), Anime.animeID
+            )
+        else:
+            statement = statement.order_by(Anime.animeID)
         if limit is not None:
             statement = statement.limit(limit)
         anime_rows = list(db.session.scalars(statement))

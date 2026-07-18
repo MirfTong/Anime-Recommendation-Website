@@ -1,0 +1,25 @@
+name: Weekly Jikan sync
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Import the current season
+        run: python jikan_etl.py --season current
+      - name: Refresh the oldest catalogue records
+        run: python jikan_etl.py --limit 1000
