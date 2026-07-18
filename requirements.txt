@@ -14,6 +14,8 @@ flask-sqlalchemy==3.1.1
     # via anime-rec (pyproject.toml)
 greenlet==3.5.3
     # via sqlalchemy
+gunicorn==26.0.0
+    # via anime-rec (pyproject.toml)
 itsdangerous==2.2.0
     # via flask
 jinja2==3.1.6
@@ -23,6 +25,8 @@ markupsafe==3.0.3
     #   flask
     #   jinja2
     #   werkzeug
+packaging==26.2
+    # via gunicorn
 psycopg2-binary==2.9.12
     # via anime-rec (pyproject.toml)
 python-dotenv==1.2.2
