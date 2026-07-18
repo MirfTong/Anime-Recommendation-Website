@@ -3,6 +3,8 @@ name: Daily Jikan sync
 on:
   schedule:
     - cron: "0 4 * * *"
+    # A second, non-overlapping batch to refresh the catalogue faster.
+    - cron: "0 10 * * *"
   workflow_dispatch:
 
 jobs:
