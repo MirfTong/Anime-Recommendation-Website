@@ -53,6 +53,17 @@ For a historical season, specify both its name and year, for example
 `--season fall --year 2025`. Airing shows with an unknown score, year, or
 episode count are stored with those fields empty until Jikan provides them.
 
+## Weekly GitHub Actions sync
+
+The weekly workflow in `.github/workflows/jikan-sync.yml` imports the current
+season and refreshes the 1,000 anime that have gone longest without a Jikan
+sync. Each successful refresh updates its rating and timestamp, so later runs
+rotate through the full catalogue.
+
+Before enabling the workflow, add a repository Actions secret named
+`DATABASE_URL` containing the external Render PostgreSQL URL. Do not commit
+that URL to the repository.
+
 ## Tech stack
 
 - Python and Flask

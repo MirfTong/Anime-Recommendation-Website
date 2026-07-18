@@ -1,4 +1,6 @@
-from sqlalchemy import ForeignKey, String
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -23,6 +25,7 @@ class Anime(db.Model):
     year: Mapped[int | None] = mapped_column(index=True)
     score: Mapped[float | None] = mapped_column(index=True)
     episodes: Mapped[int | None] = mapped_column(index=True)
+    last_jikan_sync: Mapped[datetime | None] = mapped_column(index=True)
     mal_url: Mapped[str]
     sequel: Mapped[bool]
     image_url: Mapped[str]
