@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from flask import Flask, render_template, request
 from sqlalchemy import func, or_, select
 
-from models import Anime, db
+from models import Anime, Genre, db
 
 load_dotenv()
 
@@ -32,9 +32,7 @@ def anime():
     genres = request.args.getlist("genre")
 
     genre_list = db.session.scalars(
-        select(func.distinct(func.unnest(Anime.genres)))
-        .where(~Anime.genres.any("Hentai"))
-        .order_by(func.unnest(Anime.genres))
+        select(Genre.name).where(Genre.name != "Hentai").order_by(Genre.name)
     ).all()
 
     statement = select(Anime)
@@ -58,7 +56,7 @@ def anime():
     if types:
         statement = statement.where(Anime.type.in_(types))
     for genre in genres:
-        statement = statement.where(Anime.genres.any(genre))
+        statement = statement.where(Anime.genre_entries.any(Genre.name == genre))
 
     if not query and not has_filters:
         statement = statement.order_by(Anime.score.desc()).offset(1).limit(100)

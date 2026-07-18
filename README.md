@@ -6,7 +6,8 @@ https://kyoquan.onrender.com/
 
 A Flask web application for exploring anime by genres, ratings, episode counts,
 and other metadata. PostgreSQL is the runtime data store; the cleaned CSV is
-used only for the one-time local import.
+used only for the idempotent local import. Genres are stored in normalized
+`genre` and `anime_genre` tables.
 
 ## Local setup
 
@@ -24,8 +25,33 @@ used only for the one-time local import.
    .\.venv\Scripts\python.exe app.py
    ```
 
-The importer will not overwrite an existing `anime` table. Empty the table
-explicitly if a replacement import is intended.
+The importer can be run repeatedly. It updates existing anime by ID and uses
+unique keys for genres and anime-genre associations, so it does not create
+duplicates.
+
+## Refreshing from Jikan
+
+`jikan_etl.py` refreshes the anime already in PostgreSQL from Jikan's
+rate-limited public API. Start with one known MyAnimeList ID:
+
+```powershell
+.\.venv\Scripts\python.exe jikan_etl.py --anime-id 1
+```
+
+To refresh the complete catalogue, run `.\.venv\Scripts\python.exe
+jikan_etl.py`. The client honours Jikan's public limits, so a full refresh can
+take several hours.
+
+To discover and save anime from the current season, including season 2 and
+later sequels, run:
+
+```powershell
+.\.venv\Scripts\python.exe jikan_etl.py --season current
+```
+
+For a historical season, specify both its name and year, for example
+`--season fall --year 2025`. Airing shows with an unknown score, year, or
+episode count are stored with those fields empty until Jikan provides them.
 
 ## Tech stack
 
