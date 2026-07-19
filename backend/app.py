@@ -11,7 +11,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
-from models import Anime, Genre, db
+from backend.models import Anime, Genre, db
 
 
 load_dotenv()
@@ -22,7 +22,8 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(app)
 
 API_PREFIX = "/api/v1"
-FRONTEND_BUILD_DIR = Path(app.static_folder) / "react"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+FRONTEND_BUILD_DIR = PROJECT_ROOT / "static" / "react"
 MAX_PAGE_SIZE = 100
 
 

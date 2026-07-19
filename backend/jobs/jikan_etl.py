@@ -2,11 +2,11 @@ r"""Refresh the existing anime catalogue from Jikan's full-anime endpoint.
 
 Run a small trial first:
 
-    .\.venv\Scripts\python.exe jikan_etl.py --anime-id 1
+    .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --anime-id 1
 
 Run the full catalogue only when ready (it is intentionally rate-limited):
 
-    .\.venv\Scripts\python.exe jikan_etl.py
+    .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl
 """
 
 from __future__ import annotations
@@ -20,9 +20,13 @@ from urllib.error import HTTPError
 from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 
-from app import app
-from jikan_client import JikanTemporaryError, get_anime_full, get_season_anime
-from models import Anime, AnimeGenre, Genre, db
+from backend.app import app
+from backend.models import Anime, AnimeGenre, Genre, db
+from backend.services.jikan_client import (
+    JikanTemporaryError,
+    get_anime_full,
+    get_season_anime,
+)
 
 
 SKIPPABLE_JIKAN_STATUS_CODES = frozenset({404, 500, 502, 503, 504})
@@ -153,6 +157,30 @@ def _ensure_schema() -> None:
     db.session.commit()
 
 
+def _fetch_anime_data(
+    mal_id: int, fetch_anime: Callable[[int], dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Fetch one Jikan anime record, returning ``None`` for skippable failures."""
+    try:
+        payload = fetch_anime(mal_id)
+    except JikanTemporaryError:
+        return None
+    except HTTPError as error:
+        if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
+            db.session.rollback()
+            raise
+        return None
+
+    data = payload.get("data")
+    return data if isinstance(data, dict) else None
+
+
+def _commit_completed_batch(saved_count: int, batch_size: int) -> None:
+    """Commit each completed batch of successfully saved anime records."""
+    if saved_count % batch_size == 0:
+        db.session.commit()
+
+
 def refresh_catalogue(
     anime_ids: Iterable[int] | None = None,
     *,
@@ -190,29 +218,17 @@ def refresh_catalogue(
 
         updated = skipped = 0
         for anime in anime_rows:
-            try:
-                if anime.mal_id is None:
-                    skipped += 1
-                    continue
-                payload = fetch_anime(anime.mal_id)
-            except (HTTPError, JikanTemporaryError) as error:
-                if isinstance(error, JikanTemporaryError):
-                    skipped += 1
-                    continue
-                if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
-                    db.session.rollback()
-                    raise
+            if anime.mal_id is None:
                 skipped += 1
                 continue
 
-            data = payload.get("data")
-            if not isinstance(data, dict):
+            data = _fetch_anime_data(anime.mal_id, fetch_anime)
+            if data is None:
                 skipped += 1
                 continue
             _update_anime(anime, data, genres)
             updated += 1
-            if updated % batch_size == 0:
-                db.session.commit()
+            _commit_completed_batch(updated, batch_size)
 
         db.session.commit()
         return updated, skipped
@@ -255,19 +271,8 @@ def sync_season(
         genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
         saved = skipped = 0
         for mal_id in seasonal_ids:
-            try:
-                payload = fetch_anime(mal_id)
-            except (HTTPError, JikanTemporaryError) as error:
-                if isinstance(error, JikanTemporaryError):
-                    skipped += 1
-                    continue
-                if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
-                    db.session.rollback()
-                    raise
-                skipped += 1
-                continue
-            data = payload.get("data")
-            if not isinstance(data, dict):
+            data = _fetch_anime_data(mal_id, fetch_anime)
+            if data is None:
                 skipped += 1
                 continue
             anime = existing.get(mal_id)
@@ -277,8 +282,7 @@ def sync_season(
                 existing[mal_id] = anime
             _update_anime(anime, data, genres)
             saved += 1
-            if saved % batch_size == 0:
-                db.session.commit()
+            _commit_completed_batch(saved, batch_size)
         db.session.commit()
         return saved, skipped
 

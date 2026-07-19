@@ -1,98 +1,98 @@
 # Anime Recommendation Website
 
-https://kyoquan.onrender.com/
+<https://kyoquan.onrender.com/>
 
-## About
+A React single-page application backed by a Flask REST API for exploring an
+anime catalogue by genre, rating, episode count, and other metadata. PostgreSQL
+is the runtime data store, and Jikan is the sole catalogue source.
 
-A React single-page application backed by a Flask REST API for exploring anime
-by genres, ratings, episode counts, and other metadata. PostgreSQL is the
-runtime data store; the cleaned CSV is used only for the idempotent local
-import. Genres are stored in normalized `genre` and `anime_genre` tables.
+## Project layout
+
+```text
+backend/             Flask application, models, Jikan client, and sync jobs
+frontend/            React and Vite source
+tests/               Backend test suite
+.github/workflows/   Scheduled Jikan sync
+static/react/        Generated React build output (not committed)
+```
 
 ## Local setup
 
 1. Create `.env` from `.env.example` and set `DATABASE_URL`.
-2. Install dependencies with `uv sync` (or use the included virtual environment).
-3. Create the schema and import the cleaned source data:
-
-   ```powershell
-   .\.venv\Scripts\python.exe import_anime.py
-   ```
-
-4. Install and build the React frontend:
+2. Install Python dependencies with `uv sync` (or use the included virtual
+   environment).
+3. Install and build the frontend:
 
    ```powershell
    npm --prefix frontend install
    npm --prefix frontend run build
    ```
 
-5. Run the app:
+4. Seed the catalogue from the current season:
 
    ```powershell
-   .\.venv\Scripts\python.exe app.py
+   .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --season current
    ```
 
-The built React app is served by Flask at `/`. Flask's JSON API is available
-under `/api/v1`:
+5. Run the API and React host:
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m backend.app
+   ```
+
+For production, use `gunicorn backend.app:app` after building the frontend.
+
+## API
+
+Flask serves the React application at `/`; its JSON API is available under
+`/api/v1`:
 
 - `GET /api/v1/anime` — paginated search and filters (`q`, `min_score`,
   `min_year`, `max_year`, `min_episodes`, `type`, and `genre`)
 - `GET /api/v1/anime/random?limit=6` — random rated anime
-- `GET /api/v1/anime/<mal_id>` — one detailed anime record
+- `GET /api/v1/anime/<mal_id>` — a detailed anime record
 - `GET /api/v1/genres` — available genre filters
 
-For Render, set the build command to:
+## Jikan catalogue sync
+
+The catalogue is populated and refreshed by `backend.jobs.jikan_etl`. To add
+the current season, including sequels:
+
+```powershell
+.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --season current
+```
+
+For a historical season, pass both its name and year, for example
+`--season fall --year 2025`. To refresh the existing catalogue, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --limit 500
+```
+
+Jikan calls are rate-limited. Airing shows with an unknown score, year, or
+episode count are stored with those fields empty until Jikan provides them.
+
+## Scheduled sync
+
+The GitHub Actions workflow runs every three hours. It imports the current
+season and then refreshes the 500 anime that have gone longest without a Jikan
+sync. Before enabling it, add a repository Actions secret named `DATABASE_URL`
+with the external PostgreSQL URL.
+
+For Render, use this build command:
 
 ```bash
 npm --prefix frontend ci && npm --prefix frontend run build && pip install -r requirements.txt
 ```
 
-The importer can be run repeatedly. It updates existing anime by ID and uses
-unique keys for genres and anime-genre associations, so it does not create
-duplicates.
-
-## Refreshing from Jikan
-
-`jikan_etl.py` refreshes the anime already in PostgreSQL from Jikan's
-rate-limited public API. Start with one known MyAnimeList ID:
+## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe jikan_etl.py --anime-id 1
+.\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
-
-To refresh the complete catalogue, run `.\.venv\Scripts\python.exe
-jikan_etl.py`. The client honours Jikan's public limits, so a full refresh can
-take several hours.
-
-To discover and save anime from the current season, including season 2 and
-later sequels, run:
-
-```powershell
-.\.venv\Scripts\python.exe jikan_etl.py --season current
-```
-
-For a historical season, specify both its name and year, for example
-`--season fall --year 2025`. Airing shows with an unknown score, year, or
-episode count are stored with those fields empty until Jikan provides them.
-
-## Daily GitHub Actions sync
-
-The daily workflow in `.github/workflows/jikan-sync.yml` imports the current
-season and refreshes the 1,000 anime that have gone longest without a Jikan
-sync. Each successful refresh updates its rating and timestamp, so later runs
-rotate through the full catalogue.
-
-The importer stores the CSV dataset row ID and the MyAnimeList ID separately.
-Jikan requests always use the MyAnimeList ID parsed from `mal_url`.
-
-Before enabling the workflow, add a repository Actions secret named
-`DATABASE_URL` containing the external Render PostgreSQL URL. Do not commit
-that URL to the repository.
 
 ## Tech stack
 
-- Python and Flask
-- Flask-SQLAlchemy / SQLAlchemy
-- PostgreSQL
-- HTML and CSS with Jinja templates
-- CSV source: [User Anime List Dataset](https://www.kaggle.com/datasets/ramazanturann/user-animelist-dataset)
+- Python, Flask, Flask-SQLAlchemy, and PostgreSQL
+- Jikan v4 API
+- React, Vite, Tailwind CSS
