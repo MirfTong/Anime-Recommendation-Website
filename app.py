@@ -1,10 +1,18 @@
+"""Flask REST API and single-service React application host."""
+
+from __future__ import annotations
+
 import os
+from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask, render_template, request
+from flask import Flask, jsonify, request, send_from_directory
 from sqlalchemy import func, or_, select
+from sqlalchemy.orm import selectinload
 
 from models import Anime, Genre, db
+
 
 load_dotenv()
 
@@ -13,37 +21,107 @@ app.config["SQLALCHEMY_DATABASE_URI"] = os.environ["DATABASE_URL"]
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(app)
 
-
-@app.route("/random-anime")
-def random_anime():
-    anime_list = db.session.scalars(
-        select(Anime)
-        .where(Anime.score.is_not(None))
-        .order_by(func.random())
-        .limit(6)
-    ).all()
-    return render_template("index.html", anime=anime_list)
+API_PREFIX = "/api/v1"
+FRONTEND_BUILD_DIR = Path(app.static_folder) / "react"
+MAX_PAGE_SIZE = 100
 
 
-@app.route("/")
-def anime():
-    query = request.args.get("search", "").strip()
-    eps = request.args.get("eps", type=int)
-    score = request.args.get("score", type=float)
-    min_year = request.args.get("min_year", type=int)
-    year = request.args.get("year", type=int)
-    types = request.args.getlist("type")
-    genres = request.args.getlist("genre")
+class ApiError(Exception):
+    """A validation error that should be returned as JSON."""
 
-    genre_list = db.session.scalars(
-        select(Genre.name).where(Genre.name != "Hentai").order_by(Genre.name)
-    ).all()
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        self.message = message
+        self.status_code = status_code
 
-    # Unreleased shows often have no score yet and should not appear in
-    # recommendation/browse cards until Jikan publishes one.
-    statement = select(Anime).where(Anime.score.is_not(None))
-    has_filters = any((eps, score, min_year, year, types, genres))
 
+@app.errorhandler(ApiError)
+def handle_api_error(error: ApiError):
+    return jsonify({"error": {"message": error.message}}), error.status_code
+
+
+@app.errorhandler(404)
+def handle_not_found(_error):
+    if request.path.startswith(API_PREFIX):
+        return jsonify({"error": {"message": "Resource not found"}}), 404
+    return _error
+
+
+def _integer_argument(name: str, *, minimum: int, maximum: int | None = None) -> int | None:
+    value = request.args.get(name)
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ApiError(f"{name} must be an integer") from error
+    if parsed < minimum or (maximum is not None and parsed > maximum):
+        limit = f" between {minimum} and {maximum}" if maximum is not None else f" at least {minimum}"
+        raise ApiError(f"{name} must be{limit}")
+    return parsed
+
+
+def _float_argument(name: str, *, minimum: float, maximum: float) -> float | None:
+    value = request.args.get(name)
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise ApiError(f"{name} must be a number") from error
+    if not minimum <= parsed <= maximum:
+        raise ApiError(f"{name} must be between {minimum} and {maximum}")
+    return parsed
+
+
+def _list_argument(name: str) -> list[str]:
+    """Read repeatable and comma-separated filter parameters."""
+    values = []
+    for raw_value in request.args.getlist(name):
+        values.extend(value.strip() for value in raw_value.split(",") if value.strip())
+    return list(dict.fromkeys(values))
+
+
+def _serialize_anime(anime: Anime, *, detailed: bool = False) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": anime.animeID,
+        "mal_id": anime.mal_id,
+        "title": anime.title,
+        "alternative_title": anime.alternative_title,
+        "type": anime.type,
+        "year": anime.year,
+        "score": anime.score,
+        "episodes": anime.episodes,
+        "image_url": anime.image_url,
+        "mal_url": anime.mal_url,
+        "sequel": anime.sequel,
+        "genres": [genre.name for genre in anime.genre_entries],
+    }
+    if detailed:
+        payload["genres_detailed"] = anime.genres_detailed
+        payload["last_jikan_sync"] = (
+            anime.last_jikan_sync.isoformat() if anime.last_jikan_sync else None
+        )
+    return payload
+
+
+def _anime_statement():
+    """Base browse query with the relationships required for API serialization."""
+    return select(Anime).options(selectinload(Anime.genre_entries))
+
+
+def _filtered_anime_statement():
+    query = request.args.get("q", "").strip()
+    min_score = _float_argument("min_score", minimum=0, maximum=10)
+    min_year = _integer_argument("min_year", minimum=1, maximum=3000)
+    max_year = _integer_argument("max_year", minimum=1, maximum=3000)
+    min_episodes = _integer_argument("min_episodes", minimum=1, maximum=10000)
+    anime_types = _list_argument("type")
+    genres = _list_argument("genre")
+
+    if min_year is not None and max_year is not None and min_year > max_year:
+        raise ApiError("min_year cannot be greater than max_year")
+
+    statement = _anime_statement().where(Anime.score.is_not(None))
     if query:
         escaped_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         pattern = f"%{escaped_query}%"
@@ -53,40 +131,89 @@ def anime():
                 Anime.alternative_title.ilike(pattern, escape="\\"),
             )
         )
-    if eps:
-        statement = statement.where(Anime.episodes >= eps)
-    if score:
-        statement = statement.where(Anime.score >= score)
-    if min_year:
+    if min_score is not None:
+        statement = statement.where(Anime.score >= min_score)
+    if min_year is not None:
         statement = statement.where(Anime.year >= min_year)
-    if year:
-        statement = statement.where(Anime.year <= year)
-    if types:
-        statement = statement.where(Anime.type.in_(types))
+    if max_year is not None:
+        statement = statement.where(Anime.year <= max_year)
+    if min_episodes is not None:
+        statement = statement.where(Anime.episodes >= min_episodes)
+    if anime_types:
+        statement = statement.where(Anime.type.in_(anime_types))
     for genre in genres:
         statement = statement.where(Anime.genre_entries.any(Genre.name == genre))
+    return statement
 
-    if not query and not has_filters:
-        statement = statement.order_by(Anime.score.desc()).offset(1).limit(100)
-    else:
-        statement = statement.order_by(Anime.score.desc())
 
-    anime_list = db.session.scalars(statement).all()
-    message = None
-    if (query or has_filters) and not anime_list:
-        message = f"No results found for '{query}'" if query else "No results found"
-
-    return render_template(
-        "index1.html",
-        anime=anime_list,
-        message=message,
-        genre=genre_list,
-        query=query,
-        eps=eps,
-        score=score,
-        min_year=min_year,
-        year=year,
+@app.get(f"{API_PREFIX}/anime")
+def list_anime():
+    """Search and filter anime with score-sorted pagination."""
+    page = _integer_argument("page", minimum=1) or 1
+    per_page = _integer_argument("per_page", minimum=1, maximum=MAX_PAGE_SIZE) or 24
+    statement = _filtered_anime_statement()
+    total = db.session.scalar(select(func.count()).select_from(statement.order_by(None).subquery()))
+    items = db.session.scalars(
+        statement.order_by(Anime.score.desc(), Anime.title).offset((page - 1) * per_page).limit(per_page)
+    ).all()
+    return jsonify(
+        {
+            "items": [_serialize_anime(anime) for anime in items],
+            "pagination": {
+                "page": page,
+                "per_page": per_page,
+                "total": total or 0,
+                "pages": ((total or 0) + per_page - 1) // per_page,
+            },
+        }
     )
+
+
+@app.get(f"{API_PREFIX}/anime/random")
+def random_anime():
+    """Return a small random selection of rated anime."""
+    limit = _integer_argument("limit", minimum=1, maximum=12) or 6
+    anime = db.session.scalars(
+        _anime_statement()
+        .where(Anime.score.is_not(None))
+        .order_by(func.random())
+        .limit(limit)
+    ).all()
+    return jsonify({"items": [_serialize_anime(entry) for entry in anime]})
+
+
+@app.get(f"{API_PREFIX}/anime/<int:mal_id>")
+def anime_detail(mal_id: int):
+    """Return the full record for one MyAnimeList anime ID."""
+    anime = db.session.scalar(
+        _anime_statement().where(Anime.mal_id == mal_id)
+    )
+    if anime is None:
+        raise ApiError("Anime not found", 404)
+    return jsonify({"item": _serialize_anime(anime, detailed=True)})
+
+
+@app.get(f"{API_PREFIX}/genres")
+def list_genres():
+    genres = db.session.scalars(
+        select(Genre.name).where(Genre.name != "Hentai").order_by(Genre.name)
+    ).all()
+    return jsonify({"items": genres})
+
+
+@app.get("/")
+@app.get("/<path:path>")
+def react_app(path: str = ""):
+    """Serve the built React app and let its router handle browser routes."""
+    requested_file = FRONTEND_BUILD_DIR / path
+    if path and requested_file.is_file():
+        return send_from_directory(FRONTEND_BUILD_DIR, path)
+    return send_from_directory(FRONTEND_BUILD_DIR, "index.html")
+
+
+with app.app_context():
+    # Existing databases are left intact; SQLAlchemy creates missing indexes.
+    db.create_all()
 
 
 if __name__ == "__main__":

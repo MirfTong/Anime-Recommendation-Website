@@ -4,10 +4,10 @@ https://kyoquan.onrender.com/
 
 ## About
 
-A Flask web application for exploring anime by genres, ratings, episode counts,
-and other metadata. PostgreSQL is the runtime data store; the cleaned CSV is
-used only for the idempotent local import. Genres are stored in normalized
-`genre` and `anime_genre` tables.
+A React single-page application backed by a Flask REST API for exploring anime
+by genres, ratings, episode counts, and other metadata. PostgreSQL is the
+runtime data store; the cleaned CSV is used only for the idempotent local
+import. Genres are stored in normalized `genre` and `anime_genre` tables.
 
 ## Local setup
 
@@ -19,11 +19,33 @@ used only for the idempotent local import. Genres are stored in normalized
    .\.venv\Scripts\python.exe import_anime.py
    ```
 
-4. Run the app:
+4. Install and build the React frontend:
+
+   ```powershell
+   npm --prefix frontend install
+   npm --prefix frontend run build
+   ```
+
+5. Run the app:
 
    ```powershell
    .\.venv\Scripts\python.exe app.py
    ```
+
+The built React app is served by Flask at `/`. Flask's JSON API is available
+under `/api/v1`:
+
+- `GET /api/v1/anime` — paginated search and filters (`q`, `min_score`,
+  `min_year`, `max_year`, `min_episodes`, `type`, and `genre`)
+- `GET /api/v1/anime/random?limit=6` — random rated anime
+- `GET /api/v1/anime/<mal_id>` — one detailed anime record
+- `GET /api/v1/genres` — available genre filters
+
+For Render, set the build command to:
+
+```bash
+npm --prefix frontend ci && npm --prefix frontend run build && pip install -r requirements.txt
+```
 
 The importer can be run repeatedly. It updates existing anime by ID and uses
 unique keys for genres and anime-genre associations, so it does not create
