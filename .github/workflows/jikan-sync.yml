@@ -1,11 +1,19 @@
-name: Daily Jikan sync
+name: Four-times-daily Jikan sync
 
 on:
   schedule:
-    - cron: "0 4 * * *"
-    # A second, non-overlapping batch to refresh the catalogue faster.
-    - cron: "0 10 * * *"
+    # GitHub Actions schedules use UTC. These are 4 AM, 10 AM, 2 PM, and
+    # 8 PM EST (UTC-5), with the 8 PM run occurring at 1 AM UTC the next day.
+    - cron: "0 1 * * *"
+    - cron: "0 9 * * *"
+    - cron: "0 15 * * *"
+    - cron: "0 19 * * *"
   workflow_dispatch:
+
+# Keep database writes sequential if a manual run or a delayed schedule overlaps.
+concurrency:
+  group: jikan-sync
+  cancel-in-progress: false
 
 jobs:
   sync:
