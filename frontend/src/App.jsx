@@ -121,10 +121,7 @@ export default function App() {
       </header>
 
       <form className="mb-8 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl backdrop-blur sm:grid-cols-2 lg:grid-cols-4" onSubmit={submitFilters}>
-        <div className="flex gap-2 sm:col-span-2">
-          <input className="filter-input min-w-0 flex-1" name="q" placeholder="Search anime" value={filters.q} onChange={changeFilter} />
-          <button className="rounded-xl border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-violet-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40" type="button" onClick={clearGenreSelections} disabled={filters.genre.length === 0}>Clear selections</button>
-        </div>
+        <input className="filter-input sm:col-span-2" name="q" placeholder="Search anime" value={filters.q} onChange={changeFilter} />
         <div className="relative">
           <details className="group">
             <summary className="filter-input flex cursor-pointer list-none items-center justify-between marker:hidden">
@@ -144,7 +141,7 @@ export default function App() {
         <input className="filter-input" name="min_score" inputMode="decimal" min="0" max="10" step="0.1" placeholder="Minimum score" value={filters.min_score} onChange={changeFilter} />
         <input className="filter-input" name="min_year" inputMode="numeric" placeholder="From year" value={filters.min_year} onChange={changeFilter} />
         <input className="filter-input" name="max_year" inputMode="numeric" placeholder="To year" value={filters.max_year} onChange={changeFilter} />
-        <div className="flex gap-2"><input className="filter-input min-w-0 flex-1" name="min_episodes" inputMode="numeric" placeholder="Min episodes" value={filters.min_episodes} onChange={changeFilter} /><button className="rounded-xl bg-violet-500 px-3 py-2 text-sm font-bold text-white hover:bg-violet-400" type="submit">Search</button></div>
+        <div className="flex gap-2"><input className="filter-input min-w-0 flex-1" name="min_episodes" inputMode="numeric" placeholder="Min episodes" value={filters.min_episodes} onChange={changeFilter} /><button className="rounded-xl border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-violet-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40" type="button" onClick={clearGenreSelections} disabled={filters.genre.length === 0}>Clear selections</button><button className="rounded-xl bg-violet-500 px-3 py-2 text-sm font-bold text-white hover:bg-violet-400" type="submit">Search</button></div>
       </form>
 
       {error && <div className="mb-6 rounded-xl border border-rose-400/40 bg-rose-950/60 p-4 text-rose-100">{error}</div>}
