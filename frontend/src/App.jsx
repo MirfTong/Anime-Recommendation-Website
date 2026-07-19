@@ -126,17 +126,25 @@ export default function App() {
         <input className="filter-input" name="min_year" inputMode="numeric" placeholder="From year" value={filters.min_year} onChange={changeFilter} />
         <input className="filter-input" name="max_year" inputMode="numeric" placeholder="To year" value={filters.max_year} onChange={changeFilter} />
         <div className="flex gap-3"><input className="filter-input min-w-0 flex-1" name="min_episodes" inputMode="numeric" placeholder="Min episodes" value={filters.min_episodes} onChange={changeFilter} /><button className="rounded-xl bg-violet-500 px-5 font-bold text-white hover:bg-violet-400" type="submit">Search</button></div>
-        <fieldset className="sm:col-span-2 lg:col-span-4">
-          <legend className="mb-2 text-sm font-semibold text-slate-200">Genres <span className="font-normal text-slate-400">(select one or more)</span></legend>
-          <div className="grid max-h-40 grid-cols-2 gap-2 overflow-y-auto rounded-xl border border-white/10 bg-slate-950/50 p-3 sm:grid-cols-3 lg:grid-cols-5">
-            {genres.map((genre) => (
-              <label key={genre} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-slate-300 transition hover:bg-violet-400/10">
-                <input className="h-4 w-4 accent-violet-500" type="checkbox" checked={filters.genre.includes(genre)} onChange={() => toggleGenre(genre)} />
-                {genre}
-              </label>
-            ))}
-          </div>
-        </fieldset>
+        <div className="relative sm:col-span-2 lg:col-span-4">
+          <details className="group">
+            <summary className="filter-input flex cursor-pointer list-none items-center justify-between font-medium marker:hidden">
+              <span>{filters.genre.length ? `Genres (${filters.genre.length})` : "All genres"}</span>
+              <span className="text-violet-300 transition group-open:rotate-180">⌄</span>
+            </summary>
+            <div className="absolute z-20 mt-2 w-full rounded-xl border border-white/10 bg-slate-950 p-3 shadow-2xl">
+              <p className="mb-2 text-xs text-slate-400">Select one or more genres, then press Search.</p>
+              <div className="grid max-h-52 grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3 lg:grid-cols-5">
+                {genres.map((genre) => (
+                  <label key={genre} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-slate-300 transition hover:bg-violet-400/10">
+                    <input className="h-4 w-4 accent-violet-500" type="checkbox" checked={filters.genre.includes(genre)} onChange={() => toggleGenre(genre)} />
+                    {genre}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </details>
+        </div>
       </form>
 
       {error && <div className="mb-6 rounded-xl border border-rose-400/40 bg-rose-950/60 p-4 text-rose-100">{error}</div>}
