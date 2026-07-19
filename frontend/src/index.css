@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply min-h-screen bg-slate-950 font-sans text-slate-100 antialiased;
+    background-image: radial-gradient(circle at top, #312e81 0, transparent 32rem);
+  }
+
+  button, input, select {
+    font: inherit;
+  }
+}
+
+@layer components {
+  .filter-input {
+    @apply w-full rounded-xl border border-white/10 bg-slate-950/70 px-3 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-violet-400;
+  }
+}

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, Index, String
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -16,6 +16,10 @@ db = SQLAlchemy(model_class=Base)
 
 class Anime(db.Model):
     __tablename__ = "anime"
+    __table_args__ = (
+        Index("ix_anime_score_year", "score", "year"),
+        Index("ix_anime_type_score", "type", "score"),
+    )
 
     animeID: Mapped[int] = mapped_column("anime_id", primary_key=True)
     # The CSV's anime_id is a dataset row ID. Jikan must use this separate
