@@ -7,13 +7,13 @@ const EMPTY_FILTERS = {
   max_year: "",
   min_episodes: "",
   type: "",
-  genre: "",
+  genre: [],
 };
 
 function queryString(filters, page = 1) {
   const params = new URLSearchParams({ page: String(page), per_page: "24" });
   Object.entries(filters).forEach(([key, value]) => {
-    if (value) params.set(key, value);
+    if (Array.isArray(value) ? value.length > 0 : value) params.set(key, value);
   });
   return params.toString();
 }
@@ -105,22 +105,38 @@ export default function App() {
     } catch (requestError) { setError(requestError.message); }
   };
   const changeFilter = (event) => setFilters((current) => ({ ...current, [event.target.name]: event.target.value }));
+  const toggleGenre = (genre) => setFilters((current) => ({
+    ...current,
+    genre: current.genre.includes(genre)
+      ? current.genre.filter((selectedGenre) => selectedGenre !== genre)
+      : [...current.genre, genre],
+  }));
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
       <header className="mb-10 flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
-        <div><p className="font-semibold uppercase tracking-[0.3em] text-violet-300">Discover your next world</p><h1 className="mt-2 text-4xl font-black tracking-tight text-white sm:text-6xl">AniScope</h1><p className="mt-3 max-w-xl text-slate-300">Search a living catalogue of anime, refreshed with current seasonal data.</p></div>
-        <button className="rounded-xl bg-white px-5 py-3 font-bold text-slate-950 transition hover:bg-violet-200" onClick={showRandom} type="button">Surprise me ✦</button>
+        <div><p className="font-semibold uppercase tracking-[0.3em] text-violet-300">Discover your next favorite anime</p><h1 className="mt-2 text-4xl font-black tracking-tight text-white sm:text-6xl">KyoQuan</h1><p className="mt-3 max-w-xl text-slate-300">Search a living catalogue of anime, refreshed with current seasonal data.</p></div>
+        <button className="rounded-xl bg-white px-5 py-3 font-bold text-slate-950 transition hover:bg-violet-200" onClick={showRandom} type="button">Randomize</button>
       </header>
 
       <form className="mb-8 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl backdrop-blur sm:grid-cols-2 lg:grid-cols-4" onSubmit={submitFilters}>
         <input className="filter-input sm:col-span-2" name="q" placeholder="Search anime" value={filters.q} onChange={changeFilter} />
         <select className="filter-input" name="type" value={filters.type} onChange={changeFilter}><option value="">All types</option><option value="TV">TV</option><option value="MOVIE">Movie</option><option value="OVA">OVA</option><option value="ONA">ONA</option><option value="SPECIAL">Special</option></select>
-        <select className="filter-input" name="genre" value={filters.genre} onChange={changeFilter}><option value="">All genres</option>{genres.map((genre) => <option key={genre} value={genre}>{genre}</option>)}</select>
         <input className="filter-input" name="min_score" inputMode="decimal" min="0" max="10" step="0.1" placeholder="Minimum score" value={filters.min_score} onChange={changeFilter} />
         <input className="filter-input" name="min_year" inputMode="numeric" placeholder="From year" value={filters.min_year} onChange={changeFilter} />
         <input className="filter-input" name="max_year" inputMode="numeric" placeholder="To year" value={filters.max_year} onChange={changeFilter} />
         <div className="flex gap-3"><input className="filter-input min-w-0 flex-1" name="min_episodes" inputMode="numeric" placeholder="Min episodes" value={filters.min_episodes} onChange={changeFilter} /><button className="rounded-xl bg-violet-500 px-5 font-bold text-white hover:bg-violet-400" type="submit">Search</button></div>
+        <fieldset className="sm:col-span-2 lg:col-span-4">
+          <legend className="mb-2 text-sm font-semibold text-slate-200">Genres <span className="font-normal text-slate-400">(select one or more)</span></legend>
+          <div className="grid max-h-40 grid-cols-2 gap-2 overflow-y-auto rounded-xl border border-white/10 bg-slate-950/50 p-3 sm:grid-cols-3 lg:grid-cols-5">
+            {genres.map((genre) => (
+              <label key={genre} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-slate-300 transition hover:bg-violet-400/10">
+                <input className="h-4 w-4 accent-violet-500" type="checkbox" checked={filters.genre.includes(genre)} onChange={() => toggleGenre(genre)} />
+                {genre}
+              </label>
+            ))}
+          </div>
+        </fieldset>
       </form>
 
       {error && <div className="mb-6 rounded-xl border border-rose-400/40 bg-rose-950/60 p-4 text-rose-100">{error}</div>}
