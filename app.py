@@ -30,6 +30,7 @@ def anime():
     query = request.args.get("search", "").strip()
     eps = request.args.get("eps", type=int)
     score = request.args.get("score", type=float)
+    min_year = request.args.get("min_year", type=int)
     year = request.args.get("year", type=int)
     types = request.args.getlist("type")
     genres = request.args.getlist("genre")
@@ -41,7 +42,7 @@ def anime():
     # Unreleased shows often have no score yet and should not appear in
     # recommendation/browse cards until Jikan publishes one.
     statement = select(Anime).where(Anime.score.is_not(None))
-    has_filters = any((eps, score, year, types, genres))
+    has_filters = any((eps, score, min_year, year, types, genres))
 
     if query:
         escaped_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -56,6 +57,8 @@ def anime():
         statement = statement.where(Anime.episodes >= eps)
     if score:
         statement = statement.where(Anime.score >= score)
+    if min_year:
+        statement = statement.where(Anime.year >= min_year)
     if year:
         statement = statement.where(Anime.year <= year)
     if types:
@@ -81,6 +84,7 @@ def anime():
         query=query,
         eps=eps,
         score=score,
+        min_year=min_year,
         year=year,
     )
 
