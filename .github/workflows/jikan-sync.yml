@@ -1,13 +1,9 @@
-name: Four-times-daily Jikan sync
+name: Every-three-hours Jikan sync
 
 on:
   schedule:
-    # GitHub Actions schedules use UTC. These are midnight, 6 AM, noon, and
-    # 6 PM EST (UTC-5).
-    - cron: "0 5 * * *"
-    - cron: "0 11 * * *"
-    - cron: "0 17 * * *"
-    - cron: "0 23 * * *"
+    # GitHub Actions schedules use UTC. Run at the start of every third hour.
+    - cron: "0 */3 * * *"
   workflow_dispatch:
 
 # Keep database writes sequential if a manual run or a delayed schedule overlaps.
