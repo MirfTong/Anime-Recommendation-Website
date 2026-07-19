@@ -105,9 +105,11 @@ export default function App() {
     } catch (requestError) { setError(requestError.message); }
   };
   const changeFilter = (event) => setFilters((current) => ({ ...current, [event.target.name]: event.target.value }));
-  const changeGenres = (event) => setFilters((current) => ({
+  const toggleGenre = (genre) => setFilters((current) => ({
     ...current,
-    genre: Array.from(event.target.selectedOptions, (option) => option.value),
+    genre: current.genre.includes(genre)
+      ? current.genre.filter((selectedGenre) => selectedGenre !== genre)
+      : [...current.genre, genre],
   }));
 
   return (
@@ -119,9 +121,21 @@ export default function App() {
 
       <form className="mb-8 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl backdrop-blur sm:grid-cols-2 lg:grid-cols-4" onSubmit={submitFilters}>
         <input className="filter-input sm:col-span-2" name="q" placeholder="Search anime" value={filters.q} onChange={changeFilter} />
-        <select className="filter-input min-h-32" name="genre" multiple size={5} value={filters.genre} onChange={changeGenres} aria-label="Genres" title="Hold Ctrl (or Command on Mac) to select multiple genres">
-          {genres.map((genre) => <option key={genre} value={genre}>{genre}</option>)}
-        </select>
+        <div className="relative">
+          <details className="group">
+            <summary className="filter-input flex cursor-pointer list-none items-center justify-between marker:hidden">
+              <span>{filters.genre.length ? `${filters.genre.length} genres selected` : "All genres"}</span>
+              <span className="text-violet-300 transition group-open:rotate-180">⌄</span>
+            </summary>
+            <div className="absolute z-20 mt-2 max-h-64 w-full overflow-y-auto rounded-xl border border-white/10 bg-slate-950 p-1 shadow-2xl">
+              {genres.map((genre) => (
+                <button key={genre} className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${filters.genre.includes(genre) ? "bg-violet-500 text-white" : "text-slate-300 hover:bg-violet-400/10"}`} type="button" aria-pressed={filters.genre.includes(genre)} onClick={() => toggleGenre(genre)}>
+                  {genre}
+                </button>
+              ))}
+            </div>
+          </details>
+        </div>
         <select className="filter-input" name="type" value={filters.type} onChange={changeFilter}><option value="">All types</option><option value="TV">TV</option><option value="MOVIE">Movie</option><option value="OVA">OVA</option><option value="ONA">ONA</option><option value="SPECIAL">Special</option></select>
         <input className="filter-input" name="min_score" inputMode="decimal" min="0" max="10" step="0.1" placeholder="Minimum score" value={filters.min_score} onChange={changeFilter} />
         <input className="filter-input" name="min_year" inputMode="numeric" placeholder="From year" value={filters.min_year} onChange={changeFilter} />
