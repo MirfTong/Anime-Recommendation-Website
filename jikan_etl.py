@@ -21,7 +21,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 
 from app import app
-from jikan_client import get_anime_full, get_season_anime
+from jikan_client import JikanTemporaryError, get_anime_full, get_season_anime
 from models import Anime, AnimeGenre, Genre, db
 
 
@@ -195,7 +195,10 @@ def refresh_catalogue(
                     skipped += 1
                     continue
                 payload = fetch_anime(anime.mal_id)
-            except HTTPError as error:
+            except (HTTPError, JikanTemporaryError) as error:
+                if isinstance(error, JikanTemporaryError):
+                    skipped += 1
+                    continue
                 if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
                     db.session.rollback()
                     raise
@@ -204,8 +207,8 @@ def refresh_catalogue(
 
             data = payload.get("data")
             if not isinstance(data, dict):
-                db.session.rollback()
-                raise ValueError(f"Jikan returned no anime data for MAL ID {anime.mal_id}")
+                skipped += 1
+                continue
             _update_anime(anime, data, genres)
             updated += 1
             if updated % batch_size == 0:
@@ -254,7 +257,10 @@ def sync_season(
         for mal_id in seasonal_ids:
             try:
                 payload = fetch_anime(mal_id)
-            except HTTPError as error:
+            except (HTTPError, JikanTemporaryError) as error:
+                if isinstance(error, JikanTemporaryError):
+                    skipped += 1
+                    continue
                 if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
                     db.session.rollback()
                     raise
@@ -262,8 +268,8 @@ def sync_season(
                 continue
             data = payload.get("data")
             if not isinstance(data, dict):
-                db.session.rollback()
-                raise ValueError(f"Jikan returned no anime data for MAL ID {mal_id}")
+                skipped += 1
+                continue
             anime = existing.get(mal_id)
             if anime is None:
                 anime = _new_anime(data)
