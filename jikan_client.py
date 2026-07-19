@@ -9,7 +9,7 @@ import warnings
 from collections import deque
 from collections.abc import Callable
 from typing import Any
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -19,6 +19,10 @@ REQUESTS_PER_MINUTE = 60
 MAX_429_RETRIES = 4
 REQUEST_TIMEOUT_SECONDS = 20
 RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+class JikanTemporaryError(RuntimeError):
+    """Jikan could not be reached after transient-request retries."""
 
 
 class JikanClient:
@@ -58,10 +62,15 @@ class JikanClient:
             # endpoint remains available. Do not delay a catalogue sync when
             # that happens; the basic response contains the fields we store.
             return self._get(
-                f"/anime/{mal_id}/full", retryable_status_codes=frozenset({429})
+                f"/anime/{mal_id}/full",
+                retryable_status_codes=frozenset({429}),
+                retry_network_errors=False,
             )
-        except HTTPError as error:
-            if error.code not in RETRYABLE_STATUS_CODES - {429}:
+        except (HTTPError, JikanTemporaryError) as error:
+            if (
+                isinstance(error, HTTPError)
+                and error.code not in RETRYABLE_STATUS_CODES - {429}
+            ):
                 raise
             return self._get(f"/anime/{mal_id}")
 
@@ -84,8 +93,11 @@ class JikanClient:
             request_path = path if page == 1 else f"{path}?page={page}"
             try:
                 payload = self._get(request_path)
-            except HTTPError as error:
-                if year is None and page > 1 and error.code in RETRYABLE_STATUS_CODES:
+            except (HTTPError, JikanTemporaryError) as error:
+                is_retryable = isinstance(error, JikanTemporaryError) or (
+                    error.code in RETRYABLE_STATUS_CODES
+                )
+                if year is None and page > 1 and is_retryable:
                     warnings.warn(
                         "Jikan could not return additional current-season pages; "
                         "using the available first page.",
@@ -107,6 +119,7 @@ class JikanClient:
         path: str,
         *,
         retryable_status_codes: frozenset[int] = RETRYABLE_STATUS_CODES,
+        retry_network_errors: bool = True,
     ) -> dict[str, Any]:
         """Fetch one Jikan JSON response, applying retries and rate limits."""
         url = f"{BASE_URL}{path}"
@@ -123,6 +136,10 @@ class JikanClient:
                 delay = self._retry_delay(error, attempt)
                 error.close()
                 self._sleeper(delay)
+            except (TimeoutError, URLError) as error:
+                if not retry_network_errors or attempt == MAX_429_RETRIES:
+                    raise JikanTemporaryError(f"Jikan request timed out: {path}") from error
+                self._sleeper(float(2**attempt))
 
         raise RuntimeError("unreachable")
 

@@ -59,6 +59,26 @@ class JikanClientTests(unittest.TestCase):
         self.assertEqual(calls, 2)
         self.assertIn(2.0, clock.sleeps)
 
+    def test_falls_back_to_basic_endpoint_when_full_endpoint_times_out(self):
+        requested_urls = []
+
+        def opener(request, *, timeout):
+            requested_urls.append(request.full_url)
+            if request.full_url.endswith("/full"):
+                raise TimeoutError("Jikan full endpoint timed out")
+            return Response(b'{"data": {"mal_id": 1}}')
+
+        client = JikanClient(opener=opener)
+
+        self.assertEqual(client.get_anime_full(1), {"data": {"mal_id": 1}})
+        self.assertEqual(
+            requested_urls,
+            [
+                "https://api.jikan.moe/v4/anime/1/full",
+                "https://api.jikan.moe/v4/anime/1",
+            ],
+        )
+
     def test_throttles_to_three_requests_per_second(self):
         clock = FakeClock()
 
