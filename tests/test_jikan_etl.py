@@ -1,6 +1,12 @@
 import unittest
 
-from jikan_etl import _detailed_genres, _names, _valid_score
+from backend.jobs.jikan_etl import (
+    _detailed_genres,
+    _fetch_anime_data,
+    _names,
+    _valid_score,
+)
+from backend.services.jikan_client import JikanTemporaryError
 
 
 class JikanEtlTests(unittest.TestCase):
@@ -26,6 +32,18 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(_valid_score(8.25), 8.25)
         self.assertIsNone(_valid_score(0))
         self.assertIsNone(_valid_score(None))
+
+    def test_returns_valid_jikan_anime_data(self):
+        data = {"mal_id": 1, "title": "Cowboy Bebop"}
+
+        self.assertEqual(_fetch_anime_data(1, lambda _mal_id: {"data": data}), data)
+
+    def test_skips_temporary_errors_and_invalid_payloads(self):
+        def temporary_failure(_mal_id: int):
+            raise JikanTemporaryError("Jikan is unavailable")
+
+        self.assertIsNone(_fetch_anime_data(1, temporary_failure))
+        self.assertIsNone(_fetch_anime_data(1, lambda _mal_id: {"data": []}))
 
 
 if __name__ == "__main__":

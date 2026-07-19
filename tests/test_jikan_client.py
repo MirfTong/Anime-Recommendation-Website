@@ -3,7 +3,7 @@ import unittest
 from email.message import Message
 from urllib.error import HTTPError
 
-from jikan_client import JikanClient
+from backend.services.jikan_client import JikanClient
 
 
 class FakeClock:
