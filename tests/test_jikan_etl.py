@@ -1,10 +1,13 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from backend.jobs.jikan_etl import (
     _detailed_genres,
     _fetch_anime_data,
     _names,
     _valid_score,
+    refresh_catalogue,
 )
 from backend.services.jikan_client import JikanTemporaryError
 
@@ -44,6 +47,28 @@ class JikanEtlTests(unittest.TestCase):
 
         self.assertIsNone(_fetch_anime_data(1, temporary_failure))
         self.assertIsNone(_fetch_anime_data(1, lambda _mal_id: {"data": []}))
+
+    def test_skipped_records_are_marked_attempted_to_advance_queue(self):
+        records = [
+            SimpleNamespace(animeID=1, mal_id=1),
+            SimpleNamespace(animeID=2, mal_id=2),
+        ]
+
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [records, []]
+
+            updated, skipped = refresh_catalogue(
+                limit=2,
+                batch_size=1,
+                fetch_anime=lambda _mal_id: {"data": []},
+            )
+
+        self.assertEqual((updated, skipped), (0, 2))
+        self.assertEqual(mock_db.session.execute.call_count, 2)
+        self.assertGreaterEqual(mock_db.session.commit.call_count, 3)
 
 
 if __name__ == "__main__":
