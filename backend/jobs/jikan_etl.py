@@ -146,12 +146,24 @@ def _ensure_schema() -> None:
         )
     )
     db.session.execute(
+        text(
+            "ALTER TABLE anime ADD COLUMN IF NOT EXISTS "
+            "last_jikan_attempt TIMESTAMP WITH TIME ZONE"
+        )
+    )
+    db.session.execute(
         text("ALTER TABLE anime ADD COLUMN IF NOT EXISTS mal_id INTEGER")
     )
     db.session.execute(
         text(
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_anime_mal_id "
             "ON anime (mal_id)"
+        )
+    )
+    db.session.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_anime_last_jikan_attempt "
+            "ON anime (last_jikan_attempt)"
         )
     )
     db.session.commit()
@@ -175,10 +187,21 @@ def _fetch_anime_data(
     return data if isinstance(data, dict) else None
 
 
-def _commit_completed_batch(saved_count: int, batch_size: int) -> None:
-    """Commit each completed batch of successfully saved anime records."""
-    if saved_count % batch_size == 0:
+def _commit_completed_batch(processed_count: int, batch_size: int) -> None:
+    """Commit each completed batch of processed catalogue records."""
+    if processed_count % batch_size == 0:
         db.session.commit()
+
+
+def _mark_jikan_attempt(anime: Anime) -> None:
+    """Record an ETL attempt without adding a web-app model dependency."""
+    db.session.execute(
+        text(
+            "UPDATE anime SET last_jikan_attempt = :attempted "
+            "WHERE anime_id = :anime_id"
+        ),
+        {"attempted": datetime.now(timezone.utc), "anime_id": anime.animeID},
+    )
 
 
 def refresh_catalogue(
@@ -190,8 +213,9 @@ def refresh_catalogue(
 ) -> tuple[int, int]:
     """Fetch and update existing anime rows; return ``(updated, skipped)``.
 
-    Missing records and temporary Jikan failures are skipped after the client's
-    retries. Other HTTP errors are raised for operator attention.
+    Every selected record is marked as attempted, including missing records and
+    temporary Jikan failures. This lets the oldest-first queue continue past
+    unavailable records while ``last_jikan_sync`` remains success-only.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -207,7 +231,7 @@ def refresh_catalogue(
             statement = statement.where(Anime.animeID.in_(list(anime_ids)))
         if anime_ids is None:
             statement = statement.order_by(
-                Anime.last_jikan_sync.asc().nullsfirst(), Anime.animeID
+                text("last_jikan_attempt ASC NULLS FIRST"), Anime.animeID
             )
         else:
             statement = statement.order_by(Anime.animeID)
@@ -216,19 +240,21 @@ def refresh_catalogue(
         anime_rows = list(db.session.scalars(statement))
         genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
 
-        updated = skipped = 0
+        updated = skipped = attempted = 0
         for anime in anime_rows:
+            _mark_jikan_attempt(anime)
             if anime.mal_id is None:
                 skipped += 1
-                continue
+            else:
+                data = _fetch_anime_data(anime.mal_id, fetch_anime)
+                if data is None:
+                    skipped += 1
+                else:
+                    _update_anime(anime, data, genres)
+                    updated += 1
 
-            data = _fetch_anime_data(anime.mal_id, fetch_anime)
-            if data is None:
-                skipped += 1
-                continue
-            _update_anime(anime, data, genres)
-            updated += 1
-            _commit_completed_batch(updated, batch_size)
+            attempted += 1
+            _commit_completed_batch(attempted, batch_size)
 
         db.session.commit()
         return updated, skipped
