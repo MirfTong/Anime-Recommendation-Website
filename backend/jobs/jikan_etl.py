@@ -22,6 +22,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.app import app
 from backend.models import Anime, AnimeGenre, Genre, db
+from backend.schema import ensure_anime_schema
 from backend.services.jikan_client import (
     JikanTemporaryError,
     get_anime_full,
@@ -30,6 +31,7 @@ from backend.services.jikan_client import (
 
 
 SKIPPABLE_JIKAN_STATUS_CODES = frozenset({404, 500, 502, 503, 504})
+JIKAN_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
 
 
 def _names(entries: list[dict[str, Any]] | None) -> list[str]:
@@ -58,6 +60,14 @@ def _valid_score(value: Any) -> float | None:
     return float(value)
 
 
+def _season(value: Any) -> str | None:
+    """Normalize Jikan's optional season field to the supported filter values."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in JIKAN_SEASONS else None
+
+
 def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) -> None:
     """Map a Jikan ``data`` object onto one existing ``Anime`` row."""
     anime.title = data.get("title") or anime.title
@@ -67,6 +77,9 @@ def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) 
         or anime.alternative_title
     )
     anime.type = data.get("type") or anime.type
+    # Clear stale values when Jikan has no seasonal classification, such as
+    # for films and specials.
+    anime.season = _season(data.get("season"))
     anime.year = data.get("year") or anime.year
     score = _valid_score(data.get("score"))
     if score is not None:
@@ -121,6 +134,7 @@ def _new_anime(data: dict[str, Any]) -> Anime:
         title=data.get("title") or f"MAL anime {data['mal_id']}",
         alternative_title=data.get("title_english") or data.get("title_japanese"),
         type=data.get("type") or "Unknown",
+        season=_season(data.get("season")),
         year=data.get("year"),
         score=_valid_score(data.get("score")),
         episodes=data.get("episodes"),
@@ -133,40 +147,8 @@ def _new_anime(data: dict[str, Any]) -> Anime:
 
 
 def _ensure_schema() -> None:
-    """Create new tables and allow unknown values for airing anime metadata."""
-    db.create_all()
-    for column in ("year", "score", "episodes"):
-        db.session.execute(
-            text(f"ALTER TABLE anime ALTER COLUMN {column} DROP NOT NULL")
-        )
-    db.session.execute(
-        text(
-            "ALTER TABLE anime ADD COLUMN IF NOT EXISTS "
-            "last_jikan_sync TIMESTAMP WITH TIME ZONE"
-        )
-    )
-    db.session.execute(
-        text(
-            "ALTER TABLE anime ADD COLUMN IF NOT EXISTS "
-            "last_jikan_attempt TIMESTAMP WITH TIME ZONE"
-        )
-    )
-    db.session.execute(
-        text("ALTER TABLE anime ADD COLUMN IF NOT EXISTS mal_id INTEGER")
-    )
-    db.session.execute(
-        text(
-            "CREATE UNIQUE INDEX IF NOT EXISTS ix_anime_mal_id "
-            "ON anime (mal_id)"
-        )
-    )
-    db.session.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS ix_anime_last_jikan_attempt "
-            "ON anime (last_jikan_attempt)"
-        )
-    )
-    db.session.commit()
+    """Apply the shared schema setup before an ETL run."""
+    ensure_anime_schema()
 
 
 def _fetch_anime_data(

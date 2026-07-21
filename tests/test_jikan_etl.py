@@ -6,9 +6,12 @@ from backend.jobs.jikan_etl import (
     _detailed_genres,
     _fetch_anime_data,
     _names,
+    _season,
+    _update_anime,
     _valid_score,
     refresh_catalogue,
 )
+from backend.models import Anime
 from backend.services.jikan_client import JikanTemporaryError
 
 
@@ -35,6 +38,34 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(_valid_score(8.25), 8.25)
         self.assertIsNone(_valid_score(0))
         self.assertIsNone(_valid_score(None))
+
+    def test_normalizes_jikan_seasons(self):
+        self.assertEqual(_season(" Winter "), "winter")
+        self.assertEqual(_season("summer"), "summer")
+        self.assertIsNone(_season("monsoon"))
+        self.assertIsNone(_season(None))
+
+    def test_updates_anime_season_from_jikan(self):
+        anime = Anime(
+            animeID=1,
+            mal_id=1,
+            title="Example",
+            alternative_title=None,
+            type="TV",
+            season="summer",
+            year=2020,
+            score=8.0,
+            episodes=12,
+            mal_url="https://example.com",
+            sequel=False,
+            image_url="",
+            legacy_genres=[],
+            genres_detailed=[],
+        )
+
+        _update_anime(anime, {"season": "Fall", "genres": []}, {})
+
+        self.assertEqual(anime.season, "fall")
 
     def test_returns_valid_jikan_anime_data(self):
         data = {"mal_id": 1, "title": "Cowboy Bebop"}
