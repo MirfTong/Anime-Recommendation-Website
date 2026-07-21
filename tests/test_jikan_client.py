@@ -79,6 +79,27 @@ class JikanClientTests(unittest.TestCase):
             ],
         )
 
+    def test_skips_repeated_basic_retries_after_gateway_timeouts(self):
+        requested_urls = []
+
+        def opener(request, *, timeout):
+            requested_urls.append(request.full_url)
+            raise HTTPError(request.full_url, 504, "Gateway Timeout", Message(), None)
+
+        client = JikanClient(opener=opener)
+
+        with self.assertRaises(HTTPError) as raised:
+            client.get_anime_full(1)
+
+        self.assertEqual(raised.exception.code, 504)
+        self.assertEqual(
+            requested_urls,
+            [
+                "https://api.jikan.moe/v4/anime/1/full",
+                "https://api.jikan.moe/v4/anime/1",
+            ],
+        )
+
     def test_throttles_to_three_requests_per_second(self):
         clock = FakeClock()
 
