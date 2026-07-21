@@ -50,9 +50,10 @@ class JikanClient:
     def get_anime_full(self, mal_id: int) -> dict[str, Any]:
         """Return Jikan anime data, preferring ``GET /anime/{mal_id}/full``.
 
-        Rate-limit and temporary server errors are retried up to
-        ``MAX_429_RETRIES`` times. A 429 response honors the server's
-        ``Retry-After`` header when it is supplied.
+        A 429 response is retried up to ``MAX_429_RETRIES`` times and honors
+        the server's ``Retry-After`` header. Server failures fall back to the
+        basic endpoint once, then return control to the ETL queue so a bad
+        Jikan record cannot consume an entire sync run.
         """
         if isinstance(mal_id, bool) or not isinstance(mal_id, int) or mal_id <= 0:
             raise ValueError("mal_id must be a positive integer")
@@ -72,7 +73,11 @@ class JikanClient:
                 and error.code not in RETRYABLE_STATUS_CODES - {429}
             ):
                 raise
-            return self._get(f"/anime/{mal_id}")
+            return self._get(
+                f"/anime/{mal_id}",
+                retryable_status_codes=frozenset({429}),
+                retry_network_errors=False,
+            )
 
     def get_season_anime(
         self, year: int | None = None, season: str | None = None
