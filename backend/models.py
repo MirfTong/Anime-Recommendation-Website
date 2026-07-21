@@ -19,6 +19,7 @@ class Anime(db.Model):
     __table_args__ = (
         Index("ix_anime_score_year", "score", "year"),
         Index("ix_anime_type_score", "type", "score"),
+        Index("ix_anime_season_score", "season", "score"),
     )
 
     animeID: Mapped[int] = mapped_column("anime_id", primary_key=True)
@@ -28,6 +29,8 @@ class Anime(db.Model):
     title: Mapped[str] = mapped_column(index=True)
     alternative_title: Mapped[str | None]
     type: Mapped[str] = mapped_column(index=True)
+    # Jikan returns one of winter, spring, summer, fall, or no season.
+    season: Mapped[str | None] = mapped_column(String(6), index=True)
     # Airing and unreleased anime may not have these values yet.
     year: Mapped[int | None] = mapped_column(index=True)
     score: Mapped[float | None] = mapped_column(index=True)

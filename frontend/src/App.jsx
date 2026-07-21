@@ -7,6 +7,7 @@ const EMPTY_FILTERS = {
   max_year: "",
   min_episodes: "",
   type: "",
+  season: "",
   genre: [],
 };
 
@@ -135,7 +136,7 @@ export default function App() {
         <button className="rounded-xl bg-white px-5 py-3 font-bold text-slate-950 transition hover:bg-violet-200" onClick={showRandom} type="button">Randomize</button>
       </header>
 
-      <form className="relative z-20 mb-8 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl backdrop-blur sm:grid-cols-2 lg:grid-cols-4" onSubmit={submitFilters}>
+      <form className="relative z-20 mb-8 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl backdrop-blur sm:grid-cols-2 lg:grid-cols-5" onSubmit={submitFilters}>
         <input className="filter-input sm:col-span-2" name="q" placeholder="Search anime" value={filters.q} onChange={changeFilter} />
         <div className="relative">
           <details ref={genreDropdownRef} className="group">
@@ -153,11 +154,12 @@ export default function App() {
           </details>
         </div>
         <select className="filter-input !bg-slate-950" name="type" value={filters.type} onChange={changeFilter} style={{ colorScheme: "dark" }}><option className="bg-slate-950" value="">All types</option><option className="bg-slate-950" value="TV">TV</option><option className="bg-slate-950" value="MOVIE">Movie</option><option className="bg-slate-950" value="OVA">OVA</option><option className="bg-slate-950" value="ONA">ONA</option><option className="bg-slate-950" value="SPECIAL">Special</option></select>
+        <select className="filter-input !bg-slate-950" name="season" value={filters.season} onChange={changeFilter} style={{ colorScheme: "dark" }}><option className="bg-slate-950" value="">All seasons</option><option className="bg-slate-950" value="winter">Winter</option><option className="bg-slate-950" value="spring">Spring</option><option className="bg-slate-950" value="summer">Summer</option><option className="bg-slate-950" value="fall">Fall</option></select>
         <input className="filter-input" name="min_score" inputMode="decimal" min="0" max="10" step="0.1" placeholder="Minimum score" value={filters.min_score} onChange={changeFilter} />
         <input className="filter-input" name="min_year" inputMode="numeric" placeholder="From year" value={filters.min_year} onChange={changeFilter} />
         <input className="filter-input" name="max_year" inputMode="numeric" placeholder="To year" value={filters.max_year} onChange={changeFilter} />
         <input className="filter-input" name="min_episodes" inputMode="numeric" placeholder="Minimum episodes" value={filters.min_episodes} onChange={changeFilter} />
-        <div className="flex justify-end gap-2 sm:col-span-2 lg:col-span-4"><button className="rounded-xl border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-violet-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40" type="button" onClick={clearSelections} disabled={!hasSelections}>Clear selections</button><button className="rounded-xl bg-violet-500 px-3 py-2 text-sm font-bold text-white hover:bg-violet-400" type="submit">Search</button></div>
+        <div className="flex justify-end gap-2 sm:col-span-2 lg:col-span-5"><button className="rounded-xl border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-violet-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40" type="button" onClick={clearSelections} disabled={!hasSelections}>Clear selections</button><button className="rounded-xl bg-violet-500 px-3 py-2 text-sm font-bold text-white hover:bg-violet-400" type="submit">Search</button></div>
       </form>
 
       {error && <div className="mb-6 rounded-xl border border-rose-400/40 bg-rose-950/60 p-4 text-rose-100">{error}</div>}

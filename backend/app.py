@@ -12,6 +12,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
 from backend.models import Anime, Genre, db
+from backend.schema import ensure_anime_schema
 
 
 load_dotenv()
@@ -25,6 +26,7 @@ API_PREFIX = "/api/v1"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_BUILD_DIR = PROJECT_ROOT / "static" / "react"
 MAX_PAGE_SIZE = 100
+VALID_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
 
 
 class ApiError(Exception):
@@ -89,6 +91,7 @@ def _serialize_anime(anime: Anime, *, detailed: bool = False) -> dict[str, Any]:
         "title": anime.title,
         "alternative_title": anime.alternative_title,
         "type": anime.type,
+        "season": anime.season,
         "year": anime.year,
         "score": anime.score,
         "episodes": anime.episodes,
@@ -117,7 +120,12 @@ def _filtered_anime_statement():
     max_year = _integer_argument("max_year", minimum=1, maximum=3000)
     min_episodes = _integer_argument("min_episodes", minimum=1, maximum=10000)
     anime_types = _list_argument("type")
+    seasons = [season.lower() for season in _list_argument("season")]
     genres = _list_argument("genre")
+
+    invalid_seasons = set(seasons).difference(VALID_SEASONS)
+    if invalid_seasons:
+        raise ApiError("season must be winter, spring, summer, or fall")
 
     if min_year is not None and max_year is not None and min_year > max_year:
         raise ApiError("min_year cannot be greater than max_year")
@@ -142,6 +150,8 @@ def _filtered_anime_statement():
         statement = statement.where(Anime.episodes >= min_episodes)
     if anime_types:
         statement = statement.where(Anime.type.in_(anime_types))
+    if seasons:
+        statement = statement.where(Anime.season.in_(seasons))
     for genre in genres:
         statement = statement.where(Anime.genre_entries.any(Genre.name == genre))
     return statement
@@ -213,8 +223,7 @@ def react_app(path: str = ""):
 
 
 with app.app_context():
-    # Existing databases are left intact; SQLAlchemy creates missing indexes.
-    db.create_all()
+    ensure_anime_schema()
 
 
 if __name__ == "__main__":

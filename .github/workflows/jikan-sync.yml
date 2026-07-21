@@ -27,5 +27,5 @@ jobs:
         run: pip install -r requirements.txt
       - name: Import the current season
         run: python -m backend.jobs.jikan_etl --season current
-      - name: Refresh the oldest catalogue records
+      - name: Refresh the oldest catalogue records and Jikan season metadata
         run: python -m backend.jobs.jikan_etl --limit 500

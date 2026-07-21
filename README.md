@@ -48,7 +48,7 @@ Flask serves the React application at `/`; its JSON API is available under
 `/api/v1`:
 
 - `GET /api/v1/anime` — paginated search and filters (`q`, `min_score`,
-  `min_year`, `max_year`, `min_episodes`, `type`, and `genre`)
+  `min_year`, `max_year`, `min_episodes`, `type`, `season`, and `genre`)
 - `GET /api/v1/anime/random?limit=6` — random rated anime
 - `GET /api/v1/anime/<mal_id>` — a detailed anime record
 - `GET /api/v1/genres` — available genre filters
@@ -69,15 +69,17 @@ For a historical season, pass both its name and year, for example
 .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --limit 500
 ```
 
-Jikan calls are rate-limited. Airing shows with an unknown score, year, or
-episode count are stored with those fields empty until Jikan provides them.
+Jikan calls are rate-limited. Each full-anime refresh also stores Jikan's
+season classification (`winter`, `spring`, `summer`, or `fall`) when one is
+available. Airing shows with an unknown score, year, or episode count are
+stored with those fields empty until Jikan provides them.
 
 ## Scheduled sync
 
 The GitHub Actions workflow runs every three hours. It imports the current
 season and then refreshes the 500 anime that have gone longest without a Jikan
-sync. Before enabling it, add a repository Actions secret named `DATABASE_URL`
-with the external PostgreSQL URL.
+sync, including their season metadata. Before enabling it, add a repository
+Actions secret named `DATABASE_URL` with the external PostgreSQL URL.
 
 For Render, use this build command:
 
