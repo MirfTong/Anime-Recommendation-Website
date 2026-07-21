@@ -23,7 +23,14 @@ function Score({ value }) {
   return <span className="rounded-full bg-amber-300/15 px-2.5 py-1 text-sm font-bold text-amber-300">★ {value?.toFixed(2) ?? "—"}</span>;
 }
 
+function formatSeason(season) {
+  if (!season) return null;
+  return `${season.charAt(0).toUpperCase()}${season.slice(1)}`;
+}
+
 function AnimeCard({ anime, onSelect }) {
+  const season = formatSeason(anime.season);
+
   return (
     <button
       className="group overflow-hidden rounded-2xl border border-white/10 bg-slate-900/80 text-left shadow-lg transition hover:-translate-y-1 hover:border-violet-400/60 hover:shadow-glow focus:outline-none focus:ring-2 focus:ring-violet-400"
@@ -36,7 +43,7 @@ function AnimeCard({ anime, onSelect }) {
       </div>
       <div className="space-y-2 p-4">
         <h2 className="line-clamp-2 min-h-12 text-base font-bold text-white">{anime.title}</h2>
-        <p className="text-sm text-slate-400">{anime.type} · {anime.year ?? "Unknown year"} · {anime.episodes ?? "?"} eps</p>
+        <p className="text-sm text-slate-400">{anime.type} · {season && `${season} · `}{anime.year ?? "Unknown year"} · {anime.episodes ?? "?"} eps</p>
         <div className="flex flex-wrap gap-1.5">
           {anime.genres.slice(0, 3).map((genre) => <span key={genre} className="rounded-full bg-violet-400/10 px-2 py-1 text-xs text-violet-200">{genre}</span>)}
         </div>
@@ -47,6 +54,8 @@ function AnimeCard({ anime, onSelect }) {
 
 function DetailModal({ anime, onClose }) {
   if (!anime) return null;
+  const season = formatSeason(anime.season);
+
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/85 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={anime.title}>
       <article className="relative max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-3xl border border-white/10 bg-slate-900 shadow-2xl">
@@ -55,7 +64,7 @@ function DetailModal({ anime, onClose }) {
           <img className="w-full rounded-2xl object-cover" src={anime.image_url} alt={`${anime.title} cover`} />
           <div className="space-y-4">
             <div><p className="text-sm font-semibold uppercase tracking-widest text-violet-300">Anime details</p><h2 className="mt-1 text-3xl font-black text-white">{anime.title}</h2>{anime.alternative_title && <p className="mt-1 text-slate-400">{anime.alternative_title}</p>}</div>
-            <div className="flex flex-wrap items-center gap-2"><Score value={anime.score} /><span className="text-slate-300">{anime.type} · {anime.year ?? "Unknown year"} · {anime.episodes ?? "?"} episodes</span></div>
+            <div className="flex flex-wrap items-center gap-2"><Score value={anime.score} /><span className="text-slate-300">{anime.type} · {season && `${season} · `}{anime.year ?? "Unknown year"} · {anime.episodes ?? "?"} episodes</span></div>
             <div className="flex flex-wrap gap-2">{anime.genres.map((genre) => <span key={genre} className="rounded-full bg-violet-400/10 px-3 py-1 text-sm text-violet-100">{genre}</span>)}</div>
             {anime.genres_detailed?.length > 0 && <p className="text-sm leading-6 text-slate-400">Tags: {anime.genres_detailed.join(", ")}</p>}
             <a className="inline-flex rounded-xl bg-violet-500 px-4 py-2 font-bold text-white transition hover:bg-violet-400" href={anime.mal_url} target="_blank" rel="noreferrer">View on MyAnimeList ↗</a>
