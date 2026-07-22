@@ -1,4 +1,4 @@
-r"""Incrementally refresh the PostgreSQL anime catalogue from Jikan v4."""
+r"""Incrementally refresh PostgreSQL from Jikan-compatible anime APIs."""
 
 from __future__ import annotations
 
@@ -18,9 +18,11 @@ from backend.app import app
 from backend.models import Anime, AnimeGenre, Genre, JikanSyncState, db
 from backend.schema import ensure_anime_schema
 from backend.services.jikan_client import (
+    JikanAnimePage,
     JikanSeasonPage,
     JikanTemporaryError,
     get_anime,
+    get_anime_catalogue_page,
     get_season_anime,
     get_season_page,
 )
@@ -31,6 +33,8 @@ TEMPORARY_JIKAN_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 JIKAN_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
 CURRENT_SEASON_MAX_PAGES_PER_RUN = 10
 DEFAULT_SEASON_BACKFILL_LIMIT = 1000
+BULK_SEASON_MAX_PAGES_PER_RUN = 40
+BULK_SEASON_MAX_CONSECUTIVE_FAILURES = 3
 DEGRADED_SUCCESS_RATE = 0.25
 
 
@@ -96,6 +100,17 @@ class SeasonBackfillResult:
     @property
     def success_rate(self) -> float:
         return self.updated / self.selected if self.selected else 0.0
+
+
+@dataclass
+class BulkSeasonSyncResult:
+    pages_attempted: int = 0
+    pages_completed: int = 0
+    pages_failed: int = 0
+    updated: int = 0
+    seasons_assigned: int = 0
+    complete: bool = False
+    next_page: int = 1
 
 
 def _names(entries: list[dict[str, Any]] | None) -> list[str]:
@@ -398,7 +413,7 @@ def _record_page_error(key: str, page: int, error: BaseException) -> None:
 
 
 def _apply_season_page(
-    page_result: JikanSeasonPage,
+    page_result: JikanSeasonPage | JikanAnimePage,
     *,
     state_key: str,
     year: int | None,
@@ -515,6 +530,84 @@ def sync_current_season(
     return result
 
 
+def sync_bulk_anime_seasons(
+    *,
+    max_pages: int = BULK_SEASON_MAX_PAGES_PER_RUN,
+    max_consecutive_failures: int = BULK_SEASON_MAX_CONSECUTIVE_FAILURES,
+    fetch_page: Callable[..., JikanAnimePage] = get_anime_catalogue_page,
+) -> BulkSeasonSyncResult:
+    """Update TV seasons from a low-request bulk anime catalogue.
+
+    One successful request can update up to 25 anime. Temporary failures move
+    past the failed page so a single unavailable page cannot block the whole
+    catalogue. A small circuit breaker ends a run during a broad outage; the
+    persisted cursor lets the next chained run continue with later pages.
+    """
+    if max_pages <= 0:
+        raise ValueError("max_pages must be positive")
+    if max_consecutive_failures <= 0:
+        raise ValueError("max_consecutive_failures must be positive")
+
+    state_key = "bulk:anime-catalogue-seasons"
+    with app.app_context():
+        _ensure_schema()
+    page = _next_page(state_key)
+    result = BulkSeasonSyncResult(next_page=page)
+    consecutive_failures = 0
+
+    for _ in range(max_pages):
+        result.pages_attempted += 1
+        try:
+            fetched = fetch_page(page=page)
+        except JikanTemporaryError as error:
+            page += 1
+            _record_page_error(state_key, page, error)
+            result.pages_failed += 1
+            result.next_page = page
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                break
+            continue
+        except HTTPError as error:
+            if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
+                raise
+            if error.code == 404 and page > 1:
+                _record_page_error(state_key, 1, error)
+                result.pages_failed += 1
+                result.complete = True
+                result.next_page = 1
+                break
+            page += 1
+            _record_page_error(state_key, page, error)
+            result.pages_failed += 1
+            result.next_page = page
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                break
+            continue
+
+        consecutive_failures = 0
+        applied = _apply_season_page(
+            fetched,
+            state_key=state_key,
+            year=None,
+            season=None,
+            discover_missing=False,
+            tv_only=True,
+        )
+        result.pages_completed += 1
+        result.updated += applied.saved
+        result.seasons_assigned += applied.seasons_assigned
+        if not fetched.has_next_page:
+            result.complete = True
+            result.next_page = 1
+            break
+        page = fetched.page + 1
+        result.next_page = page
+
+    return result
+
+
 def backfill_missing_seasons(
     *,
     limit: int = DEFAULT_SEASON_BACKFILL_LIMIT,
@@ -523,8 +616,8 @@ def backfill_missing_seasons(
 ) -> SeasonBackfillResult:
     """Refresh the oldest-attempted TV rows that still need a season.
 
-    Jikan's historical season-listing endpoints can become unavailable for
-    long periods even while individual anime endpoints remain usable. Every
+    Historical season-listing endpoints can become unavailable for long
+    periods even while individual anime endpoints remain usable. Every
     row is marked attempted before its request, including temporary failures,
     so repeated jobs keep advancing through the queue instead of retrying the
     same titles forever.
@@ -616,11 +709,57 @@ def main() -> None:
         action="store_true",
         help="Fill missing TV seasons from a resumable per-anime queue.",
     )
+    parser.add_argument(
+        "--bulk-seasons",
+        action="store_true",
+        help="Update TV seasons from resumable bulk anime catalogue pages.",
+    )
+    parser.add_argument(
+        "--page-limit",
+        type=int,
+        default=BULK_SEASON_MAX_PAGES_PER_RUN,
+        help="Maximum bulk catalogue pages to process.",
+    )
     args = parser.parse_args()
 
     if args.year is not None and args.season in (None, "current"):
         parser.error("--year requires --season winter, spring, summer, or fall")
-    if args.backfill_seasons:
+    if args.bulk_seasons:
+        if (
+            args.backfill_seasons
+            or args.season
+            or args.year is not None
+            or args.anime_id
+        ):
+            parser.error(
+                "--bulk-seasons cannot be combined with anime or season selection"
+            )
+        result = sync_bulk_anime_seasons(max_pages=args.page_limit)
+        print(
+            "Bulk anime season sync: "
+            f"attempted_pages={result.pages_attempted}, "
+            f"completed_pages={result.pages_completed}, "
+            f"failed_pages={result.pages_failed}, updated={result.updated}, "
+            f"seasons_assigned={result.seasons_assigned}, "
+            f"complete={result.complete}, next_page={result.next_page}."
+        )
+        _append_step_summary(
+            "Bulk anime season sync",
+            [
+                ("Pages attempted", result.pages_attempted),
+                ("Pages completed", result.pages_completed),
+                ("Pages failed", result.pages_failed),
+                ("Anime updated", result.updated),
+                ("Seasons assigned", result.seasons_assigned),
+                ("Next page", result.next_page),
+            ],
+        )
+        if result.pages_failed:
+            _workflow_warning(
+                "Bulk anime season sync degraded",
+                f"{result.pages_failed}/{result.pages_attempted} pages failed; the next run will continue at page {result.next_page}.",
+            )
+    elif args.backfill_seasons:
         if args.season or args.year is not None or args.anime_id:
             parser.error(
                 "--backfill-seasons cannot be combined with anime or season selection"
@@ -645,14 +784,14 @@ def main() -> None:
                 ("Seasons assigned", result.seasons_assigned),
                 ("Successful responses still missing season", result.still_missing),
                 ("Success rate", f"{result.success_rate:.1%}"),
-                ("Temporary Jikan failures", result.temporary_errors),
+                ("Temporary API failures", result.temporary_errors),
                 ("Not found", result.not_found),
                 ("Invalid payloads", result.invalid_payloads),
             ],
         )
         if result.selected >= 100 and result.success_rate < DEGRADED_SUCCESS_RATE:
             _workflow_warning(
-                "Jikan TV season backfill degraded",
+                "TV season backfill degraded",
                 f"Only {result.updated}/{result.selected} records updated; {result.temporary_errors} were temporary API failures.",
             )
     elif args.season == "current":
@@ -677,7 +816,7 @@ def main() -> None:
         )
         if result.pages_failed:
             _workflow_warning(
-                "Jikan current-season pagination paused",
+                "Current-season pagination paused",
                 f"Page {result.next_page} failed and will be resumed by the next run.",
             )
     elif args.season:
@@ -709,14 +848,14 @@ def main() -> None:
                 ("Selected", result.selected),
                 ("Updated", result.updated),
                 ("Success rate", f"{result.success_rate:.1%}"),
-                ("Temporary Jikan failures", result.temporary_errors),
+                ("Temporary API failures", result.temporary_errors),
                 ("Not found", result.not_found),
                 ("Invalid payloads", result.invalid_payloads),
             ],
         )
         if result.selected >= 100 and result.success_rate < DEGRADED_SUCCESS_RATE:
             _workflow_warning(
-                "Jikan catalogue refresh degraded",
+                "Catalogue refresh degraded",
                 f"Only {result.updated}/{result.selected} records updated; {result.temporary_errors} were temporary API failures.",
             )
 

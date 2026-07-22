@@ -16,11 +16,16 @@ from backend.jobs.jikan_etl import (
     _valid_score,
     backfill_missing_seasons,
     refresh_catalogue,
+    sync_bulk_anime_seasons,
     sync_current_season,
     sync_season,
 )
 from backend.models import Anime
-from backend.services.jikan_client import JikanSeasonPage, JikanTemporaryError
+from backend.services.jikan_client import (
+    JikanAnimePage,
+    JikanSeasonPage,
+    JikanTemporaryError,
+)
 
 
 def anime_record(*, anime_type="TV", season="summer"):
@@ -318,6 +323,66 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(result.pages_completed, 6)
         self.assertEqual(result.next_page, 1)
         self.assertEqual(apply_page.call_count, 6)
+
+    def test_bulk_season_sync_commits_multiple_catalogue_pages(self):
+        requested_pages = []
+
+        def fetch_page(*, page):
+            requested_pages.append(page)
+            return JikanAnimePage(
+                entries=[{"mal_id": page, "type": "TV", "season": "summer"}],
+                page=page,
+                has_next_page=page < 2,
+                last_visible_page=2,
+            )
+
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl._next_page", return_value=1),
+            patch(
+                "backend.jobs.jikan_etl._apply_season_page",
+                return_value=SeasonPageApplyResult(saved=1, seasons_assigned=1),
+            ) as apply_page,
+        ):
+            result = sync_bulk_anime_seasons(fetch_page=fetch_page)
+
+        self.assertEqual(requested_pages, [1, 2])
+        self.assertEqual(result.pages_attempted, 2)
+        self.assertEqual(result.pages_completed, 2)
+        self.assertEqual(result.updated, 2)
+        self.assertEqual(result.seasons_assigned, 2)
+        self.assertTrue(result.complete)
+        self.assertEqual(result.next_page, 1)
+        self.assertEqual(apply_page.call_count, 2)
+
+    def test_bulk_season_sync_skips_failed_pages_and_stops_during_outage(self):
+        def fetch_page(*, page):
+            raise JikanTemporaryError(f"page {page} unavailable")
+
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl._next_page", return_value=4),
+            patch("backend.jobs.jikan_etl._record_page_error") as record_error,
+        ):
+            result = sync_bulk_anime_seasons(
+                max_pages=10,
+                max_consecutive_failures=2,
+                fetch_page=fetch_page,
+            )
+
+        self.assertEqual(result.pages_attempted, 2)
+        self.assertEqual(result.pages_failed, 2)
+        self.assertEqual(result.next_page, 6)
+        self.assertEqual(
+            [call.args[1] for call in record_error.call_args_list],
+            [5, 6],
+        )
+
+    def test_bulk_season_sync_rejects_invalid_limits(self):
+        with self.assertRaises(ValueError):
+            sync_bulk_anime_seasons(max_pages=0)
+        with self.assertRaises(ValueError):
+            sync_bulk_anime_seasons(max_consecutive_failures=0)
 
     def test_backfill_rejects_invalid_limits(self):
         with self.assertRaises(ValueError):

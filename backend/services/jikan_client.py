@@ -1,8 +1,9 @@
-"""Small, rate-limited client for the Jikan v4 API."""
+"""Small client for Jikan-compatible anime APIs."""
 
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections import deque
@@ -13,9 +14,10 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-BASE_URL = "https://api.jikan.moe/v4"
+DEFAULT_BASE_URL = "https://api.tenrai.org/v1"
+DEFAULT_FALLBACK_BASE_URL = "https://api.jikan.moe/v4"
 REQUESTS_PER_SECOND = 3
-# Leave a little headroom beneath Jikan's approximate public 60/minute cap.
+# Leave a little headroom beneath both providers' public 60/minute cap.
 REQUESTS_PER_MINUTE = 55
 MAX_429_RETRIES = 4
 MAX_ANIME_TRANSIENT_RETRIES = 1
@@ -27,7 +29,7 @@ USER_AGENT = "KyoQuan/1.0 (+https://github.com/MirfTong/Anime-Recommendation-Web
 
 
 class JikanTemporaryError(RuntimeError):
-    """Jikan could not be reached after bounded transient-request retries."""
+    """No compatible anime provider answered after bounded retries."""
 
 
 @dataclass(frozen=True)
@@ -39,8 +41,18 @@ class JikanSeasonPage:
     has_next_page: bool
 
 
+@dataclass(frozen=True)
+class JikanAnimePage:
+    """One page from a Jikan-compatible bulk anime catalogue."""
+
+    entries: list[dict[str, Any]]
+    page: int
+    has_next_page: bool
+    last_visible_page: int | None = None
+
+
 class JikanClient:
-    """Fetch Jikan resources while respecting its public request limits.
+    """Fetch Jikan-compatible resources within public request limits.
 
     Rate-limit retries and transient server retries have separate budgets. A
     shared transient budget prevents a broad Jikan outage from multiplying a
@@ -54,6 +66,8 @@ class JikanClient:
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
         transient_retry_budget: int = MAX_TRANSIENT_RETRY_BUDGET,
+        base_url: str | None = None,
+        fallback_base_url: str | None = None,
     ) -> None:
         if transient_retry_budget < 0:
             raise ValueError("transient_retry_budget cannot be negative")
@@ -63,6 +77,22 @@ class JikanClient:
         self._request_times: deque[float] = deque()
         self._last_request_time: float | None = None
         self._transient_retries_remaining = transient_retry_budget
+        configured_base_url = (
+            base_url
+            if base_url is not None
+            else os.getenv("ANIME_API_BASE_URL", DEFAULT_BASE_URL)
+        )
+        configured_fallback_url = (
+            fallback_base_url
+            if fallback_base_url is not None
+            else os.getenv("ANIME_API_FALLBACK_BASE_URL", DEFAULT_FALLBACK_BASE_URL)
+        )
+        self._base_url = self._normalize_base_url(configured_base_url, required=True)
+        self._fallback_base_url = self._normalize_base_url(
+            configured_fallback_url, required=False
+        )
+        if self._fallback_base_url == self._base_url:
+            self._fallback_base_url = None
         self._lock = threading.Lock()
 
     def get_anime_full(self, mal_id: int) -> dict[str, Any]:
@@ -133,6 +163,30 @@ class JikanClient:
                 return anime
             page += 1
 
+    def get_anime_catalogue_page(self, *, page: int = 1) -> JikanAnimePage:
+        """Return one MAL-ID-ordered page from the bulk anime search."""
+        self._validate_page(page)
+        payload = self._get(
+            f"/anime?order_by=mal_id&sort=asc&page={page}",
+            max_transient_retries=MAX_SEASON_TRANSIENT_RETRIES,
+            retry_network_errors=True,
+        )
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise ValueError("Anime catalogue response did not contain a list")
+        pagination = payload.get("pagination") or {}
+        last_visible_page = pagination.get("last_visible_page")
+        return JikanAnimePage(
+            entries=[entry for entry in data if isinstance(entry, dict)],
+            page=page,
+            has_next_page=bool(pagination.get("has_next_page")),
+            last_visible_page=(
+                last_visible_page
+                if isinstance(last_visible_page, int) and last_visible_page > 0
+                else None
+            ),
+        )
+
     def _get(
         self,
         path: str,
@@ -140,8 +194,41 @@ class JikanClient:
         max_transient_retries: int,
         retry_network_errors: bool,
     ) -> dict[str, Any]:
+        """Fetch JSON from the primary provider, then a compatible fallback."""
+        try:
+            return self._get_from_base(
+                self._base_url,
+                path,
+                max_transient_retries=max_transient_retries,
+                retry_network_errors=retry_network_errors,
+            )
+        except HTTPError as error:
+            if (
+                self._fallback_base_url is None
+                or error.code not in SERVER_ERROR_STATUS_CODES
+            ):
+                raise
+        except JikanTemporaryError:
+            if self._fallback_base_url is None:
+                raise
+
+        return self._get_from_base(
+            self._fallback_base_url,
+            path,
+            max_transient_retries=max_transient_retries,
+            retry_network_errors=retry_network_errors,
+        )
+
+    def _get_from_base(
+        self,
+        base_url: str,
+        path: str,
+        *,
+        max_transient_retries: int,
+        retry_network_errors: bool,
+    ) -> dict[str, Any]:
         """Fetch JSON with independent 429 and bounded transient retry budgets."""
-        url = f"{BASE_URL}{path}"
+        url = f"{base_url}{path}"
         rate_retries = transient_retries = 0
         while True:
             self._throttle()
@@ -180,7 +267,20 @@ class JikanClient:
                     self._sleeper(float(2**transient_retries))
                     transient_retries += 1
                     continue
-                raise JikanTemporaryError(f"Jikan request failed: {path}") from error
+                raise JikanTemporaryError(
+                    f"Anime API request failed: {path}"
+                ) from error
+
+    @staticmethod
+    def _normalize_base_url(value: str, *, required: bool) -> str | None:
+        normalized = value.strip().rstrip("/")
+        if not normalized:
+            if required:
+                raise ValueError("base_url cannot be empty")
+            return None
+        if not normalized.startswith(("https://", "http://")):
+            raise ValueError("base_url must be an HTTP(S) URL")
+        return normalized
 
     def _claim_transient_retry(self) -> bool:
         """Reserve one retry from the process-wide outage budget."""
@@ -217,6 +317,11 @@ class JikanClient:
     def _validate_mal_id(mal_id: int) -> None:
         if isinstance(mal_id, bool) or not isinstance(mal_id, int) or mal_id <= 0:
             raise ValueError("mal_id must be a positive integer")
+
+    @staticmethod
+    def _validate_page(page: int) -> None:
+        if isinstance(page, bool) or not isinstance(page, int) or page <= 0:
+            raise ValueError("page must be a positive integer")
 
     @staticmethod
     def _validate_season(year: int | None, season: str | None) -> None:
@@ -265,3 +370,8 @@ def get_season_anime(
 ) -> list[dict[str, Any]]:
     """Return every anime from a current or specified season."""
     return _default_client.get_season_anime(year, season)
+
+
+def get_anime_catalogue_page(*, page: int = 1) -> JikanAnimePage:
+    """Return one parsed page from Jikan's bulk anime catalogue."""
+    return _default_client.get_anime_catalogue_page(page=page)
