@@ -83,6 +83,7 @@ export default function App() {
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
   const [loading, setLoading] = useState(true);
   const [seasonalLoading, setSeasonalLoading] = useState(true);
+  const [viewMode, setViewMode] = useState("home");
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(null);
   const genreDropdownRef = useRef(null);
@@ -127,8 +128,13 @@ export default function App() {
     return () => document.removeEventListener("pointerdown", closeGenreDropdown);
   }, []);
 
-  const submitFilters = (event) => { event.preventDefault(); loadAnime(1); };
+  const submitFilters = (event) => {
+    event.preventDefault();
+    setViewMode(hasSelections ? "results" : "home");
+    loadAnime(1);
+  };
   const showRandom = async () => {
+    setViewMode("random");
     setLoading(true); setError("");
     try {
       const response = await fetch("/api/v1/anime/random?limit=6"); const body = await response.json();
@@ -151,9 +157,11 @@ export default function App() {
   }));
   const clearSelections = () => {
     setFilters({ ...EMPTY_FILTERS, genre: [] });
+    setViewMode("home");
     loadAnime(1, EMPTY_FILTERS);
   };
   const hasSelections = Object.values(filters).some((value) => Array.isArray(value) ? value.length > 0 : Boolean(value));
+  const showHomepageSections = viewMode === "home" && !hasSelections;
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -185,20 +193,20 @@ export default function App() {
         <input className="filter-input" name="min_year" inputMode="numeric" placeholder="From year" value={filters.min_year} onChange={changeFilter} />
         <input className="filter-input" name="max_year" inputMode="numeric" placeholder="To year" value={filters.max_year} onChange={changeFilter} />
         <input className="filter-input" name="min_episodes" inputMode="numeric" placeholder="Minimum episodes" value={filters.min_episodes} onChange={changeFilter} />
-        <div className="flex justify-end gap-2 sm:col-span-2 lg:col-span-5"><button className="rounded-xl border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-violet-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40" type="button" onClick={clearSelections} disabled={!hasSelections}>Clear selections</button><button className="rounded-xl bg-violet-500 px-3 py-2 text-sm font-bold text-white hover:bg-violet-400" type="submit">Search</button></div>
+        <div className="flex justify-end gap-2 sm:col-span-2 lg:col-span-5"><button className="rounded-xl border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-violet-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40" type="button" onClick={clearSelections} disabled={!hasSelections && viewMode === "home"}>Clear selections</button><button className="rounded-xl bg-violet-500 px-3 py-2 text-sm font-bold text-white hover:bg-violet-400" type="submit">Search</button></div>
       </form>
 
       {error && <div className="mb-6 rounded-xl border border-rose-400/40 bg-rose-950/60 p-4 text-rose-100">{error}</div>}
-      <section className="mb-12" aria-labelledby="popular-this-season">
+      {showHomepageSections && <section className="mb-12" aria-labelledby="popular-this-season">
         <h2 id="popular-this-season" className="mb-5 text-3xl font-black tracking-tight text-white sm:text-4xl">POPULAR THIS SEASON</h2>
         {seasonalLoading ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">{Array.from({ length: 6 }, (_, index) => <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />)}</div> : seasonalAnime.length > 0 ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">{seasonalAnime.map((entry) => <AnimeCard key={entry.id} anime={entry} onSelect={openDetail} />)}</div> : <p className="rounded-2xl border border-dashed border-slate-700 p-5 text-sm text-slate-400">Seasonal anime are still being refreshed. Check back shortly.</p>}
-      </section>
+      </section>}
 
-      <section aria-labelledby="top-rated">
-        <div className="mb-5 flex flex-wrap items-end justify-between gap-2">
+      <section aria-label="Anime results">
+        {showHomepageSections && <div className="mb-5 flex flex-wrap items-end justify-between gap-2">
           <h2 id="top-rated" className="text-3xl font-black tracking-tight text-white sm:text-4xl">TOP RATED</h2>
           {!loading && !error && <p className="text-sm text-slate-400">{pagination.total.toLocaleString()} anime found</p>}
-        </div>
+        </div>}
         {loading ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">{Array.from({ length: 12 }, (_, index) => <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />)}</div> : anime.length > 0 ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">{anime.map((entry) => <AnimeCard key={entry.id} anime={entry} onSelect={openDetail} />)}</div> : !error && <div className="rounded-2xl border border-dashed border-slate-600 p-12 text-center text-slate-300">No anime match those filters. Try widening your search.</div>}
       </section>
       {!loading && pagination.pages > 1 && <nav className="mt-10 flex items-center justify-center gap-4"><button className="rounded-lg border border-white/15 px-4 py-2 disabled:opacity-40" disabled={pagination.page === 1} onClick={() => loadAnime(pagination.page - 1)} type="button">Previous</button><span className="text-slate-400">Page {pagination.page} of {pagination.pages}</span><button className="rounded-lg border border-white/15 px-4 py-2 disabled:opacity-40" disabled={pagination.page === pagination.pages} onClick={() => loadAnime(pagination.page + 1)} type="button">Next</button></nav>}
