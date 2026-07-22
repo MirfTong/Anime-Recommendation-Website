@@ -28,6 +28,18 @@ class Response(io.BytesIO):
 
 
 class JikanClientTests(unittest.TestCase):
+    def test_fetches_basic_anime_without_calling_full_endpoint(self):
+        seen_urls = []
+
+        def opener(request, *, timeout):
+            seen_urls.append(request.full_url)
+            return Response(b'{"data": {"mal_id": 1}}')
+
+        client = JikanClient(opener=opener)
+
+        self.assertEqual(client.get_anime(1), {"data": {"mal_id": 1}})
+        self.assertEqual(seen_urls, ["https://api.jikan.moe/v4/anime/1"])
+
     def test_fetches_full_anime_payload(self):
         seen_urls = []
 

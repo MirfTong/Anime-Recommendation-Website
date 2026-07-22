@@ -9,7 +9,9 @@ from backend.jobs.jikan_etl import (
     _season,
     _update_anime,
     _valid_score,
+    backfill_missing_seasons,
     refresh_catalogue,
+    sync_season,
 )
 from backend.models import Anime
 from backend.services.jikan_client import JikanTemporaryError
@@ -100,6 +102,44 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual((updated, skipped), (0, 2))
         self.assertEqual(mock_db.session.execute.call_count, 2)
         self.assertGreaterEqual(mock_db.session.commit.call_count, 3)
+
+    def test_season_sync_reuses_listing_data_without_refetching_titles(self):
+        anime = SimpleNamespace(mal_id=1)
+        seasonal_data = {"mal_id": 1, "title": "Example", "season": "summer"}
+
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl._update_anime") as update_anime,
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [[anime], []]
+            saved, skipped = sync_season(
+                2026,
+                "summer",
+                fetch_season=lambda _year, _season: [seasonal_data],
+            )
+
+        self.assertEqual((saved, skipped), (1, 0))
+        update_anime.assert_called_once_with(anime, seasonal_data, {})
+
+    def test_backfill_rejects_invalid_year_limit(self):
+        with self.assertRaises(ValueError):
+            backfill_missing_seasons(year_limit=0)
+
+    def test_failed_season_year_is_marked_attempted_to_advance_queue(self):
+        def unavailable(_year: int | None, _season: str | None):
+            raise JikanTemporaryError("Jikan is unavailable")
+
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl._pending_season_years", return_value=[2025]),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            result = backfill_missing_seasons(fetch_season=unavailable)
+
+        self.assertEqual(result, (0, 0, 1))
+        mock_db.session.execute.assert_called_once()
+        mock_db.session.commit.assert_called_once()
 
 
 if __name__ == "__main__":

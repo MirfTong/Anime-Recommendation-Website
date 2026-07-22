@@ -79,6 +79,22 @@ class JikanClient:
                 retry_network_errors=False,
             )
 
+    def get_anime(self, mal_id: int) -> dict[str, Any]:
+        """Return the basic anime payload without probing the unstable full endpoint.
+
+        Jikan's basic response contains every catalogue field stored by KyoQuan,
+        including scores, images, genres, year, and season. Persistent gateway
+        errors are left for a later queue pass so one bad record cannot stall a
+        whole batch.
+        """
+        if isinstance(mal_id, bool) or not isinstance(mal_id, int) or mal_id <= 0:
+            raise ValueError("mal_id must be a positive integer")
+        return self._get(
+            f"/anime/{mal_id}",
+            retryable_status_codes=frozenset({429}),
+            retry_network_errors=False,
+        )
+
     def get_season_anime(
         self, year: int | None = None, season: str | None = None
     ) -> list[dict[str, Any]]:
@@ -186,6 +202,11 @@ class JikanClient:
 
 
 _default_client = JikanClient()
+
+
+def get_anime(mal_id: int) -> dict[str, Any]:
+    """Return the parsed Jikan v4 basic-anime payload for a MAL ID."""
+    return _default_client.get_anime(mal_id)
 
 
 def get_anime_full(mal_id: int) -> dict[str, Any]:

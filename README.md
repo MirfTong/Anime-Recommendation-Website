@@ -69,19 +69,27 @@ For a historical season, pass both its name and year, for example
 .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --limit 500
 ```
 
-Jikan calls are rate-limited. Each full-anime refresh also stores Jikan's
-season classification (`winter`, `spring`, `summer`, or `fall`) when one is
-available. Airing shows with an unknown score, year, or episode count are
-stored with those fields empty until Jikan provides them.
+Missing historical season classifications can be filled efficiently from
+Jikan's seasonal listings:
+
+```powershell
+.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --backfill-seasons --year-limit 5
+```
+
+Jikan calls are rate-limited. Catalogue refreshes use the basic anime endpoint,
+which supplies every stored catalogue field without depending on the less
+reliable full-anime endpoint. Airing shows with an unknown score, year, or
+episode count are stored with those fields empty until Jikan provides them.
 
 ## Scheduled sync
 
 The GitHub Actions workflow continuously chains successful runs. Each run
-imports the current season, refreshes the next 1,000 anime with their season
-metadata, and dispatches its successor before exiting. The concurrency group
-keeps database writes sequential, while a three-hour schedule restarts the
-chain if a run fails. Before enabling it, add a repository Actions secret named
-`DATABASE_URL` with the external PostgreSQL URL.
+imports the current season, backfills five catalogue years from bulk seasonal
+listings, refreshes the next 1,000 anime, and dispatches its successor before
+exiting. The concurrency group keeps database writes sequential, while a
+three-hour schedule restarts the chain if a run fails. Before enabling it, add
+a repository Actions secret named `DATABASE_URL` with the external PostgreSQL
+URL.
 
 For Render, use this build command:
 
