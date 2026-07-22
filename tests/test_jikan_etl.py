@@ -1,21 +1,30 @@
 import unittest
 from datetime import datetime, timezone
+from email.message import Message
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from backend.jobs.jikan_etl import (
+    BulkSeasonSyncResult,
     CatalogueRefreshResult,
+    CurrentSeasonSyncResult,
     SeasonPageApplyResult,
+    SeasonBackfillResult,
+    SeasonCoverage,
+    _apply_season_page,
     _detailed_genres,
     _current_season_identity,
     _fetch_anime_data,
     _names,
     _prepared_season_entry,
     _season,
+    _season_from_air_date,
     _update_anime,
     _valid_score,
     backfill_missing_seasons,
     refresh_catalogue,
+    run_scheduled_sync,
     sync_bulk_anime_seasons,
     sync_current_season,
     sync_season,
@@ -54,6 +63,12 @@ class JikanEtlTests(unittest.TestCase):
             ["Action", "Drama"],
         )
 
+    def test_ignores_malformed_genre_entries(self):
+        self.assertEqual(
+            _names([None, "Action", {"name": None}, {"name": " Drama "}]),
+            ["Drama"],
+        )
+
     def test_preserves_existing_detailed_tags_and_adds_jikan_categories(self):
         data = {
             "genres": [{"name": "Action"}],
@@ -80,6 +95,45 @@ class JikanEtlTests(unittest.TestCase):
         anime = anime_record()
         _update_anime(anime, {"season": "Fall", "genres": []}, {})
         self.assertEqual(anime.season, "fall")
+
+    def test_infers_missing_tv_season_from_premiere_date(self):
+        anime = anime_record(season=None)
+        _update_anime(
+            anime,
+            {
+                "type": "TV",
+                "season": None,
+                "aired": {"from": "2020-10-03T00:00:00+00:00"},
+                "genres": [],
+            },
+            {},
+        )
+        self.assertEqual(anime.season, "fall")
+        self.assertEqual(
+            _season_from_air_date({"aired": {"prop": {"from": {"month": 4}}}}),
+            "spring",
+        )
+
+    def test_explicit_unrated_payload_clears_stale_score_and_episode_count(self):
+        anime = anime_record()
+        _update_anime(anime, {"score": 0, "episodes": None, "genres": []}, {})
+        self.assertIsNone(anime.score)
+        self.assertIsNone(anime.episodes)
+
+    def test_update_tolerates_malformed_nested_provider_fields(self):
+        anime = anime_record()
+        _update_anime(
+            anime,
+            {
+                "images": [],
+                "relations": [None, "invalid", {"relation": "Sequel"}],
+                "genres": [None, {"name": None}],
+                "themes": "invalid",
+            },
+            {},
+        )
+        self.assertTrue(anime.sequel)
+        self.assertEqual(anime.image_url, "")
 
     def test_sparse_tv_payload_does_not_erase_existing_season(self):
         anime = anime_record(season="spring")
@@ -144,6 +198,46 @@ class JikanEtlTests(unittest.TestCase):
         result = CatalogueRefreshResult(selected=1000, updated=43, temporary_errors=957)
         self.assertEqual(result.skipped, 957)
         self.assertAlmostEqual(result.success_rate, 0.043)
+
+    def test_scheduled_sync_runs_every_phase_and_reports_coverage(self):
+        current = CurrentSeasonSyncResult()
+        bulk = BulkSeasonSyncResult()
+        backfill = SeasonBackfillResult()
+        catalogue = CatalogueRefreshResult()
+        coverage = SeasonCoverage(total_tv=100, classified_tv=75)
+        with (
+            patch("backend.jobs.jikan_etl.sync_current_season", return_value=current),
+            patch(
+                "backend.jobs.jikan_etl.sync_bulk_anime_seasons", return_value=bulk
+            ) as bulk_sync,
+            patch(
+                "backend.jobs.jikan_etl.backfill_missing_seasons", return_value=backfill
+            ) as backfill_sync,
+            patch(
+                "backend.jobs.jikan_etl.refresh_catalogue", return_value=catalogue
+            ) as catalogue_sync,
+            patch("backend.jobs.jikan_etl.get_season_coverage", return_value=coverage),
+            patch("backend.jobs.jikan_etl._report_current_season"),
+            patch("backend.jobs.jikan_etl._report_bulk_seasons"),
+            patch("backend.jobs.jikan_etl._report_season_backfill"),
+            patch("backend.jobs.jikan_etl._report_catalogue"),
+            patch("backend.jobs.jikan_etl._report_season_coverage"),
+        ):
+            result = run_scheduled_sync(limit=7, batch_size=2, page_limit=3)
+
+        bulk_sync.assert_called_once_with(max_pages=3)
+        backfill_sync.assert_called_once_with(limit=7, batch_size=2)
+        catalogue_sync.assert_called_once_with(limit=7, batch_size=2)
+        self.assertEqual(result.coverage, coverage)
+        self.assertEqual(coverage.rate, 0.75)
+
+    def test_scheduled_sync_rejects_invalid_limits_before_running(self):
+        with (
+            patch("backend.jobs.jikan_etl.sync_current_season") as current_sync,
+            self.assertRaises(ValueError),
+        ):
+            run_scheduled_sync(limit=0)
+        current_sync.assert_not_called()
 
     def test_season_sync_reuses_and_forces_listing_data(self):
         anime = SimpleNamespace(mal_id=1)
@@ -355,7 +449,7 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(result.next_page, 1)
         self.assertEqual(apply_page.call_count, 2)
 
-    def test_bulk_season_sync_skips_failed_pages_and_stops_during_outage(self):
+    def test_bulk_season_sync_preserves_failed_page_and_stops_during_outage(self):
         def fetch_page(*, page):
             raise JikanTemporaryError(f"page {page} unavailable")
 
@@ -372,11 +466,71 @@ class JikanEtlTests(unittest.TestCase):
 
         self.assertEqual(result.pages_attempted, 2)
         self.assertEqual(result.pages_failed, 2)
-        self.assertEqual(result.next_page, 6)
+        self.assertEqual(result.next_page, 4)
         self.assertEqual(
             [call.args[1] for call in record_error.call_args_list],
-            [5, 6],
+            [4, 4],
         )
+
+    def test_bulk_page_repairs_a_stale_local_type_from_provider_tv_data(self):
+        anime = SimpleNamespace(mal_id=1, type="Unknown", season=None)
+        state = SimpleNamespace(
+            next_page=1,
+            last_attempt_at=None,
+            last_error=None,
+            last_completed_at=None,
+        )
+
+        def update_anime(record, data, _genres):
+            record.type = data["type"]
+            record.season = data["season"]
+
+        page = JikanAnimePage(
+            entries=[{"mal_id": 1, "type": "TV", "season": "winter"}],
+            page=1,
+            has_next_page=True,
+        )
+        with (
+            patch("backend.jobs.jikan_etl._update_anime", side_effect=update_anime),
+            patch("backend.jobs.jikan_etl._sync_state", return_value=state),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [[anime], []]
+            result = _apply_season_page(
+                page,
+                state_key="test",
+                year=None,
+                season=None,
+                discover_missing=False,
+                tv_only=True,
+            )
+
+        self.assertEqual(result.saved, 1)
+        self.assertEqual(result.seasons_assigned, 1)
+        self.assertEqual(anime.type, "TV")
+        self.assertEqual(anime.season, "winter")
+
+    def test_bulk_rate_limit_stops_without_advancing_cursor(self):
+        def rate_limited(*, page):
+            raise HTTPError(
+                f"https://example.test/anime?page={page}",
+                429,
+                "rate limited",
+                Message(),
+                None,
+            )
+
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl._next_page", return_value=12),
+            patch("backend.jobs.jikan_etl._record_page_error") as record_error,
+        ):
+            result = sync_bulk_anime_seasons(fetch_page=rate_limited)
+
+        self.assertEqual(result.pages_attempted, 1)
+        self.assertEqual(result.pages_failed, 1)
+        self.assertEqual(result.next_page, 12)
+        self.assertEqual(record_error.call_args.args[1], 12)
 
     def test_bulk_season_sync_rejects_invalid_limits(self):
         with self.assertRaises(ValueError):

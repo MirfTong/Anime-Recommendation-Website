@@ -15,11 +15,15 @@ class JikanWorkflowTests(unittest.TestCase):
         self.assertNotIn("gh workflow run", workflow)
         self.assertNotIn("actions: write", workflow)
 
-    def test_sync_includes_bulk_and_detail_season_paths(self):
+    def test_sync_runs_all_phases_in_one_rate_limited_process(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
-        self.assertIn("--bulk-seasons --page-limit 40", workflow)
-        self.assertIn("--backfill-seasons --limit 1000", workflow)
+        command = (
+            "python -m backend.jobs.jikan_etl "
+            "--scheduled-sync --page-limit 40 --limit 1000"
+        )
+        self.assertIn(command, workflow)
+        self.assertEqual(workflow.count("python -m backend.jobs.jikan_etl"), 1)
 
 
 if __name__ == "__main__":
