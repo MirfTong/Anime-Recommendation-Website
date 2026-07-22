@@ -79,8 +79,10 @@ export default function App() {
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [genres, setGenres] = useState([]);
   const [anime, setAnime] = useState([]);
+  const [seasonalAnime, setSeasonalAnime] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
   const [loading, setLoading] = useState(true);
+  const [seasonalLoading, setSeasonalLoading] = useState(true);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(null);
   const genreDropdownRef = useRef(null);
@@ -95,9 +97,24 @@ export default function App() {
     } catch (requestError) { setError(requestError.message); } finally { setLoading(false); }
   }, [filters]);
 
+  const loadSeasonalAnime = useCallback(async () => {
+    setSeasonalLoading(true);
+    try {
+      const response = await fetch("/api/v1/anime/seasonal?limit=6");
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error?.message || "Could not load seasonal anime.");
+      setSeasonalAnime(body.items ?? []);
+    } catch {
+      setSeasonalAnime([]);
+    } finally {
+      setSeasonalLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetch("/api/v1/genres").then((response) => response.json()).then((body) => setGenres(body.items ?? [])).catch(() => setGenres([]));
     loadAnime(1, EMPTY_FILTERS);
+    loadSeasonalAnime();
   }, []); // Initial catalogue only; filters are submitted explicitly.
 
   useEffect(() => {
@@ -172,8 +189,18 @@ export default function App() {
       </form>
 
       {error && <div className="mb-6 rounded-xl border border-rose-400/40 bg-rose-950/60 p-4 text-rose-100">{error}</div>}
-      {!loading && !error && <p className="mb-5 text-sm text-slate-400">{pagination.total.toLocaleString()} anime found</p>}
-      {loading ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">{Array.from({ length: 12 }, (_, index) => <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />)}</div> : anime.length > 0 ? <section className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">{anime.map((entry) => <AnimeCard key={entry.id} anime={entry} onSelect={openDetail} />)}</section> : !error && <div className="rounded-2xl border border-dashed border-slate-600 p-12 text-center text-slate-300">No anime match those filters. Try widening your search.</div>}
+      <section className="mb-12" aria-labelledby="popular-this-season">
+        <h2 id="popular-this-season" className="mb-5 text-3xl font-black tracking-tight text-white sm:text-4xl">POPULAR THIS SEASON</h2>
+        {seasonalLoading ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">{Array.from({ length: 6 }, (_, index) => <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />)}</div> : seasonalAnime.length > 0 ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">{seasonalAnime.map((entry) => <AnimeCard key={entry.id} anime={entry} onSelect={openDetail} />)}</div> : <p className="rounded-2xl border border-dashed border-slate-700 p-5 text-sm text-slate-400">Seasonal anime are still being refreshed. Check back shortly.</p>}
+      </section>
+
+      <section aria-labelledby="top-rated">
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-2">
+          <h2 id="top-rated" className="text-3xl font-black tracking-tight text-white sm:text-4xl">TOP RATED</h2>
+          {!loading && !error && <p className="text-sm text-slate-400">{pagination.total.toLocaleString()} anime found</p>}
+        </div>
+        {loading ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">{Array.from({ length: 12 }, (_, index) => <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />)}</div> : anime.length > 0 ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">{anime.map((entry) => <AnimeCard key={entry.id} anime={entry} onSelect={openDetail} />)}</div> : !error && <div className="rounded-2xl border border-dashed border-slate-600 p-12 text-center text-slate-300">No anime match those filters. Try widening your search.</div>}
+      </section>
       {!loading && pagination.pages > 1 && <nav className="mt-10 flex items-center justify-center gap-4"><button className="rounded-lg border border-white/15 px-4 py-2 disabled:opacity-40" disabled={pagination.page === 1} onClick={() => loadAnime(pagination.page - 1)} type="button">Previous</button><span className="text-slate-400">Page {pagination.page} of {pagination.pages}</span><button className="rounded-lg border border-white/15 px-4 py-2 disabled:opacity-40" disabled={pagination.page === pagination.pages} onClick={() => loadAnime(pagination.page + 1)} type="button">Next</button></nav>}
       <DetailModal anime={selected} onClose={() => setSelected(null)} />
     </main>
