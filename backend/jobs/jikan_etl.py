@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.error import HTTPError
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
 
 from backend.app import app
@@ -25,13 +25,14 @@ from backend.models import Anime, AnimeGenre, Genre, db
 from backend.schema import ensure_anime_schema
 from backend.services.jikan_client import (
     JikanTemporaryError,
-    get_anime_full,
+    get_anime,
     get_season_anime,
 )
 
 
 SKIPPABLE_JIKAN_STATUS_CODES = frozenset({404, 500, 502, 503, 504})
 JIKAN_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
+ORDERED_JIKAN_SEASONS = ("winter", "spring", "summer", "fall")
 
 
 def _names(entries: list[dict[str, Any]] | None) -> list[str]:
@@ -191,7 +192,7 @@ def refresh_catalogue(
     *,
     limit: int | None = None,
     batch_size: int = 25,
-    fetch_anime: Callable[[int], dict[str, Any]] = get_anime_full,
+    fetch_anime: Callable[[int], dict[str, Any]] = get_anime,
 ) -> tuple[int, int]:
     """Fetch and update existing anime rows; return ``(updated, skipped)``.
 
@@ -248,19 +249,18 @@ def sync_season(
     *,
     limit: int | None = None,
     batch_size: int = 25,
-    fetch_anime: Callable[[int], dict[str, Any]] = get_anime_full,
     fetch_season: Callable[[int | None, str | None], list[dict[str, Any]]] = get_season_anime,
 ) -> tuple[int, int]:
     """Discover a season's anime and insert or update them; return ``(saved, skipped)``."""
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
-    seasonal_ids = list(
-        dict.fromkeys(
-            entry["mal_id"]
-            for entry in fetch_season(year, season)
-            if isinstance(entry.get("mal_id"), int) and entry["mal_id"] > 0
-        )
-    )
+    seasonal_entries = fetch_season(year, season)
+    seasonal_data = {
+        entry["mal_id"]: entry
+        for entry in seasonal_entries
+        if isinstance(entry.get("mal_id"), int) and entry["mal_id"] > 0
+    }
+    seasonal_ids = list(seasonal_data)
     if limit is not None:
         if limit <= 0:
             raise ValueError("limit must be positive")
@@ -277,12 +277,10 @@ def sync_season(
             )
         }
         genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
-        saved = skipped = 0
+        saved = 0
+        skipped = len(seasonal_entries) - len(seasonal_data)
         for mal_id in seasonal_ids:
-            data = _fetch_anime_data(mal_id, fetch_anime)
-            if data is None:
-                skipped += 1
-                continue
+            data = seasonal_data[mal_id]
             anime = existing.get(mal_id)
             if anime is None:
                 anime = _new_anime(data)
@@ -293,6 +291,108 @@ def sync_season(
             _commit_completed_batch(saved, batch_size)
         db.session.commit()
         return saved, skipped
+
+
+def _pending_season_years(year_limit: int) -> list[int]:
+    """Return years whose unclassified records have waited longest for backfill."""
+    statement = (
+        select(Anime.year)
+        .where(Anime.year.is_not(None), Anime.season.is_(None))
+        .group_by(Anime.year)
+        .order_by(
+            func.min(Anime.last_season_attempt).asc().nulls_first(),
+            Anime.year.desc(),
+        )
+        .limit(year_limit)
+    )
+    return list(db.session.scalars(statement))
+
+
+def _mark_season_year_attempt(year: int) -> None:
+    """Move every still-unclassified row for a year forward in the queue."""
+    db.session.execute(
+        text(
+            "UPDATE anime SET last_season_attempt = :attempted "
+            "WHERE year = :year AND season IS NULL"
+        ),
+        {"attempted": datetime.now(timezone.utc), "year": year},
+    )
+
+
+def backfill_missing_seasons(
+    *,
+    year_limit: int = 5,
+    batch_size: int = 25,
+    fetch_season: Callable[[int | None, str | None], list[dict[str, Any]]] = get_season_anime,
+) -> tuple[int, int, int]:
+    """Backfill existing rows from Jikan's efficient year/season listings.
+
+    Complete seasonal listing responses already contain the score, image,
+    genres, year, and season. Reusing those records avoids thousands of
+    unreliable per-title requests. Years are marked attempted only after all
+    four seasons load successfully, allowing later runs to advance safely.
+    """
+    if year_limit <= 0:
+        raise ValueError("year_limit must be positive")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    with app.app_context():
+        _ensure_schema()
+        years = _pending_season_years(year_limit)
+
+    completed_years = updated = failed_years = 0
+    for year in years:
+        entries: list[dict[str, Any]] = []
+        try:
+            for season in ORDERED_JIKAN_SEASONS:
+                entries.extend(fetch_season(year, season))
+        except JikanTemporaryError:
+            with app.app_context():
+                _mark_season_year_attempt(year)
+                db.session.commit()
+            failed_years += 1
+            continue
+        except HTTPError as error:
+            if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
+                raise
+            with app.app_context():
+                _mark_season_year_attempt(year)
+                db.session.commit()
+            failed_years += 1
+            continue
+
+        data_by_mal_id = {
+            entry["mal_id"]: entry
+            for entry in entries
+            if isinstance(entry.get("mal_id"), int) and entry["mal_id"] > 0
+        }
+        with app.app_context():
+            existing = {
+                anime.mal_id: anime
+                for anime in db.session.scalars(
+                    select(Anime)
+                    .where(Anime.mal_id.in_(data_by_mal_id))
+                    .options(
+                        selectinload(Anime.genre_links).selectinload(AnimeGenre.genre)
+                    )
+                )
+            }
+            genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
+            for mal_id, data in data_by_mal_id.items():
+                anime = existing.get(mal_id)
+                if anime is None:
+                    continue
+                _update_anime(anime, data, genres)
+                updated += 1
+                _commit_completed_batch(updated, batch_size)
+
+            db.session.flush()
+            _mark_season_year_attempt(year)
+            db.session.commit()
+            completed_years += 1
+
+    return completed_years, updated, failed_years
 
 
 def main() -> None:
@@ -308,11 +408,32 @@ def main() -> None:
         help="Discover and save anime from this season, including sequels.",
     )
     parser.add_argument("--year", type=int, help="Year for --season (not current).")
+    parser.add_argument(
+        "--backfill-seasons",
+        action="store_true",
+        help="Fill missing seasons from several historical seasonal listings.",
+    )
+    parser.add_argument(
+        "--year-limit",
+        type=int,
+        default=5,
+        help="Number of catalogue years to process with --backfill-seasons.",
+    )
     args = parser.parse_args()
 
     if args.year is not None and args.season in (None, "current"):
         parser.error("--year requires --season winter, spring, summer, or fall")
-    if args.season:
+    if args.backfill_seasons:
+        if args.season or args.year is not None or args.anime_id:
+            parser.error("--backfill-seasons cannot be combined with anime or season selection")
+        completed, updated, failed = backfill_missing_seasons(
+            year_limit=args.year_limit, batch_size=args.batch_size
+        )
+        print(
+            f"Backfilled {updated} anime across {completed} catalogue years; "
+            f"deferred {failed} years after Jikan errors."
+        )
+    elif args.season:
         year = None if args.season == "current" else args.year
         if args.season != "current" and year is None:
             parser.error("a named --season requires --year")

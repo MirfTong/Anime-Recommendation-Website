@@ -36,6 +36,7 @@ class Anime(db.Model):
     score: Mapped[float | None] = mapped_column(index=True)
     episodes: Mapped[int | None] = mapped_column(index=True)
     last_jikan_sync: Mapped[datetime | None] = mapped_column(index=True)
+    last_season_attempt: Mapped[datetime | None] = mapped_column(index=True)
     mal_url: Mapped[str]
     sequel: Mapped[bool]
     image_url: Mapped[str]

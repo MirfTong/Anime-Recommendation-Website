@@ -19,6 +19,7 @@ def ensure_anime_schema() -> None:
     for definition in (
         "last_jikan_sync TIMESTAMP WITH TIME ZONE",
         "last_jikan_attempt TIMESTAMP WITH TIME ZONE",
+        "last_season_attempt TIMESTAMP WITH TIME ZONE",
         "mal_id INTEGER",
         "season VARCHAR(6)",
     ):
@@ -36,6 +37,12 @@ def ensure_anime_schema() -> None:
         text(
             "CREATE INDEX IF NOT EXISTS ix_anime_last_jikan_attempt "
             "ON anime (last_jikan_attempt)"
+        )
+    )
+    db.session.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_anime_last_season_attempt "
+            "ON anime (last_season_attempt)"
         )
     )
     db.session.execute(
