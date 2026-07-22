@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from backend.app import app
 
@@ -31,6 +32,19 @@ class AppTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertTrue(all(item["season"] == "winter" for item in body["items"]))
+
+    def test_popular_current_season_returns_a_limited_seasonal_list(self):
+        with patch("backend.app._current_season_identity", return_value=(2026, "summer")):
+            response = self.client.get("/api/v1/anime/seasonal?limit=6")
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["season"], "summer")
+        self.assertEqual(body["year"], 2026)
+        self.assertLessEqual(len(body["items"]), 6)
+        self.assertTrue(
+            all(item["season"] == "summer" and item["year"] == 2026 for item in body["items"])
+        )
 
     def test_invalid_filter_returns_json_error(self):
         response = self.client.get("/api/v1/anime?min_score=20")

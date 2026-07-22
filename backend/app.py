@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_BUILD_DIR = PROJECT_ROOT / "static" / "react"
 MAX_PAGE_SIZE = 100
 VALID_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
+
+
+def _current_season_identity(now: datetime | None = None) -> tuple[int, str]:
+    """Return the current anime season using Japan's calendar."""
+    japan_time = timezone(timedelta(hours=9))
+    current = (now or datetime.now(timezone.utc)).astimezone(japan_time)
+    seasons = ("winter", "spring", "summer", "fall")
+    return current.year, seasons[(current.month - 1) // 3]
 
 
 class ApiError(Exception):
@@ -191,6 +200,30 @@ def random_anime():
         .limit(limit)
     ).all()
     return jsonify({"items": [_serialize_anime(entry) for entry in anime]})
+
+
+@app.get(f"{API_PREFIX}/anime/seasonal")
+def popular_current_season():
+    """Return the highest-rated anime from the current Japan-season window."""
+    limit = _integer_argument("limit", minimum=1, maximum=12) or 6
+    year, season = _current_season_identity()
+    anime = db.session.scalars(
+        _anime_statement()
+        .where(
+            Anime.score.is_not(None),
+            Anime.year == year,
+            Anime.season == season,
+        )
+        .order_by(Anime.score.desc(), Anime.title)
+        .limit(limit)
+    ).all()
+    return jsonify(
+        {
+            "items": [_serialize_anime(entry) for entry in anime],
+            "season": season,
+            "year": year,
+        }
+    )
 
 
 @app.get(f"{API_PREFIX}/anime/<int:mal_id>")
