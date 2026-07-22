@@ -76,12 +76,12 @@ stored with those fields empty until Jikan provides them.
 
 ## Scheduled sync
 
-The GitHub Actions workflow is scheduled every five minutes. It keeps one
-database-writing batch active at a time, importing the current season and then
-refreshing the next 500 anime with their season metadata. With the queue, the
-next batch starts as soon as the previous one finishes. Before enabling it,
-add a repository Actions secret named `DATABASE_URL` with the external
-PostgreSQL URL.
+The GitHub Actions workflow continuously chains successful runs. Each run
+imports the current season, refreshes the next 500 anime with their season
+metadata, and dispatches its successor before exiting. The concurrency group
+keeps database writes sequential, while a three-hour schedule restarts the
+chain if a run fails. Before enabling it, add a repository Actions secret named
+`DATABASE_URL` with the external PostgreSQL URL.
 
 For Render, use this build command:
 

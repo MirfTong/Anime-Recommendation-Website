@@ -2,14 +2,16 @@ name: Continuous Jikan sync
 
 on:
   schedule:
-    # GitHub's shortest supported interval. Concurrency below ensures each
-    # batch follows the previous one without concurrent database writes.
-    - cron: "*/5 * * * *"
+    # Recovery trigger only. Successful runs dispatch their own successor.
+    - cron: "0 */3 * * *"
   workflow_dispatch:
 
-# Keep database writes sequential. If another schedule fires while a batch is
-# active, GitHub retains the next queued run rather than issuing concurrent
-# Jikan requests against the shared database.
+permissions:
+  actions: write
+  contents: read
+
+# The successor is dispatched before the current run exits, so this group
+# keeps it pending until the active database writer has finished.
 concurrency:
   group: jikan-sync
   cancel-in-progress: false
@@ -32,3 +34,8 @@ jobs:
         run: python -m backend.jobs.jikan_etl --season current
       - name: Refresh the oldest catalogue records and Jikan season metadata
         run: python -m backend.jobs.jikan_etl --limit 500
+      - name: Queue the next catalogue batch
+        if: ${{ success() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run jikan-sync.yml --ref main
