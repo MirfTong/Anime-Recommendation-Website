@@ -1,12 +1,15 @@
-name: Every-three-hours Jikan sync
+name: Continuous Jikan sync
 
 on:
   schedule:
-    # GitHub Actions schedules use UTC. Run at the start of every third hour.
-    - cron: "0 */3 * * *"
+    # GitHub's shortest supported interval. Concurrency below ensures each
+    # batch follows the previous one without concurrent database writes.
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
-# Keep database writes sequential if a manual run or a delayed schedule overlaps.
+# Keep database writes sequential. If another schedule fires while a batch is
+# active, GitHub retains the next queued run rather than issuing concurrent
+# Jikan requests against the shared database.
 concurrency:
   group: jikan-sync
   cancel-in-progress: false
