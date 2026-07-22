@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,7 @@ from backend.services.jikan_client import (
     JikanTemporaryError,
     get_anime,
     get_anime_catalogue_page,
+    get_anime_full,
     get_season_anime,
     get_season_page,
 )
@@ -35,6 +37,7 @@ CURRENT_SEASON_MAX_PAGES_PER_RUN = 10
 DEFAULT_SEASON_BACKFILL_LIMIT = 1000
 BULK_SEASON_MAX_PAGES_PER_RUN = 40
 BULK_SEASON_MAX_CONSECUTIVE_FAILURES = 3
+BULK_SEASON_STATE_KEY = "bulk:tv-catalogue-seasons:v2"
 DEGRADED_SUCCESS_RATE = 0.25
 
 
@@ -113,15 +116,37 @@ class BulkSeasonSyncResult:
     next_page: int = 1
 
 
-def _names(entries: list[dict[str, Any]] | None) -> list[str]:
+@dataclass(frozen=True)
+class SeasonCoverage:
+    total_tv: int
+    classified_tv: int
+
+    @property
+    def rate(self) -> float:
+        return self.classified_tv / self.total_tv if self.total_tv else 0.0
+
+
+@dataclass(frozen=True)
+class ScheduledSyncResult:
+    current_season: CurrentSeasonSyncResult
+    bulk_seasons: BulkSeasonSyncResult
+    season_backfill: SeasonBackfillResult
+    catalogue: CatalogueRefreshResult
+    coverage: SeasonCoverage
+
+
+def _names(entries: Any) -> list[str]:
     """Return unique, non-empty Jikan category names in API order."""
-    return list(
-        dict.fromkeys(
-            entry["name"].strip()
-            for entry in entries or []
-            if entry.get("name", "").strip()
-        )
-    )
+    if not isinstance(entries, list):
+        return []
+    names = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip())
+    return list(dict.fromkeys(names))
 
 
 def _detailed_genres(data: dict[str, Any], current: list[str]) -> list[str]:
@@ -151,6 +176,43 @@ def _is_tv(anime_type: Any) -> bool:
     return isinstance(anime_type, str) and anime_type.strip().upper() == "TV"
 
 
+def _season_from_air_date(data: dict[str, Any]) -> str | None:
+    """Infer a TV premiere season when the provider omits its season field."""
+    aired = data.get("aired")
+    if not isinstance(aired, dict):
+        return None
+
+    month = None
+    start = aired.get("from")
+    if isinstance(start, str):
+        match = re.match(r"^\d{4}-(\d{2})", start.strip())
+        if match:
+            month = int(match.group(1))
+
+    if month is None:
+        properties = aired.get("prop")
+        from_properties = (
+            properties.get("from") if isinstance(properties, dict) else None
+        )
+        candidate = (
+            from_properties.get("month") if isinstance(from_properties, dict) else None
+        )
+        if isinstance(candidate, int) and not isinstance(candidate, bool):
+            month = candidate
+
+    if month is None or not 1 <= month <= 12:
+        return None
+    return ("winter", "spring", "summer", "fall")[(month - 1) // 3]
+
+
+def _jpg_images(data: dict[str, Any]) -> dict[str, Any]:
+    images = data.get("images")
+    if not isinstance(images, dict):
+        return {}
+    jpg_images = images.get("jpg")
+    return jpg_images if isinstance(jpg_images, dict) else {}
+
+
 def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) -> None:
     """Map one Jikan anime object onto an existing catalogue row."""
     anime.title = data.get("title") or anime.title
@@ -161,32 +223,35 @@ def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) 
     )
     anime.type = data.get("type") or anime.type
     incoming_season = _season(data.get("season"))
+    if incoming_season is None and _is_tv(anime.type):
+        incoming_season = _season_from_air_date(data)
     if incoming_season is not None:
         anime.season = incoming_season
     elif not _is_tv(anime.type):
         # Films and specials legitimately have no broadcast season. A sparse
         # TV response must not erase a season obtained from a seasonal listing.
         anime.season = None
-    anime.year = data.get("year") or anime.year
-    score = _valid_score(data.get("score"))
-    if score is not None:
-        anime.score = score
-    anime.episodes = (
-        data.get("episodes") if data.get("episodes") is not None else anime.episodes
-    )
+    if "year" in data:
+        anime.year = data.get("year")
+    if "score" in data:
+        # An explicit null/zero means MAL does not currently publish a score.
+        # Clear stale CSV ratings instead of presenting them as authoritative.
+        anime.score = _valid_score(data.get("score"))
+    if "episodes" in data:
+        anime.episodes = data.get("episodes")
     anime.mal_url = data.get("url") or anime.mal_url
 
-    images = data.get("images") or {}
-    jpg_images = images.get("jpg") or {}
+    jpg_images = _jpg_images(data)
     anime.image_url = (
         jpg_images.get("large_image_url")
         or jpg_images.get("image_url")
         or anime.image_url
     )
     if "relations" in data:
+        relations = data.get("relations")
         anime.sequel = any(
-            relation.get("relation") == "Sequel"
-            for relation in data.get("relations") or []
+            isinstance(relation, dict) and relation.get("relation") == "Sequel"
+            for relation in (relations if isinstance(relations, list) else [])
         )
 
     genre_names = _names(data.get("genres"))
@@ -205,21 +270,25 @@ def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) 
             if name not in genre_names:
                 db.session.delete(link)
 
-    anime.genres_detailed = _detailed_genres(data, anime.genres_detailed)
+    anime.genres_detailed = _detailed_genres(data, anime.genres_detailed or [])
     anime.last_jikan_sync = datetime.now(timezone.utc)
 
 
 def _new_anime(data: dict[str, Any]) -> Anime:
     """Create a catalogue row from a Jikan anime object."""
-    images = (data.get("images") or {}).get("jpg") or {}
+    images = _jpg_images(data)
     mal_id = data["mal_id"]
+    anime_type = data.get("type") or "Unknown"
+    season = _season(data.get("season"))
+    if season is None and _is_tv(anime_type):
+        season = _season_from_air_date(data)
     return Anime(
         animeID=-mal_id,
         mal_id=mal_id,
         title=data.get("title") or f"MAL anime {mal_id}",
         alternative_title=data.get("title_english") or data.get("title_japanese"),
-        type=data.get("type") or "Unknown",
-        season=_season(data.get("season")),
+        type=anime_type,
+        season=season,
         year=data.get("year"),
         score=_valid_score(data.get("score")),
         episodes=data.get("episodes"),
@@ -277,7 +346,7 @@ def refresh_catalogue(
     *,
     limit: int | None = None,
     batch_size: int = 25,
-    fetch_anime: Callable[[int], dict[str, Any]] = get_anime,
+    fetch_anime: Callable[[int], dict[str, Any]] = get_anime_full,
 ) -> CatalogueRefreshResult:
     """Refresh the oldest-attempted rows and return classified health metrics."""
     if batch_size <= 0:
@@ -425,13 +494,15 @@ def _apply_season_page(
     data_by_mal_id = {
         entry["mal_id"]: _prepared_season_entry(entry, year, season)
         for entry in page_result.entries
-        if isinstance(entry.get("mal_id"), int) and entry["mal_id"] > 0
+        if isinstance(entry, dict)
+        and isinstance(entry.get("mal_id"), int)
+        and not isinstance(entry.get("mal_id"), bool)
+        and entry["mal_id"] > 0
+        and (not tv_only or _is_tv(entry.get("type")))
     }
     ids = list(data_by_mal_id)
     with app.app_context():
         statement = select(Anime).where(Anime.mal_id.in_(ids))
-        if tv_only:
-            statement = statement.where(func.upper(Anime.type) == "TV")
         statement = statement.options(
             selectinload(Anime.genre_links).selectinload(AnimeGenre.genre)
         )
@@ -538,17 +609,16 @@ def sync_bulk_anime_seasons(
 ) -> BulkSeasonSyncResult:
     """Update TV seasons from a low-request bulk anime catalogue.
 
-    One successful request can update up to 25 anime. Temporary failures move
-    past the failed page so a single unavailable page cannot block the whole
-    catalogue. A small circuit breaker ends a run during a broad outage; the
-    persisted cursor lets the next chained run continue with later pages.
+    One successful request can update up to 50 TV anime. Temporary failures
+    retry the same page a bounded number of times, then preserve its cursor for
+    the next scheduled run so valid rows are never silently skipped.
     """
     if max_pages <= 0:
         raise ValueError("max_pages must be positive")
     if max_consecutive_failures <= 0:
         raise ValueError("max_consecutive_failures must be positive")
 
-    state_key = "bulk:anime-catalogue-seasons"
+    state_key = BULK_SEASON_STATE_KEY
     with app.app_context():
         _ensure_schema()
     page = _next_page(state_key)
@@ -560,7 +630,6 @@ def sync_bulk_anime_seasons(
         try:
             fetched = fetch_page(page=page)
         except JikanTemporaryError as error:
-            page += 1
             _record_page_error(state_key, page, error)
             result.pages_failed += 1
             result.next_page = page
@@ -577,10 +646,13 @@ def sync_bulk_anime_seasons(
                 result.complete = True
                 result.next_page = 1
                 break
-            page += 1
             _record_page_error(state_key, page, error)
             result.pages_failed += 1
             result.next_page = page
+            # A sustained 429 is a provider-wide quota signal. Retrying later
+            # preserves this page instead of silently losing valid TV rows.
+            if error.code == 429:
+                break
             consecutive_failures += 1
             if consecutive_failures >= max_consecutive_failures:
                 break
@@ -689,6 +761,183 @@ def _append_step_summary(title: str, rows: list[tuple[str, Any]]) -> None:
         summary.write("\n")
 
 
+def _report_current_season(result: CurrentSeasonSyncResult) -> None:
+    print(
+        "Current season sync: "
+        f"saved={result.saved}, inserted={result.inserted}, "
+        f"seasons_assigned={result.seasons_assigned}, "
+        f"pages={result.pages_completed}, failed_pages={result.pages_failed}, "
+        f"complete={result.complete}, next_page={result.next_page}."
+    )
+    _append_step_summary(
+        "Current season sync",
+        [
+            ("Anime saved", result.saved),
+            ("Anime inserted", result.inserted),
+            ("Seasons assigned", result.seasons_assigned),
+            ("Pages committed", result.pages_completed),
+            ("Failed pages", result.pages_failed),
+            ("Next page", result.next_page),
+        ],
+    )
+    if result.pages_failed:
+        _workflow_warning(
+            "Current-season pagination paused",
+            f"Page {result.next_page} failed and will be resumed by the next run.",
+        )
+
+
+def _report_bulk_seasons(result: BulkSeasonSyncResult) -> None:
+    print(
+        "Bulk anime season sync: "
+        f"attempted_pages={result.pages_attempted}, "
+        f"completed_pages={result.pages_completed}, "
+        f"failed_pages={result.pages_failed}, updated={result.updated}, "
+        f"seasons_assigned={result.seasons_assigned}, "
+        f"complete={result.complete}, next_page={result.next_page}."
+    )
+    _append_step_summary(
+        "Bulk anime season sync",
+        [
+            ("Pages attempted", result.pages_attempted),
+            ("Pages completed", result.pages_completed),
+            ("Pages failed", result.pages_failed),
+            ("Anime updated", result.updated),
+            ("Seasons assigned", result.seasons_assigned),
+            ("Next page", result.next_page),
+        ],
+    )
+    if result.pages_failed:
+        _workflow_warning(
+            "Bulk anime season sync degraded",
+            f"{result.pages_failed}/{result.pages_attempted} pages failed; the next run will retry page {result.next_page}.",
+        )
+
+
+def _report_season_backfill(result: SeasonBackfillResult) -> None:
+    print(
+        "TV season backfill: "
+        f"selected={result.selected}, updated={result.updated}, "
+        f"seasons_assigned={result.seasons_assigned}, "
+        f"still_missing={result.still_missing}, not_found={result.not_found}, "
+        f"temporary={result.temporary_errors}, invalid={result.invalid_payloads}, "
+        f"success_rate={result.success_rate:.1%}."
+    )
+    _append_step_summary(
+        "TV season backfill",
+        [
+            ("TV anime selected", result.selected),
+            ("Anime updated", result.updated),
+            ("Seasons assigned", result.seasons_assigned),
+            ("Successful responses still missing season", result.still_missing),
+            ("Success rate", f"{result.success_rate:.1%}"),
+            ("Temporary API failures", result.temporary_errors),
+            ("Not found", result.not_found),
+            ("Invalid payloads", result.invalid_payloads),
+        ],
+    )
+    if result.selected >= 100 and result.success_rate < DEGRADED_SUCCESS_RATE:
+        _workflow_warning(
+            "TV season backfill degraded",
+            f"Only {result.updated}/{result.selected} records updated; {result.temporary_errors} were temporary API failures.",
+        )
+
+
+def _report_catalogue(result: CatalogueRefreshResult) -> None:
+    print(
+        "Catalogue refresh: "
+        f"selected={result.selected}, updated={result.updated}, "
+        f"not_found={result.not_found}, temporary={result.temporary_errors}, "
+        f"invalid={result.invalid_payloads}, missing_mal_id={result.missing_mal_id}, "
+        f"success_rate={result.success_rate:.1%}."
+    )
+    _append_step_summary(
+        "Catalogue refresh",
+        [
+            ("Selected", result.selected),
+            ("Updated", result.updated),
+            ("Success rate", f"{result.success_rate:.1%}"),
+            ("Temporary API failures", result.temporary_errors),
+            ("Not found", result.not_found),
+            ("Invalid payloads", result.invalid_payloads),
+        ],
+    )
+    if result.selected >= 100 and result.success_rate < DEGRADED_SUCCESS_RATE:
+        _workflow_warning(
+            "Catalogue refresh degraded",
+            f"Only {result.updated}/{result.selected} records updated; {result.temporary_errors} were temporary API failures.",
+        )
+
+
+def get_season_coverage() -> SeasonCoverage:
+    """Return production-facing TV season coverage for workflow reporting."""
+    with app.app_context():
+        total_tv = db.session.scalar(
+            select(func.count(Anime.animeID)).where(func.upper(Anime.type) == "TV")
+        )
+        classified_tv = db.session.scalar(
+            select(func.count(Anime.animeID)).where(
+                func.upper(Anime.type) == "TV", Anime.season.is_not(None)
+            )
+        )
+    return SeasonCoverage(
+        total_tv=int(total_tv or 0), classified_tv=int(classified_tv or 0)
+    )
+
+
+def _report_season_coverage(coverage: SeasonCoverage) -> None:
+    print(
+        "TV season coverage: "
+        f"classified={coverage.classified_tv}, total={coverage.total_tv}, "
+        f"coverage={coverage.rate:.1%}."
+    )
+    _append_step_summary(
+        "TV season coverage",
+        [
+            ("TV anime with season", coverage.classified_tv),
+            ("Total TV anime", coverage.total_tv),
+            ("Coverage", f"{coverage.rate:.1%}"),
+        ],
+    )
+
+
+def run_scheduled_sync(
+    *,
+    limit: int = DEFAULT_SEASON_BACKFILL_LIMIT,
+    batch_size: int = 25,
+    page_limit: int = BULK_SEASON_MAX_PAGES_PER_RUN,
+) -> ScheduledSyncResult:
+    """Run every scheduled phase in one process with one shared rate limiter."""
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if page_limit <= 0:
+        raise ValueError("page_limit must be positive")
+
+    current_result = sync_current_season()
+    _report_current_season(current_result)
+
+    bulk_result = sync_bulk_anime_seasons(max_pages=page_limit)
+    _report_bulk_seasons(bulk_result)
+
+    backfill_result = backfill_missing_seasons(limit=limit, batch_size=batch_size)
+    _report_season_backfill(backfill_result)
+
+    catalogue_result = refresh_catalogue(limit=limit, batch_size=batch_size)
+    _report_catalogue(catalogue_result)
+
+    coverage = get_season_coverage()
+    _report_season_coverage(coverage)
+    return ScheduledSyncResult(
+        current_season=current_result,
+        bulk_seasons=bulk_result,
+        season_backfill=backfill_result,
+        catalogue=catalogue_result,
+        coverage=coverage,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -715,16 +964,49 @@ def main() -> None:
         help="Update TV seasons from resumable bulk anime catalogue pages.",
     )
     parser.add_argument(
+        "--scheduled-sync",
+        action="store_true",
+        help="Run every scheduled sync phase in one rate-limited process.",
+    )
+    parser.add_argument(
         "--page-limit",
         type=int,
-        default=BULK_SEASON_MAX_PAGES_PER_RUN,
         help="Maximum bulk catalogue pages to process.",
     )
     args = parser.parse_args()
 
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit must be positive")
+    if args.batch_size <= 0:
+        parser.error("--batch-size must be positive")
+    if args.page_limit is not None and args.page_limit <= 0:
+        parser.error("--page-limit must be positive")
     if args.year is not None and args.season in (None, "current"):
         parser.error("--year requires --season winter, spring, summer, or fall")
-    if args.bulk_seasons:
+    if args.season and args.anime_id:
+        parser.error("--anime-id cannot be combined with --season")
+    if args.page_limit is not None and not (args.bulk_seasons or args.scheduled_sync):
+        parser.error("--page-limit requires --bulk-seasons or --scheduled-sync")
+    if args.bulk_seasons and args.limit is not None:
+        parser.error("--limit is not used with --bulk-seasons")
+    page_limit = args.page_limit or BULK_SEASON_MAX_PAGES_PER_RUN
+    if args.scheduled_sync:
+        if (
+            args.bulk_seasons
+            or args.backfill_seasons
+            or args.season
+            or args.year is not None
+            or args.anime_id
+        ):
+            parser.error(
+                "--scheduled-sync cannot be combined with another sync selection"
+            )
+        run_scheduled_sync(
+            limit=args.limit or DEFAULT_SEASON_BACKFILL_LIMIT,
+            batch_size=args.batch_size,
+            page_limit=page_limit,
+        )
+    elif args.bulk_seasons:
         if (
             args.backfill_seasons
             or args.season
@@ -734,31 +1016,7 @@ def main() -> None:
             parser.error(
                 "--bulk-seasons cannot be combined with anime or season selection"
             )
-        result = sync_bulk_anime_seasons(max_pages=args.page_limit)
-        print(
-            "Bulk anime season sync: "
-            f"attempted_pages={result.pages_attempted}, "
-            f"completed_pages={result.pages_completed}, "
-            f"failed_pages={result.pages_failed}, updated={result.updated}, "
-            f"seasons_assigned={result.seasons_assigned}, "
-            f"complete={result.complete}, next_page={result.next_page}."
-        )
-        _append_step_summary(
-            "Bulk anime season sync",
-            [
-                ("Pages attempted", result.pages_attempted),
-                ("Pages completed", result.pages_completed),
-                ("Pages failed", result.pages_failed),
-                ("Anime updated", result.updated),
-                ("Seasons assigned", result.seasons_assigned),
-                ("Next page", result.next_page),
-            ],
-        )
-        if result.pages_failed:
-            _workflow_warning(
-                "Bulk anime season sync degraded",
-                f"{result.pages_failed}/{result.pages_attempted} pages failed; the next run will continue at page {result.next_page}.",
-            )
+        _report_bulk_seasons(sync_bulk_anime_seasons(max_pages=page_limit))
     elif args.backfill_seasons:
         if args.season or args.year is not None or args.anime_id:
             parser.error(
@@ -768,57 +1026,9 @@ def main() -> None:
             limit=args.limit or DEFAULT_SEASON_BACKFILL_LIMIT,
             batch_size=args.batch_size,
         )
-        print(
-            "TV season backfill: "
-            f"selected={result.selected}, updated={result.updated}, "
-            f"seasons_assigned={result.seasons_assigned}, "
-            f"still_missing={result.still_missing}, not_found={result.not_found}, "
-            f"temporary={result.temporary_errors}, invalid={result.invalid_payloads}, "
-            f"success_rate={result.success_rate:.1%}."
-        )
-        _append_step_summary(
-            "TV season backfill",
-            [
-                ("TV anime selected", result.selected),
-                ("Anime updated", result.updated),
-                ("Seasons assigned", result.seasons_assigned),
-                ("Successful responses still missing season", result.still_missing),
-                ("Success rate", f"{result.success_rate:.1%}"),
-                ("Temporary API failures", result.temporary_errors),
-                ("Not found", result.not_found),
-                ("Invalid payloads", result.invalid_payloads),
-            ],
-        )
-        if result.selected >= 100 and result.success_rate < DEGRADED_SUCCESS_RATE:
-            _workflow_warning(
-                "TV season backfill degraded",
-                f"Only {result.updated}/{result.selected} records updated; {result.temporary_errors} were temporary API failures.",
-            )
+        _report_season_backfill(result)
     elif args.season == "current":
-        result = sync_current_season()
-        print(
-            "Current season sync: "
-            f"saved={result.saved}, inserted={result.inserted}, "
-            f"seasons_assigned={result.seasons_assigned}, "
-            f"pages={result.pages_completed}, failed_pages={result.pages_failed}, "
-            f"complete={result.complete}, next_page={result.next_page}."
-        )
-        _append_step_summary(
-            "Current season sync",
-            [
-                ("Anime saved", result.saved),
-                ("Anime inserted", result.inserted),
-                ("Seasons assigned", result.seasons_assigned),
-                ("Pages committed", result.pages_completed),
-                ("Failed pages", result.pages_failed),
-                ("Next page", result.next_page),
-            ],
-        )
-        if result.pages_failed:
-            _workflow_warning(
-                "Current-season pagination paused",
-                f"Page {result.next_page} failed and will be resumed by the next run.",
-            )
+        _report_current_season(sync_current_season())
     elif args.season:
         if args.year is None:
             parser.error("a named --season requires --year")
@@ -835,29 +1045,7 @@ def main() -> None:
         result = refresh_catalogue(
             args.anime_id, limit=args.limit, batch_size=args.batch_size
         )
-        print(
-            "Catalogue refresh: "
-            f"selected={result.selected}, updated={result.updated}, "
-            f"not_found={result.not_found}, temporary={result.temporary_errors}, "
-            f"invalid={result.invalid_payloads}, missing_mal_id={result.missing_mal_id}, "
-            f"success_rate={result.success_rate:.1%}."
-        )
-        _append_step_summary(
-            "Catalogue refresh",
-            [
-                ("Selected", result.selected),
-                ("Updated", result.updated),
-                ("Success rate", f"{result.success_rate:.1%}"),
-                ("Temporary API failures", result.temporary_errors),
-                ("Not found", result.not_found),
-                ("Invalid payloads", result.invalid_payloads),
-            ],
-        )
-        if result.selected >= 100 and result.success_rate < DEGRADED_SUCCESS_RATE:
-            _workflow_warning(
-                "Catalogue refresh degraded",
-                f"Only {result.updated}/{result.selected} records updated; {result.temporary_errors} were temporary API failures.",
-            )
+        _report_catalogue(result)
 
 
 if __name__ == "__main__":

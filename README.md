@@ -77,8 +77,9 @@ unavailable, so the next run advances instead of getting stuck:
 .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --backfill-seasons --limit 1000
 ```
 
-The scheduled workflow also scans 40 bulk catalogue pages per run, allowing up
-to 1,000 records to be examined with only 40 requests:
+The scheduled workflow also scans 40 TV-only bulk catalogue pages per run.
+With 50 entries per page, up to 2,000 TV records can be examined with only 40
+requests:
 
 ```powershell
 .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --bulk-seasons --page-limit 40
@@ -88,8 +89,11 @@ The client uses Tenrai's Jikan-compatible v1 API as its primary provider and
 the public Jikan v4 API as a fallback. Override either endpoint with
 `ANIME_API_BASE_URL` or `ANIME_API_FALLBACK_BASE_URL`. Calls remain limited to
 three requests per second and 55 per minute, with bounded retries for temporary
-gateway errors. Current-season and bulk imports commit one page at a time and
-persist their cursors, so later failures do not discard successful pages.
+gateway errors. Per-title lookups can use the fallback safely, including a
+one-minute primary cooldown after a sustained 429 response. Paginated
+current-season and bulk scans stay pinned to one provider so page boundaries
+cannot change mid-cursor. They commit one page at a time and preserve a failed
+page for the next run, so later failures do not discard or skip data.
 
 ## Scheduled sync
 
@@ -98,9 +102,18 @@ pages of current-season discovery, scans 40 bulk catalogue pages, refreshes the
 next 1,000 TV anime still missing season metadata, and refreshes the next 1,000
 general catalogue records. Eight scheduled runs use roughly 16,000 detail
 requests per day plus low-volume page requests, staying below the provider's
-40,000-request public daily cap. The concurrency group keeps database writes
+40,000-request public daily cap. All phases run in one Python process so the
+rolling rate limiter remains active between phases. The Actions summary reports
+the final TV season coverage, and the concurrency group keeps database writes
 sequential. Before enabling it, add a repository Actions secret named
 `DATABASE_URL` with the external PostgreSQL URL.
+
+The same complete pass can be started manually without resetting the limiter
+between phases:
+
+```powershell
+.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --scheduled-sync --page-limit 40 --limit 1000
+```
 
 For Render, use this build command:
 

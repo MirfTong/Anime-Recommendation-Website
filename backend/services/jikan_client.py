@@ -23,6 +23,9 @@ MAX_429_RETRIES = 4
 MAX_ANIME_TRANSIENT_RETRIES = 1
 MAX_SEASON_TRANSIENT_RETRIES = 2
 MAX_TRANSIENT_RETRY_BUDGET = 100
+# Match the providers' rolling per-minute window before probing the primary
+# again; a longer Retry-After header still takes precedence.
+PRIMARY_429_COOLDOWN_SECONDS = 60
 REQUEST_TIMEOUT_SECONDS = 20
 SERVER_ERROR_STATUS_CODES = frozenset({500, 502, 503, 504})
 USER_AGENT = "KyoQuan/1.0 (+https://github.com/MirfTong/Anime-Recommendation-Website)"
@@ -76,6 +79,7 @@ class JikanClient:
         self._sleeper = sleeper
         self._request_times: deque[float] = deque()
         self._last_request_time: float | None = None
+        self._primary_cooldown_until = 0.0
         self._transient_retries_remaining = transient_retry_budget
         configured_base_url = (
             base_url
@@ -135,19 +139,16 @@ class JikanClient:
 
         path = "/seasons/now" if year is None else f"/seasons/{year}/{season}"
         request_path = path if page == 1 else f"{path}?page={page}"
-        payload = self._get(
+        payload = self._get_page_from_primary(
             request_path,
             max_transient_retries=MAX_SEASON_TRANSIENT_RETRIES,
             retry_network_errors=True,
         )
-        data = payload.get("data")
-        if not isinstance(data, list):
-            raise ValueError("Jikan seasonal response did not contain an anime list")
-        pagination = payload.get("pagination") or {}
+        data, pagination = self._page_data(payload, description="seasonal response")
         return JikanSeasonPage(
             entries=[entry for entry in data if isinstance(entry, dict)],
             page=page,
-            has_next_page=bool(pagination.get("has_next_page")),
+            has_next_page=pagination["has_next_page"],
         )
 
     def get_season_anime(
@@ -166,25 +167,28 @@ class JikanClient:
     def get_anime_catalogue_page(self, *, page: int = 1) -> JikanAnimePage:
         """Return one MAL-ID-ordered page from the bulk anime search."""
         self._validate_page(page)
-        payload = self._get(
-            f"/anime?order_by=mal_id&sort=asc&page={page}",
+        payload = self._get_page_from_primary(
+            f"/anime?type=tv&limit=50&order_by=mal_id&sort=asc&page={page}",
             max_transient_retries=MAX_SEASON_TRANSIENT_RETRIES,
             retry_network_errors=True,
         )
-        data = payload.get("data")
-        if not isinstance(data, list):
-            raise ValueError("Anime catalogue response did not contain a list")
-        pagination = payload.get("pagination") or {}
+        data, pagination = self._page_data(
+            payload, description="anime catalogue response"
+        )
         last_visible_page = pagination.get("last_visible_page")
+        if last_visible_page is not None and (
+            isinstance(last_visible_page, bool)
+            or not isinstance(last_visible_page, int)
+            or last_visible_page <= 0
+        ):
+            raise JikanTemporaryError(
+                "Anime API anime catalogue response had invalid pagination"
+            )
         return JikanAnimePage(
             entries=[entry for entry in data if isinstance(entry, dict)],
             page=page,
-            has_next_page=bool(pagination.get("has_next_page")),
-            last_visible_page=(
-                last_visible_page
-                if isinstance(last_visible_page, int) and last_visible_page > 0
-                else None
-            ),
+            has_next_page=pagination["has_next_page"],
+            last_visible_page=last_visible_page,
         )
 
     def _get(
@@ -195,6 +199,14 @@ class JikanClient:
         retry_network_errors: bool,
     ) -> dict[str, Any]:
         """Fetch JSON from the primary provider, then a compatible fallback."""
+        if self._fallback_base_url is not None and self._primary_cooldown_is_active():
+            return self._get_from_base(
+                self._fallback_base_url,
+                path,
+                max_transient_retries=max_transient_retries,
+                retry_network_errors=retry_network_errors,
+            )
+
         try:
             return self._get_from_base(
                 self._base_url,
@@ -203,10 +215,11 @@ class JikanClient:
                 retry_network_errors=retry_network_errors,
             )
         except HTTPError as error:
-            if (
-                self._fallback_base_url is None
-                or error.code not in SERVER_ERROR_STATUS_CODES
-            ):
+            if self._fallback_base_url is None:
+                raise
+            if error.code == 429:
+                self._start_primary_cooldown(error)
+            elif error.code not in SERVER_ERROR_STATUS_CODES:
                 raise
         except JikanTemporaryError:
             if self._fallback_base_url is None:
@@ -218,6 +231,30 @@ class JikanClient:
             max_transient_retries=max_transient_retries,
             retry_network_errors=retry_network_errors,
         )
+
+    def _get_page_from_primary(
+        self,
+        path: str,
+        *,
+        max_transient_retries: int,
+        retry_network_errors: bool,
+    ) -> dict[str, Any]:
+        """Fetch one cursor page without ever mixing pagination providers."""
+        if self._primary_cooldown_is_active():
+            raise JikanTemporaryError(
+                f"Primary anime API is cooling down after rate limiting: {path}"
+            )
+        try:
+            return self._get_from_base(
+                self._base_url,
+                path,
+                max_transient_retries=max_transient_retries,
+                retry_network_errors=retry_network_errors,
+            )
+        except HTTPError as error:
+            if error.code == 429:
+                self._start_primary_cooldown(error)
+            raise
 
     def _get_from_base(
         self,
@@ -238,7 +275,17 @@ class JikanClient:
             )
             try:
                 with self._opener(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                    return json.load(response)
+                    try:
+                        payload = json.load(response)
+                    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                        raise JikanTemporaryError(
+                            f"Anime API returned invalid JSON: {path}"
+                        ) from error
+                    if not isinstance(payload, dict):
+                        raise JikanTemporaryError(
+                            f"Anime API returned a non-object response: {path}"
+                        )
+                    return payload
             except HTTPError as error:
                 if error.code == 429 and rate_retries < MAX_429_RETRIES:
                     delay = self._retry_delay(error, rate_retries)
@@ -270,6 +317,36 @@ class JikanClient:
                 raise JikanTemporaryError(
                     f"Anime API request failed: {path}"
                 ) from error
+
+    @staticmethod
+    def _page_data(
+        payload: dict[str, Any], *, description: str
+    ) -> tuple[list[Any], dict[str, Any]]:
+        """Validate a page envelope before an ETL cursor can advance."""
+        data = payload.get("data")
+        pagination = payload.get("pagination")
+        if not isinstance(data, list):
+            raise JikanTemporaryError(f"Anime API {description} did not contain a list")
+        if not isinstance(pagination, dict) or not isinstance(
+            pagination.get("has_next_page"), bool
+        ):
+            raise JikanTemporaryError(f"Anime API {description} had invalid pagination")
+        return data, pagination
+
+    def _primary_cooldown_is_active(self) -> bool:
+        with self._lock:
+            return self._clock() < self._primary_cooldown_until
+
+    def _start_primary_cooldown(self, error: HTTPError) -> None:
+        cooldown_seconds = max(
+            PRIMARY_429_COOLDOWN_SECONDS,
+            self._retry_delay(error, MAX_429_RETRIES),
+        )
+        with self._lock:
+            self._primary_cooldown_until = max(
+                self._primary_cooldown_until,
+                self._clock() + cooldown_seconds,
+            )
 
     @staticmethod
     def _normalize_base_url(value: str, *, required: bool) -> str | None:

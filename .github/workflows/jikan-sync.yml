@@ -28,11 +28,5 @@ jobs:
           python-version: "3.14"
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Import the current season
-        run: python -m backend.jobs.jikan_etl --season current
-      - name: Update seasons from 40 bulk catalogue pages
-        run: python -m backend.jobs.jikan_etl --bulk-seasons --page-limit 40
-      - name: Backfill seasons for the next 1,000 TV anime
-        run: python -m backend.jobs.jikan_etl --backfill-seasons --limit 1000
-      - name: Refresh the next 1,000 catalogue records and season metadata
-        run: python -m backend.jobs.jikan_etl --limit 1000
+      - name: Run the complete rate-limited metadata sync
+        run: python -m backend.jobs.jikan_etl --scheduled-sync --page-limit 40 --limit 1000
