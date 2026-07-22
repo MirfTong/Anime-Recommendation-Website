@@ -77,7 +77,7 @@ stored with those fields empty until Jikan provides them.
 ## Scheduled sync
 
 The GitHub Actions workflow continuously chains successful runs. Each run
-imports the current season, refreshes the next 500 anime with their season
+imports the current season, refreshes the next 1,000 anime with their season
 metadata, and dispatches its successor before exiting. The concurrency group
 keeps database writes sequential, while a three-hour schedule restarts the
 chain if a run fails. Before enabling it, add a repository Actions secret named
