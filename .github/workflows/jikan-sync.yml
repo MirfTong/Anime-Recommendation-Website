@@ -1,17 +1,15 @@
-name: Continuous Jikan sync
+name: Scheduled anime metadata sync
 
 on:
   schedule:
-    # Recovery trigger only. Successful runs dispatch their own successor.
+    # Eight runs/day stays comfortably below the public provider's daily cap.
     - cron: "0 */3 * * *"
   workflow_dispatch:
 
 permissions:
-  actions: write
   contents: read
 
-# The successor is dispatched before the current run exits, so this group
-# keeps it pending until the active database writer has finished.
+# Scheduled and manual runs never write to the database concurrently.
 concurrency:
   group: jikan-sync
   cancel-in-progress: false
@@ -32,12 +30,9 @@ jobs:
         run: pip install -r requirements.txt
       - name: Import the current season
         run: python -m backend.jobs.jikan_etl --season current
+      - name: Update seasons from 40 bulk catalogue pages
+        run: python -m backend.jobs.jikan_etl --bulk-seasons --page-limit 40
       - name: Backfill seasons for the next 1,000 TV anime
         run: python -m backend.jobs.jikan_etl --backfill-seasons --limit 1000
-      - name: Refresh the next 1,000 catalogue records and Jikan season metadata
+      - name: Refresh the next 1,000 catalogue records and season metadata
         run: python -m backend.jobs.jikan_etl --limit 1000
-      - name: Queue the next catalogue batch
-        if: ${{ success() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run jikan-sync.yml --ref main

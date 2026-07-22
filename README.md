@@ -4,15 +4,15 @@
 
 A React single-page application backed by a Flask REST API for exploring an
 anime catalogue by genre, rating, episode count, and other metadata. PostgreSQL
-is the runtime data store, and Jikan is the sole catalogue source.
+is the runtime data store, with Tenrai and Jikan-compatible catalogue sources.
 
 ## Project layout
 
 ```text
-backend/             Flask application, models, Jikan client, and sync jobs
+backend/             Flask application, models, API client, and sync jobs
 frontend/            React and Vite source
 tests/               Backend test suite
-.github/workflows/   Scheduled Jikan sync
+.github/workflows/   Scheduled catalogue sync
 static/react/        Generated React build output (not committed)
 ```
 
@@ -53,7 +53,7 @@ Flask serves the React application at `/`; its JSON API is available under
 - `GET /api/v1/anime/<mal_id>` — a detailed anime record
 - `GET /api/v1/genres` — available genre filters
 
-## Jikan catalogue sync
+## Anime catalogue sync
 
 The catalogue is populated and refreshed by `backend.jobs.jikan_etl`. To add
 the current season, including sequels:
@@ -70,31 +70,37 @@ For a historical season, pass both its name and year, for example
 ```
 
 Missing TV season classifications are filled from a dedicated per-anime queue.
-Every title is marked attempted even when Jikan is temporarily unavailable, so
-the next run advances to different titles instead of getting stuck:
+Every title is marked attempted even when the provider is temporarily
+unavailable, so the next run advances instead of getting stuck:
 
 ```powershell
 .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --backfill-seasons --limit 1000
 ```
 
-Jikan calls are rate-limited with a bounded retry budget for temporary gateway
-errors. Current-season discovery commits one page at a time and persists its
-next-page cursor, so a later failure resumes without discarding successful
-pages. The TV backfill and general catalogue queues classify temporary errors,
-missing records, and invalid payloads separately. Airing shows with an unknown
-score, year, or episode count remain stored with those fields empty until Jikan
-provides them.
+The scheduled workflow also scans 40 bulk catalogue pages per run, allowing up
+to 1,000 records to be examined with only 40 requests:
+
+```powershell
+.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --bulk-seasons --page-limit 40
+```
+
+The client uses Tenrai's Jikan-compatible v1 API as its primary provider and
+the public Jikan v4 API as a fallback. Override either endpoint with
+`ANIME_API_BASE_URL` or `ANIME_API_FALLBACK_BASE_URL`. Calls remain limited to
+three requests per second and 55 per minute, with bounded retries for temporary
+gateway errors. Current-season and bulk imports commit one page at a time and
+persist their cursors, so later failures do not discard successful pages.
 
 ## Scheduled sync
 
-The GitHub Actions workflow continuously chains successful runs. Each run
-resumes up to 10 pages of current-season discovery, refreshes the next 1,000 TV
-anime still missing season metadata, refreshes the next 1,000 general catalogue
-records, and dispatches its successor. GitHub summaries and warnings expose
-update rates and temporary API failures. The concurrency group keeps database
-writes sequential, while a three-hour schedule restarts the chain if a run
-fails. Before enabling it, add a repository Actions secret named `DATABASE_URL`
-with the external PostgreSQL URL.
+The GitHub Actions workflow runs every three hours. Each run resumes up to 10
+pages of current-season discovery, scans 40 bulk catalogue pages, refreshes the
+next 1,000 TV anime still missing season metadata, and refreshes the next 1,000
+general catalogue records. Eight scheduled runs use roughly 16,000 detail
+requests per day plus low-volume page requests, staying below the provider's
+40,000-request public daily cap. The concurrency group keeps database writes
+sequential. Before enabling it, add a repository Actions secret named
+`DATABASE_URL` with the external PostgreSQL URL.
 
 For Render, use this build command:
 
@@ -111,5 +117,5 @@ npm --prefix frontend ci && npm --prefix frontend run build && pip install -r re
 ## Tech stack
 
 - Python, Flask, Flask-SQLAlchemy, and PostgreSQL
-- Jikan v4 API
+- Tenrai v1 and Jikan v4-compatible anime APIs
 - React, Vite, Tailwind CSS
