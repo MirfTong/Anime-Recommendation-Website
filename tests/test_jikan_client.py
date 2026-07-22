@@ -3,7 +3,7 @@ import unittest
 from email.message import Message
 from urllib.error import HTTPError
 
-from backend.services.jikan_client import JikanClient
+from backend.services.jikan_client import JikanClient, JikanSeasonPage
 
 
 class FakeClock:
@@ -25,6 +25,10 @@ class Response(io.BytesIO):
 
     def __exit__(self, *args):
         self.close()
+
+
+def http_error(url: str, status: int) -> HTTPError:
+    return HTTPError(url, status, "request failed", Message(), None)
 
 
 class JikanClientTests(unittest.TestCase):
@@ -60,9 +64,9 @@ class JikanClientTests(unittest.TestCase):
             nonlocal calls
             calls += 1
             if calls == 1:
-                headers = Message()
-                headers["Retry-After"] = "2"
-                raise HTTPError(request.full_url, 429, "Too Many Requests", headers, None)
+                error = http_error(request.full_url, 429)
+                error.headers["Retry-After"] = "2"
+                raise error
             return Response(b'{"data": {}}')
 
         client = JikanClient(opener=opener, clock=clock, sleeper=clock.sleep)
@@ -70,6 +74,55 @@ class JikanClientTests(unittest.TestCase):
         self.assertEqual(client.get_anime_full(1), {"data": {}})
         self.assertEqual(calls, 2)
         self.assertIn(2.0, clock.sleeps)
+
+    def test_retries_one_gateway_error_then_succeeds(self):
+        clock = FakeClock()
+        calls = 0
+
+        def opener(request, *, timeout):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise http_error(request.full_url, 504)
+            return Response(b'{"data": {"mal_id": 1}}')
+
+        client = JikanClient(opener=opener, clock=clock, sleeper=clock.sleep)
+
+        self.assertEqual(client.get_anime(1), {"data": {"mal_id": 1}})
+        self.assertEqual(calls, 2)
+        self.assertIn(1.0, clock.sleeps)
+
+    def test_transient_retry_budget_caps_outage_requests(self):
+        calls = 0
+
+        def opener(request, *, timeout):
+            nonlocal calls
+            calls += 1
+            raise http_error(request.full_url, 504)
+
+        client = JikanClient(opener=opener, transient_retry_budget=0)
+
+        with self.assertRaises(HTTPError) as raised:
+            client.get_anime(1)
+
+        self.assertEqual(raised.exception.code, 504)
+        self.assertEqual(calls, 1)
+
+    def test_does_not_retry_not_found(self):
+        calls = 0
+
+        def opener(request, *, timeout):
+            nonlocal calls
+            calls += 1
+            raise http_error(request.full_url, 404)
+
+        client = JikanClient(opener=opener)
+
+        with self.assertRaises(HTTPError) as raised:
+            client.get_anime(999999)
+
+        self.assertEqual(raised.exception.code, 404)
+        self.assertEqual(calls, 1)
 
     def test_falls_back_to_basic_endpoint_when_full_endpoint_times_out(self):
         requested_urls = []
@@ -91,27 +144,6 @@ class JikanClientTests(unittest.TestCase):
             ],
         )
 
-    def test_skips_repeated_basic_retries_after_gateway_timeouts(self):
-        requested_urls = []
-
-        def opener(request, *, timeout):
-            requested_urls.append(request.full_url)
-            raise HTTPError(request.full_url, 504, "Gateway Timeout", Message(), None)
-
-        client = JikanClient(opener=opener)
-
-        with self.assertRaises(HTTPError) as raised:
-            client.get_anime_full(1)
-
-        self.assertEqual(raised.exception.code, 504)
-        self.assertEqual(
-            requested_urls,
-            [
-                "https://api.jikan.moe/v4/anime/1/full",
-                "https://api.jikan.moe/v4/anime/1",
-            ],
-        )
-
     def test_throttles_to_three_requests_per_second(self):
         clock = FakeClock()
 
@@ -124,12 +156,29 @@ class JikanClientTests(unittest.TestCase):
 
         self.assertEqual(clock.sleeps, [1 / 3, 1 / 3])
 
+    def test_returns_one_season_page_with_cursor_metadata(self):
+        def opener(request, *, timeout):
+            return Response(
+                b'{"data": [{"mal_id": 1}], "pagination": {"has_next_page": true}}'
+            )
+
+        client = JikanClient(opener=opener)
+
+        self.assertEqual(
+            client.get_season_page(2026, "summer"),
+            JikanSeasonPage(entries=[{"mal_id": 1}], page=1, has_next_page=True),
+        )
+
     def test_gets_all_season_pages(self):
         requested_urls = []
         responses = iter(
             [
-                Response(b'{"data": [{"mal_id": 1}], "pagination": {"has_next_page": true}}'),
-                Response(b'{"data": [{"mal_id": 2}], "pagination": {"has_next_page": false}}'),
+                Response(
+                    b'{"data": [{"mal_id": 1}], "pagination": {"has_next_page": true}}'
+                ),
+                Response(
+                    b'{"data": [{"mal_id": 2}], "pagination": {"has_next_page": false}}'
+                ),
             ]
         )
 
@@ -139,7 +188,10 @@ class JikanClientTests(unittest.TestCase):
 
         client = JikanClient(opener=opener)
 
-        self.assertEqual(client.get_season_anime(2026, "summer"), [{"mal_id": 1}, {"mal_id": 2}])
+        self.assertEqual(
+            client.get_season_anime(2026, "summer"),
+            [{"mal_id": 1}, {"mal_id": 2}],
+        )
         self.assertEqual(
             requested_urls,
             [

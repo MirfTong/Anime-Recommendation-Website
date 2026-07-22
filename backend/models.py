@@ -85,3 +85,15 @@ class AnimeGenre(db.Model):
 
     anime: Mapped[Anime] = relationship(back_populates="genre_links")
     genre: Mapped[Genre] = relationship(back_populates="anime_links")
+
+
+class JikanSyncState(db.Model):
+    """Persistent cursor and health state for resumable Jikan page imports."""
+
+    __tablename__ = "jikan_sync_state"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    next_page: Mapped[int] = mapped_column(default=1)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(500))
