@@ -10,7 +10,6 @@ from backend.jobs.jikan_etl import (
     _current_season_identity,
     _fetch_anime_data,
     _names,
-    _pending_season_targets,
     _prepared_season_entry,
     _season,
     _update_anime,
@@ -161,56 +160,87 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(mapped_data["season"], "summer")
         self.assertEqual(mapped_data["year"], 2026)
 
-    def test_pending_backfill_targets_filter_to_tv_rows(self):
-        with patch("backend.jobs.jikan_etl.db") as mock_db:
-            mock_db.session.scalars.side_effect = [[2025], []]
-            targets = _pending_season_targets(4)
-            year_statement = mock_db.session.scalars.call_args_list[0].args[0]
-
-        self.assertEqual(
-            targets,
-            [(2025, "winter"), (2025, "spring"), (2025, "summer"), (2025, "fall")],
+    def test_season_backfill_selects_only_pending_tv_rows(self):
+        anime = SimpleNamespace(
+            animeID=1,
+            mal_id=101,
+            season=None,
+            last_season_attempt=None,
         )
-        self.assertIn("upper(anime.type)", str(year_statement).lower())
-
-    def test_historical_backfill_keeps_other_seasons_when_one_fails(self):
-        targets = [
-            (2025, "winter"),
-            (2025, "spring"),
-            (2025, "summer"),
-            (2025, "fall"),
-        ]
-
-        def fetch_page(year, season, *, page):
-            if season == "spring":
-                raise JikanTemporaryError("temporary spring failure")
-            return JikanSeasonPage(
-                entries=[{"mal_id": 1, "type": "TV"}],
-                page=page,
-                has_next_page=False,
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [[anime], []]
+            result = backfill_missing_seasons(
+                limit=1,
+                fetch_anime=lambda _mal_id: {"data": []},
             )
+            statement = mock_db.session.scalars.call_args_list[0].args[0]
+
+        sql = str(statement).lower()
+        self.assertIn("anime.season is null", sql)
+        self.assertIn("upper(anime.type)", sql)
+        self.assertIn("anime.last_season_attempt", sql)
+        self.assertEqual(result.selected, 1)
+        self.assertEqual(result.invalid_payloads, 1)
+        self.assertIsNotNone(anime.last_season_attempt)
+
+    def test_season_backfill_assigns_season_from_anime_detail(self):
+        anime = SimpleNamespace(
+            animeID=1,
+            mal_id=101,
+            season=None,
+            last_season_attempt=None,
+        )
+
+        def update_anime(record, data, _genres):
+            record.season = data["season"]
 
         with (
             patch("backend.jobs.jikan_etl._ensure_schema"),
-            patch(
-                "backend.jobs.jikan_etl._pending_season_targets", return_value=targets
-            ),
-            patch("backend.jobs.jikan_etl._next_page", return_value=1),
-            patch("backend.jobs.jikan_etl._record_page_error") as record_error,
-            patch(
-                "backend.jobs.jikan_etl._apply_season_page",
-                return_value=SeasonPageApplyResult(saved=1, seasons_assigned=1),
-            ) as apply_page,
+            patch("backend.jobs.jikan_etl._update_anime", side_effect=update_anime),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
         ):
-            result = backfill_missing_seasons(fetch_page=fetch_page)
+            mock_db.session.scalars.side_effect = [[anime], []]
+            result = backfill_missing_seasons(
+                limit=1,
+                fetch_anime=lambda _mal_id: {"data": {"season": "fall"}},
+            )
 
-        self.assertEqual(result.targets_attempted, 4)
-        self.assertEqual(result.targets_completed, 3)
-        self.assertEqual(result.targets_failed, 1)
-        self.assertEqual(result.updated, 3)
-        self.assertEqual(result.seasons_assigned, 3)
-        self.assertEqual(apply_page.call_count, 3)
-        record_error.assert_called_once()
+        self.assertEqual(result.updated, 1)
+        self.assertEqual(result.seasons_assigned, 1)
+        self.assertEqual(result.still_missing, 0)
+        self.assertEqual(anime.season, "fall")
+
+    def test_season_backfill_marks_temporary_failures_and_advances_queue(self):
+        records = [
+            SimpleNamespace(
+                animeID=index,
+                mal_id=index,
+                season=None,
+                last_season_attempt=None,
+            )
+            for index in range(1, 3)
+        ]
+
+        def temporary_failure(_mal_id):
+            raise JikanTemporaryError("Jikan is unavailable")
+
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [records, []]
+            result = backfill_missing_seasons(
+                limit=2,
+                batch_size=1,
+                fetch_anime=temporary_failure,
+            )
+
+        self.assertEqual(result.temporary_errors, 2)
+        self.assertTrue(all(record.last_season_attempt for record in records))
+        self.assertGreaterEqual(mock_db.session.commit.call_count, 3)
 
     def test_current_season_resumes_failed_page(self):
         page_one = JikanSeasonPage(
@@ -263,9 +293,37 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(resumed.next_page, 1)
         self.assertEqual(resumed_apply.call_args.args[0].page, 2)
 
-    def test_backfill_rejects_invalid_year_limit(self):
+    def test_current_season_can_finish_six_pages_in_one_run(self):
+        def fetch_page(_year, _season, *, page):
+            return JikanSeasonPage(
+                entries=[],
+                page=page,
+                has_next_page=page < 6,
+            )
+
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl._next_page", return_value=1),
+            patch(
+                "backend.jobs.jikan_etl._apply_season_page",
+                return_value=SeasonPageApplyResult(),
+            ) as apply_page,
+        ):
+            result = sync_current_season(
+                fetch_page=fetch_page,
+                now=datetime(2026, 7, 22, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(result.complete)
+        self.assertEqual(result.pages_completed, 6)
+        self.assertEqual(result.next_page, 1)
+        self.assertEqual(apply_page.call_count, 6)
+
+    def test_backfill_rejects_invalid_limits(self):
         with self.assertRaises(ValueError):
-            backfill_missing_seasons(year_limit=0)
+            backfill_missing_seasons(limit=0)
+        with self.assertRaises(ValueError):
+            backfill_missing_seasons(batch_size=0)
 
 
 if __name__ == "__main__":
