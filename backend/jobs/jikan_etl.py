@@ -29,9 +29,8 @@ from backend.services.jikan_client import (
 SKIPPABLE_JIKAN_STATUS_CODES = frozenset({404, 429, 500, 502, 503, 504})
 TEMPORARY_JIKAN_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 JIKAN_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
-ORDERED_JIKAN_SEASONS = ("winter", "spring", "summer", "fall")
-CURRENT_SEASON_MAX_PAGES_PER_RUN = 4
-HISTORICAL_MAX_PAGES_PER_TARGET = 4
+CURRENT_SEASON_MAX_PAGES_PER_RUN = 10
+DEFAULT_SEASON_BACKFILL_LIMIT = 1000
 DEGRADED_SUCCESS_RATE = 0.25
 
 
@@ -86,12 +85,17 @@ class CurrentSeasonSyncResult:
 
 @dataclass
 class SeasonBackfillResult:
-    targets_attempted: int = 0
-    targets_completed: int = 0
-    targets_failed: int = 0
-    pages_completed: int = 0
+    selected: int = 0
     updated: int = 0
     seasons_assigned: int = 0
+    still_missing: int = 0
+    not_found: int = 0
+    temporary_errors: int = 0
+    invalid_payloads: int = 0
+
+    @property
+    def success_rate(self) -> float:
+        return self.updated / self.selected if self.selected else 0.0
 
 
 def _names(entries: list[dict[str, Any]] | None) -> list[str]:
@@ -511,95 +515,67 @@ def sync_current_season(
     return result
 
 
-def _historical_state_key(year: int, season: str) -> str:
-    return f"historical:{year}:{season}"
-
-
-def _pending_season_targets(target_limit: int) -> list[tuple[int, str]]:
-    """Select the least-recently attempted TV year/season targets."""
-    years = list(
-        db.session.scalars(
-            select(Anime.year)
-            .where(
-                Anime.year.is_not(None),
-                Anime.season.is_(None),
-                func.upper(Anime.type) == "TV",
-            )
-            .distinct()
-        )
-    )
-    targets = [(year, season) for year in years for season in ORDERED_JIKAN_SEASONS]
-    keys = [_historical_state_key(year, season) for year, season in targets]
-    states = {
-        state.key: state
-        for state in db.session.scalars(
-            select(JikanSyncState).where(JikanSyncState.key.in_(keys))
-        )
-    }
-
-    def sort_key(target: tuple[int, str]) -> tuple[float, int, int]:
-        year, season = target
-        attempted = states.get(_historical_state_key(year, season))
-        attempted_at = attempted.last_attempt_at if attempted is not None else None
-        attempt_timestamp = attempted_at.timestamp() if attempted_at else float("-inf")
-        return attempt_timestamp, -year, ORDERED_JIKAN_SEASONS.index(season)
-
-    return sorted(targets, key=sort_key)[:target_limit]
-
-
 def backfill_missing_seasons(
     *,
-    year_limit: int = 5,
-    max_pages_per_target: int = HISTORICAL_MAX_PAGES_PER_TARGET,
-    fetch_page: Callable[..., JikanSeasonPage] = get_season_page,
+    limit: int = DEFAULT_SEASON_BACKFILL_LIMIT,
+    batch_size: int = 25,
+    fetch_anime: Callable[[int], dict[str, Any]] = get_anime,
 ) -> SeasonBackfillResult:
-    """Incrementally backfill TV seasons, retaining every successful page."""
-    if year_limit <= 0:
-        raise ValueError("year_limit must be positive")
-    if max_pages_per_target <= 0:
-        raise ValueError("max_pages_per_target must be positive")
+    """Refresh the oldest-attempted TV rows that still need a season.
+
+    Jikan's historical season-listing endpoints can become unavailable for
+    long periods even while individual anime endpoints remain usable. Every
+    row is marked attempted before its request, including temporary failures,
+    so repeated jobs keep advancing through the queue instead of retrying the
+    same titles forever.
+    """
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
 
     with app.app_context():
         _ensure_schema()
-        targets = _pending_season_targets(year_limit * len(ORDERED_JIKAN_SEASONS))
-    result = SeasonBackfillResult()
-
-    for year, season in targets:
-        state_key = _historical_state_key(year, season)
-        page = _next_page(state_key)
-        result.targets_attempted += 1
-        for _ in range(max_pages_per_target):
-            try:
-                fetched = fetch_page(year, season, page=page)
-            except JikanTemporaryError as error:
-                _record_page_error(state_key, page, error)
-                result.targets_failed += 1
-                break
-            except HTTPError as error:
-                if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
-                    raise
-                resume_page = 1 if error.code == 404 and page > 1 else page
-                _record_page_error(state_key, resume_page, error)
-                result.targets_failed += 1
-                break
-
-            applied = _apply_season_page(
-                fetched,
-                state_key=state_key,
-                year=year,
-                season=season,
-                discover_missing=False,
-                tv_only=True,
+        statement = (
+            select(Anime)
+            .where(
+                Anime.season.is_(None),
+                Anime.mal_id.is_not(None),
+                Anime.mal_id > 0,
+                func.upper(Anime.type) == "TV",
             )
-            result.pages_completed += 1
-            result.updated += applied.saved
-            result.seasons_assigned += applied.seasons_assigned
-            if not fetched.has_next_page:
-                result.targets_completed += 1
-                break
-            page = fetched.page + 1
+            .options(selectinload(Anime.genre_links).selectinload(AnimeGenre.genre))
+            .order_by(Anime.last_season_attempt.asc().nulls_first(), Anime.animeID)
+            .limit(limit)
+        )
+        anime_rows = list(db.session.scalars(statement))
+        genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
+        result = SeasonBackfillResult(selected=len(anime_rows))
 
-    return result
+        for attempted, anime in enumerate(anime_rows, start=1):
+            anime.last_season_attempt = datetime.now(timezone.utc)
+            # A successful detail response refreshes the same fields as the
+            # general catalogue queue, so keep both queues from immediately
+            # requesting the same title again.
+            _mark_jikan_attempt(anime)
+            fetched = _fetch_anime_data(anime.mal_id, fetch_anime)
+            if fetched.data is not None:
+                _update_anime(anime, fetched.data, genres)
+                result.updated += 1
+                if anime.season is None:
+                    result.still_missing += 1
+                else:
+                    result.seasons_assigned += 1
+            elif fetched.failure == "not_found":
+                result.not_found += 1
+            elif fetched.failure == "temporary":
+                result.temporary_errors += 1
+            else:
+                result.invalid_payloads += 1
+            _commit_completed_batch(attempted, batch_size)
+
+        db.session.commit()
+        return result
 
 
 def _workflow_warning(title: str, message: str) -> None:
@@ -625,7 +601,9 @@ def main() -> None:
     parser.add_argument(
         "--anime-id", type=int, action="append", help="Refresh only this MAL ID."
     )
-    parser.add_argument("--limit", type=int, help="Maximum number of rows to refresh.")
+    parser.add_argument(
+        "--limit", type=int, help="Maximum number of catalogue rows to process."
+    )
     parser.add_argument("--batch-size", type=int, default=25)
     parser.add_argument(
         "--season",
@@ -636,13 +614,7 @@ def main() -> None:
     parser.add_argument(
         "--backfill-seasons",
         action="store_true",
-        help="Fill missing TV seasons from resumable historical listings.",
-    )
-    parser.add_argument(
-        "--year-limit",
-        type=int,
-        default=5,
-        help="Historical work budget expressed as four seasonal targets per year.",
+        help="Fill missing TV seasons from a resumable per-anime queue.",
     )
     args = parser.parse_args()
 
@@ -653,28 +625,35 @@ def main() -> None:
             parser.error(
                 "--backfill-seasons cannot be combined with anime or season selection"
             )
-        result = backfill_missing_seasons(year_limit=args.year_limit)
+        result = backfill_missing_seasons(
+            limit=args.limit or DEFAULT_SEASON_BACKFILL_LIMIT,
+            batch_size=args.batch_size,
+        )
         print(
-            "Historical season backfill: "
-            f"targets={result.targets_attempted}, completed={result.targets_completed}, "
-            f"failed={result.targets_failed}, pages={result.pages_completed}, "
-            f"updated={result.updated}, seasons_assigned={result.seasons_assigned}."
+            "TV season backfill: "
+            f"selected={result.selected}, updated={result.updated}, "
+            f"seasons_assigned={result.seasons_assigned}, "
+            f"still_missing={result.still_missing}, not_found={result.not_found}, "
+            f"temporary={result.temporary_errors}, invalid={result.invalid_payloads}, "
+            f"success_rate={result.success_rate:.1%}."
         )
         _append_step_summary(
-            "Historical season backfill",
+            "TV season backfill",
             [
-                ("Targets attempted", result.targets_attempted),
-                ("Targets completed", result.targets_completed),
-                ("Targets failed", result.targets_failed),
-                ("Pages committed", result.pages_completed),
+                ("TV anime selected", result.selected),
                 ("Anime updated", result.updated),
                 ("Seasons assigned", result.seasons_assigned),
+                ("Successful responses still missing season", result.still_missing),
+                ("Success rate", f"{result.success_rate:.1%}"),
+                ("Temporary Jikan failures", result.temporary_errors),
+                ("Not found", result.not_found),
+                ("Invalid payloads", result.invalid_payloads),
             ],
         )
-        if result.targets_failed:
+        if result.selected >= 100 and result.success_rate < DEGRADED_SUCCESS_RATE:
             _workflow_warning(
-                "Jikan historical backfill degraded",
-                f"{result.targets_failed}/{result.targets_attempted} seasonal targets failed; successful pages were retained.",
+                "Jikan TV season backfill degraded",
+                f"Only {result.updated}/{result.selected} records updated; {result.temporary_errors} were temporary API failures.",
             )
     elif args.season == "current":
         result = sync_current_season()

@@ -69,30 +69,32 @@ For a historical season, pass both its name and year, for example
 .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --limit 500
 ```
 
-Missing historical TV season classifications can be filled efficiently from
-Jikan's seasonal listings:
+Missing TV season classifications are filled from a dedicated per-anime queue.
+Every title is marked attempted even when Jikan is temporarily unavailable, so
+the next run advances to different titles instead of getting stuck:
 
 ```powershell
-.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --backfill-seasons --year-limit 5
+.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --backfill-seasons --limit 1000
 ```
 
 Jikan calls are rate-limited with a bounded retry budget for temporary gateway
-errors. Seasonal imports commit one page at a time and persist their next-page
-cursor, so a later failure resumes without discarding successful pages.
-Catalogue refreshes classify temporary errors, missing records, and invalid
-payloads separately. Airing shows with an unknown score, year, or episode count
-remain stored with those fields empty until Jikan provides them.
+errors. Current-season discovery commits one page at a time and persists its
+next-page cursor, so a later failure resumes without discarding successful
+pages. The TV backfill and general catalogue queues classify temporary errors,
+missing records, and invalid payloads separately. Airing shows with an unknown
+score, year, or episode count remain stored with those fields empty until Jikan
+provides them.
 
 ## Scheduled sync
 
 The GitHub Actions workflow continuously chains successful runs. Each run
-resumes the current-season cursor, processes up to 20 historical season targets
-(five years of work), refreshes the next 1,000 anime, and dispatches its
-successor. GitHub summaries and warnings expose update rates and temporary API
-failures. The concurrency group keeps database writes sequential, while a
-three-hour schedule restarts the chain if a run fails. Before enabling it, add
-a repository Actions secret named `DATABASE_URL` with the external PostgreSQL
-URL.
+resumes up to 10 pages of current-season discovery, refreshes the next 1,000 TV
+anime still missing season metadata, refreshes the next 1,000 general catalogue
+records, and dispatches its successor. GitHub summaries and warnings expose
+update rates and temporary API failures. The concurrency group keeps database
+writes sequential, while a three-hour schedule restarts the chain if a run
+fails. Before enabling it, add a repository Actions secret named `DATABASE_URL`
+with the external PostgreSQL URL.
 
 For Render, use this build command:
 

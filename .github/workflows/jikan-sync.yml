@@ -32,8 +32,8 @@ jobs:
         run: pip install -r requirements.txt
       - name: Import the current season
         run: python -m backend.jobs.jikan_etl --season current
-      - name: Backfill five catalogue years from seasonal listings
-        run: python -m backend.jobs.jikan_etl --backfill-seasons --year-limit 5
+      - name: Backfill seasons for the next 1,000 TV anime
+        run: python -m backend.jobs.jikan_etl --backfill-seasons --limit 1000
       - name: Refresh the next 1,000 catalogue records and Jikan season metadata
         run: python -m backend.jobs.jikan_etl --limit 1000
       - name: Queue the next catalogue batch
