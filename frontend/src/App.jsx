@@ -223,13 +223,12 @@ export default function App() {
       <form className="relative z-20 mb-8 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl backdrop-blur sm:grid-cols-2 lg:grid-cols-5" onSubmit={submitFilters}>
         <input className="filter-input sm:col-span-2" name="q" placeholder="Search anime" value={filters.q} onChange={changeFilter} />
         <div className="relative">
-          <details ref={genreDropdownRef} className="group" onToggle={(event) => setGenreDropdownOpen(event.currentTarget.open)}>
+          <details ref={genreDropdownRef} className="group" onToggle={(event) => { const isOpen = event.currentTarget.open; setGenreDropdownOpen(isOpen); if (!isOpen) setTagQuery(""); }}>
             <summary className="filter-input flex cursor-pointer list-none items-center justify-between marker:hidden">
-              <span>{filters.genre.length + filters.tag.length ? `${filters.genre.length + filters.tag.length} selected` : "All genres + tags"}</span>
+              {genreDropdownOpen ? <input className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-slate-400" value={tagQuery} onChange={(event) => setTagQuery(event.target.value)} onClick={(event) => event.stopPropagation()} placeholder="Search genres and tags" aria-label="Search genres and tags" autoFocus /> : <span>{filters.genre.length + filters.tag.length ? `${filters.genre.length + filters.tag.length} selected` : "All genres + tags"}</span>}
               <span className="text-violet-300 transition group-open:rotate-180">⌄</span>
             </summary>
             <div className="absolute z-20 mt-2 max-h-64 w-full overflow-y-auto rounded-xl border border-white/10 bg-slate-950 p-1 shadow-2xl">
-              <div className="sticky top-0 z-10 bg-slate-950 px-1 pb-2 pt-1"><input className="filter-input !bg-slate-900 text-sm" value={tagQuery} onChange={(event) => setTagQuery(event.target.value)} placeholder="Search genres and tags" aria-label="Search genres and tags" /></div>
               <p className="px-3 pb-1 pt-2 text-xs font-bold uppercase tracking-widest text-violet-300">Genres</p>
               {matchingGenres.map((genre) => (
                 <button key={genre} className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${filters.genre.includes(genre) ? "bg-violet-500 text-white" : "text-slate-300 hover:bg-violet-400/10"}`} type="button" aria-pressed={filters.genre.includes(genre)} onClick={() => toggleGenre(genre)}>
