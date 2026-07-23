@@ -9,6 +9,7 @@ const EMPTY_FILTERS = {
   type: "",
   season: "",
   genre: [],
+  tag: [],
 };
 
 const PAGE_WINDOW_SIZE = 8;
@@ -89,6 +90,7 @@ function DetailModal({ anime, onClose }) {
 export default function App() {
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [genres, setGenres] = useState([]);
+  const [tags, setTags] = useState([]);
   const [anime, setAnime] = useState([]);
   const [seasonalAnime, setSeasonalAnime] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
@@ -127,7 +129,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/v1/genres").then((response) => response.json()).then((body) => setGenres(body.items ?? [])).catch(() => setGenres([]));
+    fetch("/api/v1/genres").then((response) => response.json()).then((body) => { setGenres(body.items ?? []); setTags(body.tags ?? []); }).catch(() => { setGenres([]); setTags([]); });
     loadAnime(1, EMPTY_FILTERS);
     loadSeasonalAnime();
   }, []); // Initial catalogue only; filters are submitted explicitly.
@@ -169,6 +171,12 @@ export default function App() {
       ? current.genre.filter((selectedGenre) => selectedGenre !== genre)
       : [...current.genre, genre],
   }));
+  const toggleTag = (tag) => setFilters((current) => ({
+    ...current,
+    tag: current.tag.includes(tag)
+      ? current.tag.filter((selectedTag) => selectedTag !== tag)
+      : [...current.tag, tag],
+  }));
   const clearSelections = () => {
     setFilters({ ...EMPTY_FILTERS, genre: [] });
     setViewMode("home");
@@ -191,15 +199,21 @@ export default function App() {
         <div className="relative">
           <details ref={genreDropdownRef} className="group">
             <summary className="filter-input flex cursor-pointer list-none items-center justify-between marker:hidden">
-              <span>{filters.genre.length ? `${filters.genre.length} genres selected` : "All genres"}</span>
+              <span>{filters.genre.length + filters.tag.length ? `${filters.genre.length + filters.tag.length} selected` : "All genres + tags"}</span>
               <span className="text-violet-300 transition group-open:rotate-180">⌄</span>
             </summary>
             <div className="absolute z-20 mt-2 max-h-64 w-full overflow-y-auto rounded-xl border border-white/10 bg-slate-950 p-1 shadow-2xl">
+              <p className="px-3 pb-1 pt-2 text-xs font-bold uppercase tracking-widest text-violet-300">Genres</p>
               {genres.map((genre) => (
                 <button key={genre} className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${filters.genre.includes(genre) ? "bg-violet-500 text-white" : "text-slate-300 hover:bg-violet-400/10"}`} type="button" aria-pressed={filters.genre.includes(genre)} onClick={() => toggleGenre(genre)}>
                   {genre}
                 </button>
               ))}
+              {tags.length > 0 && <><p className="mt-2 border-t border-white/10 px-3 pb-1 pt-3 text-xs font-bold uppercase tracking-widest text-violet-300">Tags</p>{tags.map((tag) => (
+                <button key={tag} className={`block w-full rounded-lg px-3 py-2 text-left text-sm capitalize transition ${filters.tag.includes(tag) ? "bg-violet-500 text-white" : "text-slate-300 hover:bg-violet-400/10"}`} type="button" aria-pressed={filters.tag.includes(tag)} onClick={() => toggleTag(tag)}>
+                  {tag}
+                </button>
+              ))}</>}
             </div>
           </details>
         </div>
