@@ -28,6 +28,7 @@ class Anime(db.Model):
     mal_id: Mapped[int | None] = mapped_column(unique=True, index=True)
     title: Mapped[str] = mapped_column(index=True)
     alternative_title: Mapped[str | None]
+    synopsis: Mapped[str | None]
     type: Mapped[str] = mapped_column(index=True)
     # Jikan returns one of winter, spring, summer, fall, or no season.
     season: Mapped[str | None] = mapped_column(String(6), index=True)

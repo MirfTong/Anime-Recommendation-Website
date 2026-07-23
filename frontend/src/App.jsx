@@ -76,6 +76,7 @@ function DetailModal({ anime, onClose }) {
             <div><p className="text-sm font-semibold uppercase tracking-widest text-violet-300">Anime details</p><h2 className="mt-1 text-3xl font-black text-white">{anime.title}</h2>{anime.alternative_title && <p className="mt-1 text-slate-400">{anime.alternative_title}</p>}</div>
             <div className="flex flex-wrap items-center gap-2"><Score value={anime.score} /><span className="text-slate-300">{anime.type} · {season && `${season} · `}{anime.year ?? "Unknown year"} · {anime.episodes ?? "?"} episodes</span></div>
             <div className="flex flex-wrap gap-2">{anime.genres.map((genre) => <span key={genre} className="rounded-full bg-violet-400/10 px-3 py-1 text-sm text-violet-100">{genre}</span>)}</div>
+            {anime.synopsis && <section><h3 className="text-sm font-semibold uppercase tracking-widest text-violet-300">Synopsis</h3><p className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-300">{anime.synopsis}</p></section>}
             {anime.genres_detailed?.length > 0 && <p className="text-sm leading-6 text-slate-400">Tags: {anime.genres_detailed.join(", ")}</p>}
             <a className="inline-flex rounded-xl bg-violet-500 px-4 py-2 font-bold text-white transition hover:bg-violet-400" href={anime.mal_url} target="_blank" rel="noreferrer">View on MyAnimeList ↗</a>
           </div>
@@ -91,6 +92,7 @@ export default function App() {
   const [anime, setAnime] = useState([]);
   const [seasonalAnime, setSeasonalAnime] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
+  const [seasonalPagination, setSeasonalPagination] = useState({ page: 1, pages: 1, total: 0 });
   const [loading, setLoading] = useState(true);
   const [seasonalLoading, setSeasonalLoading] = useState(true);
   const [viewMode, setViewMode] = useState("home");
@@ -108,15 +110,17 @@ export default function App() {
     } catch (requestError) { setError(requestError.message); } finally { setLoading(false); }
   }, [filters]);
 
-  const loadSeasonalAnime = useCallback(async () => {
+  const loadSeasonalAnime = useCallback(async (page = 1) => {
     setSeasonalLoading(true);
     try {
-      const response = await fetch("/api/v1/anime/seasonal?limit=6");
+      const response = await fetch(`/api/v1/anime/seasonal?limit=6&page=${page}`);
       const body = await response.json();
       if (!response.ok) throw new Error(body.error?.message || "Could not load seasonal anime.");
       setSeasonalAnime(body.items ?? []);
+      setSeasonalPagination(body.pagination ?? { page: 1, pages: 1, total: body.items?.length ?? 0 });
     } catch {
       setSeasonalAnime([]);
+      setSeasonalPagination({ page: 1, pages: 1, total: 0 });
     } finally {
       setSeasonalLoading(false);
     }
@@ -211,7 +215,7 @@ export default function App() {
       {error && <div className="mb-6 rounded-xl border border-rose-400/40 bg-rose-950/60 p-4 text-rose-100">{error}</div>}
       {showHomepageSections && <section className="mb-12" aria-labelledby="popular-this-season">
         <h2 id="popular-this-season" className="mb-5 text-3xl font-black tracking-tight text-white sm:text-4xl">POPULAR THIS SEASON</h2>
-        {seasonalLoading ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">{Array.from({ length: 6 }, (_, index) => <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />)}</div> : seasonalAnime.length > 0 ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">{seasonalAnime.map((entry) => <AnimeCard key={entry.id} anime={entry} onSelect={openDetail} />)}</div> : <p className="rounded-2xl border border-dashed border-slate-700 p-5 text-sm text-slate-400">Seasonal anime are still being refreshed. Check back shortly.</p>}
+        {seasonalLoading ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">{Array.from({ length: 6 }, (_, index) => <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />)}</div> : seasonalAnime.length > 0 ? <div className="flex items-stretch gap-2 sm:gap-3"><button className="self-center rounded-full border border-white/15 bg-slate-900/90 px-3 py-4 text-2xl font-bold text-white transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30" type="button" aria-label="Previous popular seasonal anime" disabled={seasonalPagination.page === 1} onClick={() => loadSeasonalAnime(seasonalPagination.page - 1)}>&lsaquo;</button><div className="grid min-w-0 flex-1 grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">{seasonalAnime.map((entry) => <AnimeCard key={entry.id} anime={entry} onSelect={openDetail} />)}</div><button className="self-center rounded-full border border-white/15 bg-slate-900/90 px-3 py-4 text-2xl font-bold text-white transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30" type="button" aria-label="Next popular seasonal anime" disabled={seasonalPagination.page === seasonalPagination.pages} onClick={() => loadSeasonalAnime(seasonalPagination.page + 1)}>&rsaquo;</button></div> : <p className="rounded-2xl border border-dashed border-slate-700 p-5 text-sm text-slate-400">Seasonal anime are still being refreshed. Check back shortly.</p>}
       </section>}
 
       <section aria-label="Anime results">

@@ -43,6 +43,7 @@ def anime_record(*, anime_type="TV", season="summer"):
         mal_id=1,
         title="Example",
         alternative_title=None,
+        synopsis=None,
         type=anime_type,
         season=season,
         year=2020,
@@ -95,6 +96,12 @@ class JikanEtlTests(unittest.TestCase):
         anime = anime_record()
         _update_anime(anime, {"season": "Fall", "genres": []}, {})
         self.assertEqual(anime.season, "fall")
+
+    def test_updates_anime_synopsis_from_jikan_detail_payload(self):
+        anime = anime_record()
+        _update_anime(anime, {"synopsis": "  A new synopsis.  ", "genres": []}, {})
+
+        self.assertEqual(anime.synopsis, "A new synopsis.")
 
     def test_infers_missing_tv_season_from_premiere_date(self):
         anime = anime_record(season=None)
