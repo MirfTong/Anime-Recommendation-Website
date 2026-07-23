@@ -161,7 +161,9 @@ export default function App() {
     loadAnime(1, EMPTY_FILTERS);
   };
   const hasSelections = Object.values(filters).some((value) => Array.isArray(value) ? value.length > 0 : Boolean(value));
-  const showHomepageSections = viewMode === "home" && !hasSelections;
+  // Filter edits are only drafts. Keep the homepage visible until Search
+  // applies them and switches the view into results mode.
+  const showHomepageSections = viewMode === "home";
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
