@@ -11,6 +11,8 @@ const EMPTY_FILTERS = {
   genre: [],
 };
 
+const PAGE_WINDOW_SIZE = 8;
+
 function queryString(filters, page = 1) {
   const params = new URLSearchParams({ page: String(page), per_page: "24" });
   Object.entries(filters).forEach(([key, value]) => {
@@ -28,6 +30,14 @@ function formatSeason(season) {
   return `${season.charAt(0).toUpperCase()}${season.slice(1)}`;
 }
 
+function visiblePageNumbers(currentPage, totalPages) {
+  const windowSize = Math.min(PAGE_WINDOW_SIZE, totalPages);
+  const halfWindow = Math.floor(windowSize / 2);
+  const firstPage = Math.max(1, Math.min(currentPage - halfWindow, totalPages - windowSize + 1));
+
+  return Array.from({ length: windowSize }, (_, index) => firstPage + index);
+}
+
 function AnimeCard({ anime, onSelect }) {
   const season = formatSeason(anime.season);
 
@@ -43,7 +53,7 @@ function AnimeCard({ anime, onSelect }) {
       </div>
       <div className="flex flex-1 flex-col space-y-2 p-4">
         <h2 className="line-clamp-2 min-h-12 text-base font-bold text-white">{anime.title}</h2>
-        <p className="text-sm text-slate-400">{anime.type} · {season && `${season} · `}{anime.year ?? "Unknown year"} · {anime.episodes ?? "?"} eps</p>
+        <p className="overflow-hidden text-ellipsis whitespace-nowrap text-xs tracking-tight text-slate-400" title={`${anime.type} · ${season ? `${season} · ` : ""}${anime.year ?? "Unknown year"} · ${anime.episodes ?? "?"} eps`}>{anime.type} · {season && `${season} · `}{anime.year ?? "Unknown year"} · {anime.episodes ?? "?"} eps</p>
         <div className="mt-auto flex min-h-7 flex-wrap gap-1.5">
           {anime.genres.slice(0, 3).map((genre) => <span key={genre} className="rounded-full bg-violet-400/10 px-2 py-1 text-xs text-violet-200">{genre}</span>)}
         </div>
@@ -212,7 +222,13 @@ export default function App() {
         {!showHomepageSections && !loading && !error && <p className="mb-5 text-sm text-slate-400">{pagination.total.toLocaleString()} anime found</p>}
         {loading ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">{Array.from({ length: 12 }, (_, index) => <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />)}</div> : anime.length > 0 ? <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">{anime.map((entry) => <AnimeCard key={entry.id} anime={entry} onSelect={openDetail} />)}</div> : !error && <div className="rounded-2xl border border-dashed border-slate-600 p-12 text-center text-slate-300">No anime match those filters. Try widening your search.</div>}
       </section>
-      {!loading && pagination.pages > 1 && <nav className="mt-10 flex items-center justify-center gap-4"><button className="rounded-lg border border-white/15 px-4 py-2 disabled:opacity-40" disabled={pagination.page === 1} onClick={() => loadAnime(pagination.page - 1)} type="button">Previous</button><span className="text-slate-400">Page {pagination.page} of {pagination.pages}</span><button className="rounded-lg border border-white/15 px-4 py-2 disabled:opacity-40" disabled={pagination.page === pagination.pages} onClick={() => loadAnime(pagination.page + 1)} type="button">Next</button></nav>}
+      {!loading && pagination.pages > 1 && <nav className="mt-10 flex flex-wrap items-center justify-center gap-2" aria-label="Pagination">
+        <button className="rounded-lg border border-white/15 px-3 py-2 font-semibold transition hover:border-violet-400 disabled:cursor-not-allowed disabled:opacity-40" disabled={pagination.page === 1} onClick={() => loadAnime(1)} type="button" aria-label="First page">&lt;&lt;</button>
+        {visiblePageNumbers(pagination.page, pagination.pages).map((pageNumber) => (
+          <button key={pageNumber} className={`min-w-10 rounded-lg border px-3 py-2 font-semibold transition ${pageNumber === pagination.page ? "border-violet-400 bg-violet-500 text-white" : "border-white/15 text-slate-200 hover:border-violet-400"}`} onClick={() => loadAnime(pageNumber)} type="button" aria-current={pageNumber === pagination.page ? "page" : undefined}>{pageNumber}</button>
+        ))}
+        <button className="rounded-lg border border-white/15 px-3 py-2 font-semibold transition hover:border-violet-400 disabled:cursor-not-allowed disabled:opacity-40" disabled={pagination.page === pagination.pages} onClick={() => loadAnime(pagination.pages)} type="button" aria-label="Last page">&gt;&gt;</button>
+      </nav>}
       <DetailModal anime={selected} onClose={() => setSelected(null)} />
     </main>
   );
