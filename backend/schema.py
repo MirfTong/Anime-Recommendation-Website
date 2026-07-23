@@ -22,6 +22,7 @@ def ensure_anime_schema() -> None:
         "last_season_attempt TIMESTAMP WITH TIME ZONE",
         "mal_id INTEGER",
         "season VARCHAR(6)",
+        "synopsis TEXT",
     ):
         db.session.execute(
             text(f"ALTER TABLE anime ADD COLUMN IF NOT EXISTS {definition}")

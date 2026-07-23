@@ -24,6 +24,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body["item"]["mal_id"], 52991)
         self.assertIn("season", body["item"])
+        self.assertIn("synopsis", body["item"])
         self.assertIn("genres_detailed", body["item"])
 
     def test_anime_list_accepts_a_season_filter(self):
@@ -42,9 +43,21 @@ class AppTests(unittest.TestCase):
         self.assertEqual(body["season"], "summer")
         self.assertEqual(body["year"], 2026)
         self.assertLessEqual(len(body["items"]), 6)
+        self.assertEqual(body["pagination"]["page"], 1)
+        self.assertEqual(body["pagination"]["per_page"], 6)
+        self.assertGreaterEqual(body["pagination"]["total"], len(body["items"]))
         self.assertTrue(
             all(item["season"] == "summer" and item["year"] == 2026 for item in body["items"])
         )
+
+    def test_popular_current_season_supports_pagination(self):
+        with patch("backend.app._current_season_identity", return_value=(2026, "summer")):
+            response = self.client.get("/api/v1/anime/seasonal?limit=6&page=2")
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["pagination"]["page"], 2)
+        self.assertEqual(body["pagination"]["per_page"], 6)
 
     def test_invalid_filter_returns_json_error(self):
         response = self.client.get("/api/v1/anime?min_score=20")

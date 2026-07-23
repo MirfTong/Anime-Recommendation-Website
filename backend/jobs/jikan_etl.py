@@ -164,6 +164,14 @@ def _valid_score(value: Any) -> float | None:
     return float(value)
 
 
+def _synopsis(value: Any) -> str | None:
+    """Normalize Jikan's optional plot summary for storage."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 def _season(value: Any) -> str | None:
     """Normalize Jikan's optional season field to supported filter values."""
     if not isinstance(value, str):
@@ -221,6 +229,8 @@ def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) 
         or data.get("title_japanese")
         or anime.alternative_title
     )
+    if "synopsis" in data:
+        anime.synopsis = _synopsis(data.get("synopsis"))
     anime.type = data.get("type") or anime.type
     incoming_season = _season(data.get("season"))
     if incoming_season is None and _is_tv(anime.type):
@@ -287,6 +297,7 @@ def _new_anime(data: dict[str, Any]) -> Anime:
         mal_id=mal_id,
         title=data.get("title") or f"MAL anime {mal_id}",
         alternative_title=data.get("title_english") or data.get("title_japanese"),
+        synopsis=_synopsis(data.get("synopsis")),
         type=anime_type,
         season=season,
         year=data.get("year"),

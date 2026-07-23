@@ -110,6 +110,7 @@ def _serialize_anime(anime: Anime, *, detailed: bool = False) -> dict[str, Any]:
         "genres": [genre.name for genre in anime.genre_entries],
     }
     if detailed:
+        payload["synopsis"] = anime.synopsis
         payload["genres_detailed"] = anime.genres_detailed
         payload["last_jikan_sync"] = (
             anime.last_jikan_sync.isoformat() if anime.last_jikan_sync else None
@@ -206,15 +207,21 @@ def random_anime():
 def popular_current_season():
     """Return the highest-rated anime from the current Japan-season window."""
     limit = _integer_argument("limit", minimum=1, maximum=12) or 6
+    page = _integer_argument("page", minimum=1) or 1
     year, season = _current_season_identity()
+    filters = (
+        Anime.score.is_not(None),
+        Anime.year == year,
+        Anime.season == season,
+    )
+    total = db.session.scalar(
+        select(func.count()).select_from(Anime).where(*filters)
+    )
     anime = db.session.scalars(
         _anime_statement()
-        .where(
-            Anime.score.is_not(None),
-            Anime.year == year,
-            Anime.season == season,
-        )
+        .where(*filters)
         .order_by(Anime.score.desc(), Anime.title)
+        .offset((page - 1) * limit)
         .limit(limit)
     ).all()
     return jsonify(
@@ -222,6 +229,12 @@ def popular_current_season():
             "items": [_serialize_anime(entry) for entry in anime],
             "season": season,
             "year": year,
+            "pagination": {
+                "page": page,
+                "per_page": limit,
+                "total": total or 0,
+                "pages": ((total or 0) + limit - 1) // limit,
+            },
         }
     )
 
