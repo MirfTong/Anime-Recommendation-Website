@@ -1,7 +1,10 @@
 import unittest
 from unittest.mock import patch
 
+from sqlalchemy import select
+
 from backend.app import app
+from backend.models import Anime, db
 
 
 class AppTests(unittest.TestCase):
@@ -33,6 +36,32 @@ class AppTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertTrue(all(item["season"] == "winter" for item in body["items"]))
+
+    def test_genre_catalogue_includes_detailed_tags(self):
+        response = self.client.get("/api/v1/genres")
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("items", body)
+        self.assertIn("tags", body)
+        self.assertIsInstance(body["tags"], list)
+
+    def test_anime_list_accepts_a_detailed_tag_filter(self):
+        catalogue = self.client.get("/api/v1/genres").get_json()
+        if not catalogue["tags"]:
+            self.skipTest("The test catalogue does not contain detailed tags")
+        tag = catalogue["tags"][0]
+
+        response = self.client.get("/api/v1/anime", query_string={"tag": tag})
+        body = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        mal_ids = [item["mal_id"] for item in body["items"]]
+        with app.app_context():
+            matching_anime = db.session.scalars(
+                select(Anime).where(Anime.mal_id.in_(mal_ids))
+            ).all()
+        self.assertTrue(all(tag in anime.genres_detailed for anime in matching_anime))
 
     def test_popular_current_season_returns_a_limited_seasonal_list(self):
         with patch("backend.app._current_season_identity", return_value=(2026, "summer")):

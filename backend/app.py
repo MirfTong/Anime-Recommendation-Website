@@ -132,6 +132,7 @@ def _filtered_anime_statement():
     anime_types = _list_argument("type")
     seasons = [season.lower() for season in _list_argument("season")]
     genres = _list_argument("genre")
+    tags = _list_argument("tag")
 
     invalid_seasons = set(seasons).difference(VALID_SEASONS)
     if invalid_seasons:
@@ -164,6 +165,8 @@ def _filtered_anime_statement():
         statement = statement.where(Anime.season.in_(seasons))
     for genre in genres:
         statement = statement.where(Anime.genre_entries.any(Genre.name == genre))
+    for tag in tags:
+        statement = statement.where(Anime.genres_detailed.contains([tag]))
     return statement
 
 
@@ -255,7 +258,14 @@ def list_genres():
     genres = db.session.scalars(
         select(Genre.name).where(Genre.name != "Hentai").order_by(Genre.name)
     ).all()
-    return jsonify({"items": genres})
+    detailed_tags = select(func.unnest(Anime.genres_detailed).label("tag")).subquery()
+    tags = db.session.scalars(
+        select(detailed_tags.c.tag)
+        .where(detailed_tags.c.tag.is_not(None))
+        .distinct()
+        .order_by(detailed_tags.c.tag)
+    ).all()
+    return jsonify({"items": genres, "tags": tags})
 
 
 @app.get("/")
