@@ -27,6 +27,7 @@ API_PREFIX = "/api/v1"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_BUILD_DIR = PROJECT_ROOT / "static" / "react"
 MAX_PAGE_SIZE = 100
+MAX_TAG_OPTIONS = 100
 VALID_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
 
 
@@ -258,14 +259,26 @@ def list_genres():
     genres = db.session.scalars(
         select(Genre.name).where(Genre.name != "Hentai").order_by(Genre.name)
     ).all()
+    return jsonify({"items": genres})
+
+
+@app.get(f"{API_PREFIX}/tags")
+def list_detailed_tags():
+    """Search detailed genre tags without sending thousands of options to the UI."""
+    query = request.args.get("q", "").strip()
+    limit = _integer_argument("limit", minimum=1, maximum=MAX_TAG_OPTIONS) or 50
     detailed_tags = select(func.unnest(Anime.genres_detailed).label("tag")).subquery()
+    statement = select(detailed_tags.c.tag).where(detailed_tags.c.tag.is_not(None))
+    if query:
+        escaped_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        statement = statement.where(detailed_tags.c.tag.ilike(f"%{escaped_query}%", escape="\\"))
     tags = db.session.scalars(
-        select(detailed_tags.c.tag)
-        .where(detailed_tags.c.tag.is_not(None))
+        statement
         .distinct()
         .order_by(detailed_tags.c.tag)
+        .limit(limit)
     ).all()
-    return jsonify({"items": genres, "tags": tags})
+    return jsonify({"items": tags})
 
 
 @app.get("/")

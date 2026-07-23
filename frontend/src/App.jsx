@@ -90,7 +90,10 @@ function DetailModal({ anime, onClose }) {
 export default function App() {
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [genres, setGenres] = useState([]);
-  const [tags, setTags] = useState([]);
+  const [tagOptions, setTagOptions] = useState([]);
+  const [tagQuery, setTagQuery] = useState("");
+  const [tagsLoading, setTagsLoading] = useState(false);
+  const [genreDropdownOpen, setGenreDropdownOpen] = useState(false);
   const [anime, setAnime] = useState([]);
   const [seasonalAnime, setSeasonalAnime] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
@@ -128,8 +131,24 @@ export default function App() {
     }
   }, []);
 
+  const loadTags = useCallback(async (query = "") => {
+    setTagsLoading(true);
+    try {
+      const params = new URLSearchParams({ limit: "50" });
+      if (query) params.set("q", query);
+      const response = await fetch(`/api/v1/tags?${params}`);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error?.message || "Could not load tags.");
+      setTagOptions(body.items ?? []);
+    } catch {
+      setTagOptions([]);
+    } finally {
+      setTagsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    fetch("/api/v1/genres").then((response) => response.json()).then((body) => { setGenres(body.items ?? []); setTags(body.tags ?? []); }).catch(() => { setGenres([]); setTags([]); });
+    fetch("/api/v1/genres").then((response) => response.json()).then((body) => setGenres(body.items ?? [])).catch(() => setGenres([]));
     loadAnime(1, EMPTY_FILTERS);
     loadSeasonalAnime();
   }, []); // Initial catalogue only; filters are submitted explicitly.
@@ -143,6 +162,12 @@ export default function App() {
     document.addEventListener("pointerdown", closeGenreDropdown);
     return () => document.removeEventListener("pointerdown", closeGenreDropdown);
   }, []);
+
+  useEffect(() => {
+    if (!genreDropdownOpen) return undefined;
+    const timer = window.setTimeout(() => loadTags(tagQuery.trim()), 200);
+    return () => window.clearTimeout(timer);
+  }, [genreDropdownOpen, loadTags, tagQuery]);
 
   const submitFilters = (event) => {
     event.preventDefault();
@@ -183,6 +208,7 @@ export default function App() {
     loadAnime(1, EMPTY_FILTERS);
   };
   const hasSelections = Object.values(filters).some((value) => Array.isArray(value) ? value.length > 0 : Boolean(value));
+  const matchingGenres = genres.filter((genre) => genre.toLowerCase().includes(tagQuery.trim().toLowerCase()));
   // Filter edits are only drafts. Keep the homepage visible until Search
   // applies them and switches the view into results mode.
   const showHomepageSections = viewMode === "home";
@@ -197,23 +223,26 @@ export default function App() {
       <form className="relative z-20 mb-8 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl backdrop-blur sm:grid-cols-2 lg:grid-cols-5" onSubmit={submitFilters}>
         <input className="filter-input sm:col-span-2" name="q" placeholder="Search anime" value={filters.q} onChange={changeFilter} />
         <div className="relative">
-          <details ref={genreDropdownRef} className="group">
+          <details ref={genreDropdownRef} className="group" onToggle={(event) => setGenreDropdownOpen(event.currentTarget.open)}>
             <summary className="filter-input flex cursor-pointer list-none items-center justify-between marker:hidden">
               <span>{filters.genre.length + filters.tag.length ? `${filters.genre.length + filters.tag.length} selected` : "All genres + tags"}</span>
               <span className="text-violet-300 transition group-open:rotate-180">⌄</span>
             </summary>
             <div className="absolute z-20 mt-2 max-h-64 w-full overflow-y-auto rounded-xl border border-white/10 bg-slate-950 p-1 shadow-2xl">
+              <div className="sticky top-0 z-10 bg-slate-950 px-1 pb-2 pt-1"><input className="filter-input !bg-slate-900 text-sm" value={tagQuery} onChange={(event) => setTagQuery(event.target.value)} placeholder="Search genres and tags" aria-label="Search genres and tags" /></div>
               <p className="px-3 pb-1 pt-2 text-xs font-bold uppercase tracking-widest text-violet-300">Genres</p>
-              {genres.map((genre) => (
+              {matchingGenres.map((genre) => (
                 <button key={genre} className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${filters.genre.includes(genre) ? "bg-violet-500 text-white" : "text-slate-300 hover:bg-violet-400/10"}`} type="button" aria-pressed={filters.genre.includes(genre)} onClick={() => toggleGenre(genre)}>
                   {genre}
                 </button>
               ))}
-              {tags.length > 0 && <><p className="mt-2 border-t border-white/10 px-3 pb-1 pt-3 text-xs font-bold uppercase tracking-widest text-violet-300">Tags</p>{tags.map((tag) => (
+              <p className="mt-2 border-t border-white/10 px-3 pb-1 pt-3 text-xs font-bold uppercase tracking-widest text-violet-300">Tags</p>
+              {tagsLoading ? <p className="px-3 py-2 text-sm text-slate-400">Searching tags…</p> : tagOptions.map((tag) => (
                 <button key={tag} className={`block w-full rounded-lg px-3 py-2 text-left text-sm capitalize transition ${filters.tag.includes(tag) ? "bg-violet-500 text-white" : "text-slate-300 hover:bg-violet-400/10"}`} type="button" aria-pressed={filters.tag.includes(tag)} onClick={() => toggleTag(tag)}>
                   {tag}
                 </button>
-              ))}</>}
+              ))}
+              {!tagsLoading && tagOptions.length === 50 && <p className="px-3 py-2 text-xs text-slate-400">Showing the first 50 matching tags. Keep typing to narrow the list.</p>}
             </div>
           </details>
         </div>
