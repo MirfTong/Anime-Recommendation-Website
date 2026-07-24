@@ -1,4 +1,4 @@
-# Anime Recommendation Website
+# KyoQuan Anime Finder 
 
 <https://kyoquan.onrender.com/>
 
