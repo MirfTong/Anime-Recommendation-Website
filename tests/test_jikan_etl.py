@@ -9,13 +9,18 @@ from backend.jobs.jikan_etl import (
     BulkSeasonSyncResult,
     CatalogueRefreshResult,
     CurrentSeasonSyncResult,
+    SUPPLEMENTAL_PROVIDER_TYPES,
+    SUPPLEMENTAL_STATE_KEYS,
     SeasonPageApplyResult,
     SeasonBackfillResult,
     SeasonCoverage,
+    SupplementalCatalogueSyncResult,
     _apply_season_page,
+    _anime_type,
     _detailed_genres,
     _current_season_identity,
     _fetch_anime_data,
+    _is_hentai,
     _names,
     _prepared_season_entry,
     _season,
@@ -24,10 +29,12 @@ from backend.jobs.jikan_etl import (
     _valid_score,
     backfill_missing_seasons,
     refresh_catalogue,
+    remove_hentai_anime,
     run_scheduled_sync,
     sync_bulk_anime_seasons,
     sync_current_season,
     sync_season,
+    sync_supplemental_anime_types,
 )
 from backend.models import Anime
 from backend.services.jikan_client import (
@@ -91,6 +98,25 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(_season("summer"), "summer")
         self.assertIsNone(_season("monsoon"))
         self.assertIsNone(_season(None))
+
+    def test_normalizes_provider_and_legacy_anime_types(self):
+        self.assertEqual(_anime_type("Movie"), "MOVIE")
+        self.assertEqual(_anime_type("tv_special"), "SPECIAL")
+        self.assertEqual(_anime_type(" TV Special "), "SPECIAL")
+
+    def test_detects_hentai_from_categories_or_rating(self):
+        self.assertTrue(
+            _is_hentai({"explicit_genres": [{"name": " HENTAI "}]})
+        )
+        self.assertTrue(_is_hentai({"rating": "Rx - Hentai"}))
+        self.assertFalse(
+            _is_hentai(
+                {
+                    "genres": [{"name": "Ecchi"}],
+                    "rating": "R+ - Mild Nudity",
+                }
+            )
+        )
 
     def test_updates_anime_season_from_jikan(self):
         anime = anime_record()
@@ -207,16 +233,24 @@ class JikanEtlTests(unittest.TestCase):
         self.assertAlmostEqual(result.success_rate, 0.043)
 
     def test_scheduled_sync_runs_every_phase_and_reports_coverage(self):
-        current = CurrentSeasonSyncResult()
-        bulk = BulkSeasonSyncResult()
-        backfill = SeasonBackfillResult()
-        catalogue = CatalogueRefreshResult()
+        current = CurrentSeasonSyncResult(removed_hentai=1)
+        bulk = BulkSeasonSyncResult(removed_hentai=2)
+        supplemental = SupplementalCatalogueSyncResult(
+            scans={"ova": BulkSeasonSyncResult(removed_hentai=3)}
+        )
+        backfill = SeasonBackfillResult(removed_hentai=4)
+        catalogue = CatalogueRefreshResult(removed_hentai=5)
         coverage = SeasonCoverage(total_tv=100, classified_tv=75)
         with (
+            patch("backend.jobs.jikan_etl.remove_hentai_anime", return_value=6),
             patch("backend.jobs.jikan_etl.sync_current_season", return_value=current),
             patch(
                 "backend.jobs.jikan_etl.sync_bulk_anime_seasons", return_value=bulk
             ) as bulk_sync,
+            patch(
+                "backend.jobs.jikan_etl.sync_supplemental_anime_types",
+                return_value=supplemental,
+            ) as supplemental_sync,
             patch(
                 "backend.jobs.jikan_etl.backfill_missing_seasons", return_value=backfill
             ) as backfill_sync,
@@ -226,15 +260,20 @@ class JikanEtlTests(unittest.TestCase):
             patch("backend.jobs.jikan_etl.get_season_coverage", return_value=coverage),
             patch("backend.jobs.jikan_etl._report_current_season"),
             patch("backend.jobs.jikan_etl._report_bulk_seasons"),
+            patch("backend.jobs.jikan_etl._report_supplemental_catalogue"),
             patch("backend.jobs.jikan_etl._report_season_backfill"),
             patch("backend.jobs.jikan_etl._report_catalogue"),
+            patch("backend.jobs.jikan_etl._report_hentai_cleanup"),
             patch("backend.jobs.jikan_etl._report_season_coverage"),
         ):
             result = run_scheduled_sync(limit=7, batch_size=2, page_limit=3)
 
         bulk_sync.assert_called_once_with(max_pages=3)
+        supplemental_sync.assert_called_once_with(max_pages=3)
         backfill_sync.assert_called_once_with(limit=7, batch_size=2)
         catalogue_sync.assert_called_once_with(limit=7, batch_size=2)
+        self.assertEqual(result.supplemental_catalogue, supplemental)
+        self.assertEqual(result.removed_hentai, 21)
         self.assertEqual(result.coverage, coverage)
         self.assertEqual(coverage.rate, 0.75)
 
@@ -265,6 +304,26 @@ class JikanEtlTests(unittest.TestCase):
         mapped_data = update_anime.call_args.args[1]
         self.assertEqual(mapped_data["season"], "summer")
         self.assertEqual(mapped_data["year"], 2026)
+
+    def test_season_sync_deletes_existing_hentai_records(self):
+        anime = SimpleNamespace(mal_id=1)
+        seasonal_data = {
+            "mal_id": 1,
+            "title": "Adult example",
+            "type": "OVA",
+            "rating": "Rx - Hentai",
+        }
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [[anime], []]
+            saved, skipped = sync_season(
+                fetch_season=lambda _year, _season: [seasonal_data],
+            )
+
+        self.assertEqual((saved, skipped), (0, 1))
+        mock_db.session.delete.assert_called_once_with(anime)
 
     def test_season_backfill_selects_only_pending_tv_rows(self):
         anime = SimpleNamespace(
@@ -347,6 +406,29 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(result.temporary_errors, 2)
         self.assertTrue(all(record.last_season_attempt for record in records))
         self.assertGreaterEqual(mock_db.session.commit.call_count, 3)
+
+    def test_season_backfill_deletes_anime_reclassified_as_hentai(self):
+        anime = SimpleNamespace(
+            animeID=1,
+            mal_id=101,
+            season=None,
+            last_season_attempt=None,
+        )
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [[anime], []]
+            result = backfill_missing_seasons(
+                limit=1,
+                fetch_anime=lambda _mal_id: {
+                    "data": {"rating": "Rx - Hentai"}
+                },
+            )
+
+        self.assertEqual(result.removed_hentai, 1)
+        self.assertEqual(result.updated, 0)
+        mock_db.session.delete.assert_called_once_with(anime)
 
     def test_current_season_resumes_failed_page(self):
         page_one = JikanSeasonPage(
@@ -516,6 +598,132 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(result.seasons_assigned, 1)
         self.assertEqual(anime.type, "TV")
         self.assertEqual(anime.season, "winter")
+
+    def test_type_filtered_page_uses_requested_type_when_payload_omits_it(self):
+        anime = SimpleNamespace(mal_id=1, season=None)
+        state = SimpleNamespace(
+            next_page=1,
+            last_attempt_at=None,
+            last_error=None,
+            last_completed_at=None,
+        )
+
+        def update_anime(record, data, _genres):
+            record.type = data["type"]
+
+        page = JikanAnimePage(
+            entries=[{"mal_id": 1, "title": "OVA example"}],
+            page=1,
+            has_next_page=False,
+        )
+        with (
+            patch("backend.jobs.jikan_etl._new_anime", return_value=anime),
+            patch("backend.jobs.jikan_etl._update_anime", side_effect=update_anime),
+            patch("backend.jobs.jikan_etl._sync_state", return_value=state),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [[], []]
+            result = _apply_season_page(
+                page,
+                state_key="test:ova",
+                year=None,
+                season=None,
+                discover_missing=True,
+                tv_only=False,
+                allowed_types=frozenset({"OVA"}),
+                default_type="OVA",
+            )
+
+        self.assertEqual(result.inserted, 1)
+        self.assertEqual(result.saved, 1)
+        self.assertEqual(anime.type, "OVA")
+
+    def test_type_filtered_page_removes_existing_hentai_record(self):
+        anime = SimpleNamespace(mal_id=1)
+        state = SimpleNamespace(
+            next_page=1,
+            last_attempt_at=None,
+            last_error=None,
+            last_completed_at=None,
+        )
+        page = JikanAnimePage(
+            entries=[
+                {
+                    "mal_id": 1,
+                    "type": "ONA",
+                    "title": "Conflicting safe duplicate",
+                },
+                {
+                    "mal_id": 1,
+                    "type": "ONA",
+                    "rating": "Rx - Hentai",
+                }
+            ],
+            page=1,
+            has_next_page=False,
+        )
+        with (
+            patch("backend.jobs.jikan_etl._sync_state", return_value=state),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [[anime], []]
+            result = _apply_season_page(
+                page,
+                state_key="test:ona",
+                year=None,
+                season=None,
+                discover_missing=True,
+                tv_only=False,
+                allowed_types=frozenset({"ONA"}),
+                default_type="ONA",
+            )
+
+        self.assertEqual(result.removed_hentai, 1)
+        self.assertEqual(result.saved, 0)
+        mock_db.session.delete.assert_called_once_with(anime)
+
+    def test_supplemental_sync_uses_independent_type_cursors(self):
+        scan_results = [
+            BulkSeasonSyncResult(inserted=index)
+            for index in range(1, len(SUPPLEMENTAL_PROVIDER_TYPES) + 1)
+        ]
+        with patch(
+            "backend.jobs.jikan_etl._sync_bulk_anime_type",
+            side_effect=scan_results,
+        ) as sync_type:
+            result = sync_supplemental_anime_types(max_pages=7)
+
+        self.assertEqual(sync_type.call_count, len(SUPPLEMENTAL_PROVIDER_TYPES))
+        for anime_type, sync_call in zip(
+            SUPPLEMENTAL_PROVIDER_TYPES,
+            sync_type.call_args_list,
+            strict=True,
+        ):
+            self.assertEqual(sync_call.kwargs["anime_type"], anime_type)
+            self.assertEqual(
+                sync_call.kwargs["state_key"],
+                SUPPLEMENTAL_STATE_KEYS[anime_type],
+            )
+            self.assertTrue(sync_call.kwargs["discover_missing"])
+            self.assertEqual(sync_call.kwargs["max_pages"], 7)
+            self.assertEqual(sync_call.kwargs["max_consecutive_failures"], 3)
+        self.assertEqual(result.inserted, sum(range(1, 5)))
+
+    def test_cleanup_deletes_every_matching_anime_and_hentai_genre(self):
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.return_value = [10, 20]
+            removed = remove_hentai_anime()
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(mock_db.session.execute.call_count, 3)
+        cleanup_sql = str(mock_db.session.scalars.call_args.args[0]).lower()
+        self.assertIn("anime_genre", cleanup_sql)
+        self.assertIn("unnest(anime.genres)", cleanup_sql)
+        self.assertIn("unnest(anime.genres_detailed)", cleanup_sql)
+        mock_db.session.commit.assert_called_once()
 
     def test_bulk_rate_limit_stops_without_advancing_cursor(self):
         def rate_limited(*, page):

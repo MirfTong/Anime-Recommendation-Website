@@ -77,9 +77,8 @@ unavailable, so the next run advances instead of getting stuck:
 .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --backfill-seasons --limit 1000
 ```
 
-The scheduled workflow also scans 40 TV-only bulk catalogue pages per run.
-With 50 entries per page, up to 2,000 TV records can be examined with only 40
-requests:
+The TV-only bulk command scans 40 catalogue pages per run. With 50 entries per
+page, up to 2,000 existing TV records can be examined with only 40 requests:
 
 ```powershell
 .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --bulk-seasons --page-limit 40
@@ -98,13 +97,19 @@ page for the next run, so later failures do not discard or skip data.
 ## Scheduled sync
 
 The GitHub Actions workflow runs every three hours. Each run resumes up to 10
-pages of current-season discovery, scans 40 bulk catalogue pages, refreshes the
-next 1,000 TV anime still missing season metadata, and refreshes the next 1,000
-general catalogue records. Eight scheduled runs use roughly 16,000 detail
-requests per day plus low-volume page requests, staying below the provider's
-40,000-request public daily cap. All phases run in one Python process so the
-rolling rate limiter remains active between phases. The Actions summary reports
-the final TV season coverage, and the concurrency group keeps database writes
+pages of current-season discovery, scans up to 40 pages each for TV, OVA, ONA,
+Special, and TV Special, refreshes the next 1,000 TV anime still missing season
+metadata, and refreshes the next 1,000 general catalogue records. OVA, ONA,
+Special, and TV Special scans have independent persistent cursors, so a failed
+type retries its own page without holding back the others. Existing
+Hentai-classified records are removed before the import, and every import path
+rejects or removes new Hentai classifications from Jikan.
+
+Eight scheduled runs use roughly 16,000 detail requests per day plus the bulk
+page requests, staying below the provider's 40,000-request public daily cap.
+All phases run in one Python process so the rolling rate limiter remains active
+between phases. The Actions summary reports per-type progress, removals, and
+final TV season coverage, while the concurrency group keeps database writes
 sequential. Before enabling it, add a repository Actions secret named
 `DATABASE_URL` with the external PostgreSQL URL.
 

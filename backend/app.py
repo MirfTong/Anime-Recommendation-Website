@@ -9,7 +9,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from backend.models import Anime, Genre, db
@@ -29,6 +29,7 @@ FRONTEND_BUILD_DIR = PROJECT_ROOT / "static" / "react"
 MAX_PAGE_SIZE = 100
 MAX_TAG_OPTIONS = 100
 VALID_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
+TYPE_ALIASES = {"TV SPECIAL": "SPECIAL"}
 
 
 def _current_season_identity(now: datetime | None = None) -> tuple[int, str]:
@@ -94,6 +95,12 @@ def _list_argument(name: str) -> list[str]:
     return list(dict.fromkeys(values))
 
 
+def _normalized_type(value: str) -> str:
+    """Match filter input to the canonical uppercase database type."""
+    normalized = " ".join(value.replace("_", " ").split()).upper()
+    return TYPE_ALIASES.get(normalized, normalized)
+
+
 def _serialize_anime(anime: Anime, *, detailed: bool = False) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": anime.animeID,
@@ -120,8 +127,32 @@ def _serialize_anime(anime: Anime, *, detailed: bool = False) -> dict[str, Any]:
 
 
 def _anime_statement():
-    """Base browse query with the relationships required for API serialization."""
-    return select(Anime).options(selectinload(Anime.genre_entries))
+    """Base public query that never exposes adult-only Hentai records."""
+    legacy_genre = func.unnest(Anime.legacy_genres).column_valued(
+        "legacy_genre"
+    )
+    detailed_genre = func.unnest(Anime.genres_detailed).column_valued(
+        "detailed_genre"
+    )
+    return (
+        select(Anime)
+        .where(
+            ~Anime.genre_entries.any(
+                func.lower(func.trim(Genre.name)) == "hentai"
+            ),
+            ~exists(
+                select(1).where(
+                    func.lower(func.trim(legacy_genre)) == "hentai"
+                )
+            ),
+            ~exists(
+                select(1).where(
+                    func.lower(func.trim(detailed_genre)) == "hentai"
+                )
+            ),
+        )
+        .options(selectinload(Anime.genre_entries))
+    )
 
 
 def _filtered_anime_statement():
@@ -130,7 +161,7 @@ def _filtered_anime_statement():
     min_year = _integer_argument("min_year", minimum=1, maximum=3000)
     max_year = _integer_argument("max_year", minimum=1, maximum=3000)
     min_episodes = _integer_argument("min_episodes", minimum=1, maximum=10000)
-    anime_types = _list_argument("type")
+    anime_types = [_normalized_type(value) for value in _list_argument("type")]
     seasons = [season.lower() for season in _list_argument("season")]
     genres = _list_argument("genre")
     tags = _list_argument("tag")
@@ -218,9 +249,8 @@ def popular_current_season():
         Anime.year == year,
         Anime.season == season,
     )
-    total = db.session.scalar(
-        select(func.count()).select_from(Anime).where(*filters)
-    )
+    public_season = _anime_statement().where(*filters).order_by(None).subquery()
+    total = db.session.scalar(select(func.count()).select_from(public_season))
     anime = db.session.scalars(
         _anime_statement()
         .where(*filters)
@@ -257,7 +287,9 @@ def anime_detail(mal_id: int):
 @app.get(f"{API_PREFIX}/genres")
 def list_genres():
     genres = db.session.scalars(
-        select(Genre.name).where(Genre.name != "Hentai").order_by(Genre.name)
+        select(Genre.name)
+        .where(func.lower(func.trim(Genre.name)) != "hentai")
+        .order_by(Genre.name)
     ).all()
     return jsonify({"items": genres})
 
@@ -269,6 +301,9 @@ def list_detailed_tags():
     limit = _integer_argument("limit", minimum=1, maximum=MAX_TAG_OPTIONS) or 50
     detailed_tags = select(func.unnest(Anime.genres_detailed).label("tag")).subquery()
     statement = select(detailed_tags.c.tag).where(detailed_tags.c.tag.is_not(None))
+    statement = statement.where(
+        func.lower(func.trim(detailed_tags.c.tag)) != "hentai"
+    )
     if query:
         escaped_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         statement = statement.where(detailed_tags.c.tag.ilike(f"%{escaped_query}%", escape="\\"))
