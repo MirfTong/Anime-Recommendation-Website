@@ -28,6 +28,7 @@ MAX_TRANSIENT_RETRY_BUDGET = 100
 PRIMARY_429_COOLDOWN_SECONDS = 60
 REQUEST_TIMEOUT_SECONDS = 20
 SERVER_ERROR_STATUS_CODES = frozenset({500, 502, 503, 504})
+CATALOGUE_ANIME_TYPES = frozenset({"tv", "ova", "ona", "special", "tv_special"})
 USER_AGENT = "KyoQuan/1.0 (+https://github.com/MirfTong/Anime-Recommendation-Website)"
 
 
@@ -164,11 +165,14 @@ class JikanClient:
                 return anime
             page += 1
 
-    def get_anime_catalogue_page(self, *, page: int = 1) -> JikanAnimePage:
+    def get_anime_catalogue_page(
+        self, *, anime_type: str = "tv", page: int = 1
+    ) -> JikanAnimePage:
         """Return one MAL-ID-ordered page from the bulk anime search."""
         self._validate_page(page)
+        anime_type = self._validate_catalogue_type(anime_type)
         payload = self._get_page_from_primary(
-            f"/anime?type=tv&limit=50&order_by=mal_id&sort=asc&page={page}",
+            f"/anime?type={anime_type}&limit=50&order_by=mal_id&sort=asc&page={page}",
             max_transient_retries=MAX_SEASON_TRANSIENT_RETRIES,
             retry_network_errors=True,
         )
@@ -401,6 +405,15 @@ class JikanClient:
             raise ValueError("page must be a positive integer")
 
     @staticmethod
+    def _validate_catalogue_type(anime_type: str) -> str:
+        if not isinstance(anime_type, str):
+            raise ValueError("anime_type must be a supported anime type")
+        normalized = anime_type.strip().lower()
+        if normalized not in CATALOGUE_ANIME_TYPES:
+            raise ValueError("anime_type must be tv, ova, ona, special, or tv_special")
+        return normalized
+
+    @staticmethod
     def _validate_season(year: int | None, season: str | None) -> None:
         if (year is None) != (season is None):
             raise ValueError("year and season must be supplied together")
@@ -449,6 +462,10 @@ def get_season_anime(
     return _default_client.get_season_anime(year, season)
 
 
-def get_anime_catalogue_page(*, page: int = 1) -> JikanAnimePage:
+def get_anime_catalogue_page(
+    *, anime_type: str = "tv", page: int = 1
+) -> JikanAnimePage:
     """Return one parsed page from Jikan's bulk anime catalogue."""
-    return _default_client.get_anime_catalogue_page(page=page)
+    return _default_client.get_anime_catalogue_page(
+        anime_type=anime_type, page=page
+    )

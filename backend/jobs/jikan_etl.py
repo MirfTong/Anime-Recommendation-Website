@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import selectinload
 
 from backend.app import app
@@ -33,6 +33,12 @@ from backend.services.jikan_client import (
 SKIPPABLE_JIKAN_STATUS_CODES = frozenset({404, 429, 500, 502, 503, 504})
 TEMPORARY_JIKAN_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 JIKAN_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
+TYPE_ALIASES = {"TV SPECIAL": "SPECIAL"}
+SUPPLEMENTAL_PROVIDER_TYPES = ("ova", "ona", "special", "tv_special")
+SUPPLEMENTAL_STATE_KEYS = {
+    anime_type: f"bulk:catalogue:{anime_type}:v1"
+    for anime_type in SUPPLEMENTAL_PROVIDER_TYPES
+}
 CURRENT_SEASON_MAX_PAGES_PER_RUN = 10
 DEFAULT_SEASON_BACKFILL_LIMIT = 1000
 BULK_SEASON_MAX_PAGES_PER_RUN = 40
@@ -51,6 +57,7 @@ class AnimeFetchResult:
 class CatalogueRefreshResult:
     selected: int = 0
     updated: int = 0
+    removed_hentai: int = 0
     missing_mal_id: int = 0
     not_found: int = 0
     temporary_errors: int = 0
@@ -67,13 +74,15 @@ class CatalogueRefreshResult:
 
     @property
     def success_rate(self) -> float:
-        return self.updated / self.selected if self.selected else 0.0
+        successful = self.updated + self.removed_hentai
+        return successful / self.selected if self.selected else 0.0
 
 
 @dataclass
 class SeasonPageApplyResult:
     saved: int = 0
     inserted: int = 0
+    removed_hentai: int = 0
     skipped: int = 0
     seasons_assigned: int = 0
 
@@ -82,6 +91,7 @@ class SeasonPageApplyResult:
 class CurrentSeasonSyncResult:
     saved: int = 0
     inserted: int = 0
+    removed_hentai: int = 0
     skipped: int = 0
     seasons_assigned: int = 0
     pages_completed: int = 0
@@ -94,6 +104,7 @@ class CurrentSeasonSyncResult:
 class SeasonBackfillResult:
     selected: int = 0
     updated: int = 0
+    removed_hentai: int = 0
     seasons_assigned: int = 0
     still_missing: int = 0
     not_found: int = 0
@@ -102,7 +113,8 @@ class SeasonBackfillResult:
 
     @property
     def success_rate(self) -> float:
-        return self.updated / self.selected if self.selected else 0.0
+        successful = self.updated + self.removed_hentai
+        return successful / self.selected if self.selected else 0.0
 
 
 @dataclass
@@ -111,9 +123,36 @@ class BulkSeasonSyncResult:
     pages_completed: int = 0
     pages_failed: int = 0
     updated: int = 0
+    inserted: int = 0
+    removed_hentai: int = 0
     seasons_assigned: int = 0
     complete: bool = False
     next_page: int = 1
+
+
+@dataclass(frozen=True)
+class SupplementalCatalogueSyncResult:
+    scans: dict[str, BulkSeasonSyncResult]
+
+    @property
+    def inserted(self) -> int:
+        return sum(scan.inserted for scan in self.scans.values())
+
+    @property
+    def updated(self) -> int:
+        return sum(scan.updated for scan in self.scans.values())
+
+    @property
+    def pages_completed(self) -> int:
+        return sum(scan.pages_completed for scan in self.scans.values())
+
+    @property
+    def pages_failed(self) -> int:
+        return sum(scan.pages_failed for scan in self.scans.values())
+
+    @property
+    def removed_hentai(self) -> int:
+        return sum(scan.removed_hentai for scan in self.scans.values())
 
 
 @dataclass(frozen=True)
@@ -130,9 +169,11 @@ class SeasonCoverage:
 class ScheduledSyncResult:
     current_season: CurrentSeasonSyncResult
     bulk_seasons: BulkSeasonSyncResult
+    supplemental_catalogue: SupplementalCatalogueSyncResult
     season_backfill: SeasonBackfillResult
     catalogue: CatalogueRefreshResult
     coverage: SeasonCoverage
+    removed_hentai: int
 
 
 def _names(entries: Any) -> list[str]:
@@ -157,11 +198,28 @@ def _detailed_genres(data: dict[str, Any], current: list[str]) -> list[str]:
     return list(dict.fromkeys([*current, *jikan_names]))
 
 
+def _is_hentai(data: dict[str, Any]) -> bool:
+    """Return whether Jikan classifies an anime as Hentai."""
+    for field_name in ("genres", "explicit_genres", "themes", "demographics"):
+        if any(name.casefold() == "hentai" for name in _names(data.get(field_name))):
+            return True
+    rating = data.get("rating")
+    return isinstance(rating, str) and "hentai" in rating.casefold()
+
+
 def _valid_score(value: Any) -> float | None:
     """Return a published Jikan score; Jikan uses zero for unknown scores."""
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         return None
     return float(value)
+
+
+def _anime_type(value: Any, *, fallback: str = "UNKNOWN") -> str:
+    """Map provider and legacy type labels onto one canonical value."""
+    if not isinstance(value, str) or not value.strip():
+        return fallback
+    normalized = " ".join(value.replace("_", " ").split()).upper()
+    return TYPE_ALIASES.get(normalized, normalized)
 
 
 def _synopsis(value: Any) -> str | None:
@@ -231,7 +289,7 @@ def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) 
     )
     if "synopsis" in data:
         anime.synopsis = _synopsis(data.get("synopsis"))
-    anime.type = data.get("type") or anime.type
+    anime.type = _anime_type(data.get("type"), fallback=_anime_type(anime.type))
     incoming_season = _season(data.get("season"))
     if incoming_season is None and _is_tv(anime.type):
         incoming_season = _season_from_air_date(data)
@@ -288,7 +346,7 @@ def _new_anime(data: dict[str, Any]) -> Anime:
     """Create a catalogue row from a Jikan anime object."""
     images = _jpg_images(data)
     mal_id = data["mal_id"]
-    anime_type = data.get("type") or "Unknown"
+    anime_type = _anime_type(data.get("type"))
     season = _season(data.get("season"))
     if season is None and _is_tv(anime_type):
         season = _season_from_air_date(data)
@@ -313,6 +371,41 @@ def _new_anime(data: dict[str, Any]) -> Anime:
 
 def _ensure_schema() -> None:
     ensure_anime_schema()
+
+
+def remove_hentai_anime() -> int:
+    """Delete anime classified as Hentai in any stored genre representation."""
+    with app.app_context():
+        _ensure_schema()
+        anime_ids = list(
+            db.session.scalars(
+                text(
+                    "SELECT DISTINCT anime.anime_id FROM anime "
+                    "WHERE EXISTS ("
+                    "SELECT 1 FROM anime_genre "
+                    "JOIN genre ON genre.id = anime_genre.genre_id "
+                    "WHERE anime_genre.anime_id = anime.anime_id "
+                    "AND LOWER(TRIM(genre.name)) = 'hentai'"
+                    ") OR EXISTS ("
+                    "SELECT 1 FROM unnest(anime.genres) AS legacy(value) "
+                    "WHERE LOWER(TRIM(legacy.value)) = 'hentai'"
+                    ") OR EXISTS ("
+                    "SELECT 1 FROM unnest(anime.genres_detailed) AS detail(value) "
+                    "WHERE LOWER(TRIM(detail.value)) = 'hentai'"
+                    ")"
+                )
+            )
+        )
+        if anime_ids:
+            db.session.execute(
+                delete(AnimeGenre).where(AnimeGenre.anime_id.in_(anime_ids))
+            )
+            db.session.execute(delete(Anime).where(Anime.animeID.in_(anime_ids)))
+        db.session.execute(
+            delete(Genre).where(func.lower(func.trim(Genre.name)) == "hentai")
+        )
+        db.session.commit()
+        return len(anime_ids)
 
 
 def _fetch_anime_data(
@@ -391,8 +484,12 @@ def refresh_catalogue(
             else:
                 fetched = _fetch_anime_data(anime.mal_id, fetch_anime)
                 if fetched.data is not None:
-                    _update_anime(anime, fetched.data, genres)
-                    result.updated += 1
+                    if _is_hentai(fetched.data):
+                        db.session.delete(anime)
+                        result.removed_hentai += 1
+                    else:
+                        _update_anime(anime, fetched.data, genres)
+                        result.updated += 1
                 elif fetched.failure == "not_found":
                     result.not_found += 1
                 elif fetched.failure == "temporary":
@@ -431,11 +528,26 @@ def sync_season(
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     seasonal_entries = fetch_season(year, season)
+    hentai_ids = {
+        entry["mal_id"]
+        for entry in seasonal_entries
+        if isinstance(entry, dict)
+        and isinstance(entry.get("mal_id"), int)
+        and not isinstance(entry.get("mal_id"), bool)
+        and entry["mal_id"] > 0
+        and _is_hentai(entry)
+    }
     seasonal_data = {
         entry["mal_id"]: _prepared_season_entry(entry, year, season)
         for entry in seasonal_entries
-        if isinstance(entry.get("mal_id"), int) and entry["mal_id"] > 0
+        if isinstance(entry, dict)
+        and isinstance(entry.get("mal_id"), int)
+        and not isinstance(entry.get("mal_id"), bool)
+        and entry["mal_id"] > 0
+        and not _is_hentai(entry)
     }
+    for mal_id in hentai_ids:
+        seasonal_data.pop(mal_id, None)
     seasonal_ids = list(seasonal_data)
     if limit is not None:
         if limit <= 0:
@@ -444,15 +556,20 @@ def sync_season(
 
     with app.app_context():
         _ensure_schema()
+        queried_ids = list(dict.fromkeys([*seasonal_ids, *hentai_ids]))
         existing = {
             anime.mal_id: anime
             for anime in db.session.scalars(
                 select(Anime)
-                .where(Anime.mal_id.in_(seasonal_ids))
+                .where(Anime.mal_id.in_(queried_ids))
                 .options(selectinload(Anime.genre_links).selectinload(AnimeGenre.genre))
             )
         }
         genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
+        for mal_id in hentai_ids:
+            anime = existing.pop(mal_id, None)
+            if anime is not None:
+                db.session.delete(anime)
         saved = 0
         skipped = len(seasonal_entries) - len(seasonal_data)
         for mal_id in seasonal_ids:
@@ -500,18 +617,38 @@ def _apply_season_page(
     season: str | None,
     discover_missing: bool,
     tv_only: bool,
+    allowed_types: frozenset[str] | None = None,
+    default_type: str | None = None,
 ) -> SeasonPageApplyResult:
     """Persist one page and its next-page cursor in the same transaction."""
-    data_by_mal_id = {
-        entry["mal_id"]: _prepared_season_entry(entry, year, season)
-        for entry in page_result.entries
-        if isinstance(entry, dict)
-        and isinstance(entry.get("mal_id"), int)
-        and not isinstance(entry.get("mal_id"), bool)
-        and entry["mal_id"] > 0
-        and (not tv_only or _is_tv(entry.get("type")))
-    }
-    ids = list(data_by_mal_id)
+    data_by_mal_id: dict[int, dict[str, Any]] = {}
+    hentai_ids: set[int] = set()
+    for entry in page_result.entries:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("mal_id"), int)
+            or isinstance(entry.get("mal_id"), bool)
+            or entry["mal_id"] <= 0
+        ):
+            continue
+        if _is_hentai(entry):
+            hentai_ids.add(entry["mal_id"])
+            continue
+        data = _prepared_season_entry(entry, year, season)
+        if not isinstance(data.get("type"), str) and default_type is not None:
+            data["type"] = default_type
+        if tv_only and not _is_tv(data.get("type")):
+            continue
+        if (
+            allowed_types is not None
+            and _anime_type(data.get("type")) not in allowed_types
+        ):
+            continue
+        data_by_mal_id[entry["mal_id"]] = data
+
+    for mal_id in hentai_ids:
+        data_by_mal_id.pop(mal_id, None)
+    ids = list(dict.fromkeys([*data_by_mal_id, *hentai_ids]))
     with app.app_context():
         statement = select(Anime).where(Anime.mal_id.in_(ids))
         statement = statement.options(
@@ -522,6 +659,12 @@ def _apply_season_page(
         result = SeasonPageApplyResult(
             skipped=len(page_result.entries) - len(data_by_mal_id)
         )
+
+        for mal_id in hentai_ids:
+            anime = existing.pop(mal_id, None)
+            if anime is not None:
+                db.session.delete(anime)
+                result.removed_hentai += 1
 
         for mal_id, data in data_by_mal_id.items():
             anime = existing.get(mal_id)
@@ -599,6 +742,7 @@ def sync_current_season(
         )
         result.saved += applied.saved
         result.inserted += applied.inserted
+        result.removed_hentai += applied.removed_hentai
         result.skipped += applied.skipped
         result.seasons_assigned += applied.seasons_assigned
         result.pages_completed += 1
@@ -612,15 +756,18 @@ def sync_current_season(
     return result
 
 
-def sync_bulk_anime_seasons(
+def _sync_bulk_anime_type(
     *,
+    anime_type: str,
+    state_key: str,
+    discover_missing: bool,
     max_pages: int = BULK_SEASON_MAX_PAGES_PER_RUN,
     max_consecutive_failures: int = BULK_SEASON_MAX_CONSECUTIVE_FAILURES,
     fetch_page: Callable[..., JikanAnimePage] = get_anime_catalogue_page,
 ) -> BulkSeasonSyncResult:
-    """Update TV seasons from a low-request bulk anime catalogue.
+    """Resume one provider-type catalogue cursor and persist its pages.
 
-    One successful request can update up to 50 TV anime. Temporary failures
+    One successful request can update up to 50 anime. Temporary failures
     retry the same page a bounded number of times, then preserve its cursor for
     the next scheduled run so valid rows are never silently skipped.
     """
@@ -629,7 +776,6 @@ def sync_bulk_anime_seasons(
     if max_consecutive_failures <= 0:
         raise ValueError("max_consecutive_failures must be positive")
 
-    state_key = BULK_SEASON_STATE_KEY
     with app.app_context():
         _ensure_schema()
     page = _next_page(state_key)
@@ -639,7 +785,7 @@ def sync_bulk_anime_seasons(
     for _ in range(max_pages):
         result.pages_attempted += 1
         try:
-            fetched = fetch_page(page=page)
+            fetched = fetch_page(anime_type=anime_type, page=page)
         except JikanTemporaryError as error:
             _record_page_error(state_key, page, error)
             result.pages_failed += 1
@@ -661,7 +807,7 @@ def sync_bulk_anime_seasons(
             result.pages_failed += 1
             result.next_page = page
             # A sustained 429 is a provider-wide quota signal. Retrying later
-            # preserves this page instead of silently losing valid TV rows.
+            # preserves this page instead of silently losing valid rows.
             if error.code == 429:
                 break
             consecutive_failures += 1
@@ -675,11 +821,15 @@ def sync_bulk_anime_seasons(
             state_key=state_key,
             year=None,
             season=None,
-            discover_missing=False,
-            tv_only=True,
+            discover_missing=discover_missing,
+            tv_only=False,
+            allowed_types=frozenset({_anime_type(anime_type)}),
+            default_type=_anime_type(anime_type),
         )
         result.pages_completed += 1
-        result.updated += applied.saved
+        result.updated += applied.saved - applied.inserted
+        result.inserted += applied.inserted
+        result.removed_hentai += applied.removed_hentai
         result.seasons_assigned += applied.seasons_assigned
         if not fetched.has_next_page:
             result.complete = True
@@ -689,6 +839,48 @@ def sync_bulk_anime_seasons(
         result.next_page = page
 
     return result
+
+
+def sync_bulk_anime_seasons(
+    *,
+    max_pages: int = BULK_SEASON_MAX_PAGES_PER_RUN,
+    max_consecutive_failures: int = BULK_SEASON_MAX_CONSECUTIVE_FAILURES,
+    fetch_page: Callable[..., JikanAnimePage] = get_anime_catalogue_page,
+) -> BulkSeasonSyncResult:
+    """Update existing TV records while preserving the deployed TV cursor."""
+
+    def fetch_tv_page(*, anime_type: str, page: int) -> JikanAnimePage:
+        del anime_type
+        return fetch_page(page=page)
+
+    return _sync_bulk_anime_type(
+        anime_type="tv",
+        state_key=BULK_SEASON_STATE_KEY,
+        discover_missing=False,
+        max_pages=max_pages,
+        max_consecutive_failures=max_consecutive_failures,
+        fetch_page=fetch_tv_page,
+    )
+
+
+def sync_supplemental_anime_types(
+    *,
+    max_pages: int = BULK_SEASON_MAX_PAGES_PER_RUN,
+    max_consecutive_failures: int = BULK_SEASON_MAX_CONSECUTIVE_FAILURES,
+    fetch_page: Callable[..., JikanAnimePage] = get_anime_catalogue_page,
+) -> SupplementalCatalogueSyncResult:
+    """Discover and update OVA, ONA, Special, and TV Special catalogues."""
+    scans = {}
+    for anime_type in SUPPLEMENTAL_PROVIDER_TYPES:
+        scans[anime_type] = _sync_bulk_anime_type(
+            anime_type=anime_type,
+            state_key=SUPPLEMENTAL_STATE_KEYS[anime_type],
+            discover_missing=True,
+            max_pages=max_pages,
+            max_consecutive_failures=max_consecutive_failures,
+            fetch_page=fetch_page,
+        )
+    return SupplementalCatalogueSyncResult(scans=scans)
 
 
 def backfill_missing_seasons(
@@ -736,12 +928,16 @@ def backfill_missing_seasons(
             _mark_jikan_attempt(anime)
             fetched = _fetch_anime_data(anime.mal_id, fetch_anime)
             if fetched.data is not None:
-                _update_anime(anime, fetched.data, genres)
-                result.updated += 1
-                if anime.season is None:
-                    result.still_missing += 1
+                if _is_hentai(fetched.data):
+                    db.session.delete(anime)
+                    result.removed_hentai += 1
                 else:
-                    result.seasons_assigned += 1
+                    _update_anime(anime, fetched.data, genres)
+                    result.updated += 1
+                    if anime.season is None:
+                        result.still_missing += 1
+                    else:
+                        result.seasons_assigned += 1
             elif fetched.failure == "not_found":
                 result.not_found += 1
             elif fetched.failure == "temporary":
@@ -776,6 +972,7 @@ def _report_current_season(result: CurrentSeasonSyncResult) -> None:
     print(
         "Current season sync: "
         f"saved={result.saved}, inserted={result.inserted}, "
+        f"removed_hentai={result.removed_hentai}, "
         f"seasons_assigned={result.seasons_assigned}, "
         f"pages={result.pages_completed}, failed_pages={result.pages_failed}, "
         f"complete={result.complete}, next_page={result.next_page}."
@@ -785,6 +982,7 @@ def _report_current_season(result: CurrentSeasonSyncResult) -> None:
         [
             ("Anime saved", result.saved),
             ("Anime inserted", result.inserted),
+            ("Hentai records removed", result.removed_hentai),
             ("Seasons assigned", result.seasons_assigned),
             ("Pages committed", result.pages_completed),
             ("Failed pages", result.pages_failed),
@@ -804,6 +1002,8 @@ def _report_bulk_seasons(result: BulkSeasonSyncResult) -> None:
         f"attempted_pages={result.pages_attempted}, "
         f"completed_pages={result.pages_completed}, "
         f"failed_pages={result.pages_failed}, updated={result.updated}, "
+        f"inserted={result.inserted}, "
+        f"removed_hentai={result.removed_hentai}, "
         f"seasons_assigned={result.seasons_assigned}, "
         f"complete={result.complete}, next_page={result.next_page}."
     )
@@ -814,6 +1014,8 @@ def _report_bulk_seasons(result: BulkSeasonSyncResult) -> None:
             ("Pages completed", result.pages_completed),
             ("Pages failed", result.pages_failed),
             ("Anime updated", result.updated),
+            ("Anime inserted", result.inserted),
+            ("Hentai records removed", result.removed_hentai),
             ("Seasons assigned", result.seasons_assigned),
             ("Next page", result.next_page),
         ],
@@ -825,10 +1027,68 @@ def _report_bulk_seasons(result: BulkSeasonSyncResult) -> None:
         )
 
 
+def _report_supplemental_catalogue(
+    result: SupplementalCatalogueSyncResult,
+) -> None:
+    labels = {
+        "ova": "OVA",
+        "ona": "ONA",
+        "special": "Special",
+        "tv_special": "TV Special",
+    }
+    details = []
+    for anime_type, scan in result.scans.items():
+        label = labels.get(anime_type, anime_type)
+        details.append(
+            f"{label}: pages={scan.pages_completed}, updated={scan.updated}, "
+            f"inserted={scan.inserted}, removed_hentai={scan.removed_hentai}, "
+            f"failed={scan.pages_failed}, "
+            f"next_page={scan.next_page}"
+        )
+    print(
+        "Supplemental catalogue sync: "
+        f"completed_pages={result.pages_completed}, "
+        f"failed_pages={result.pages_failed}, updated={result.updated}, "
+        f"inserted={result.inserted}, removed_hentai={result.removed_hentai}. "
+        + "; ".join(details)
+    )
+    _append_step_summary(
+        "OVA, ONA, and Special catalogue sync",
+        [
+            ("Pages completed", result.pages_completed),
+            ("Pages failed", result.pages_failed),
+            ("Anime updated", result.updated),
+            ("Anime inserted", result.inserted),
+            ("Hentai records removed", result.removed_hentai),
+            *[
+                (
+                    labels.get(anime_type, anime_type),
+                    (
+                        f"{scan.pages_completed} pages, {scan.updated} updated, "
+                        f"{scan.inserted} inserted, "
+                        f"{scan.removed_hentai} Hentai removed, "
+                        f"next page {scan.next_page}"
+                    ),
+                )
+                for anime_type, scan in result.scans.items()
+            ],
+        ],
+    )
+    if result.pages_failed:
+        _workflow_warning(
+            "Supplemental catalogue sync degraded",
+            (
+                f"{result.pages_failed} OVA/ONA/Special pages failed; "
+                "their independent cursors will retry those pages next run."
+            ),
+        )
+
+
 def _report_season_backfill(result: SeasonBackfillResult) -> None:
     print(
         "TV season backfill: "
         f"selected={result.selected}, updated={result.updated}, "
+        f"removed_hentai={result.removed_hentai}, "
         f"seasons_assigned={result.seasons_assigned}, "
         f"still_missing={result.still_missing}, not_found={result.not_found}, "
         f"temporary={result.temporary_errors}, invalid={result.invalid_payloads}, "
@@ -839,6 +1099,7 @@ def _report_season_backfill(result: SeasonBackfillResult) -> None:
         [
             ("TV anime selected", result.selected),
             ("Anime updated", result.updated),
+            ("Hentai records removed", result.removed_hentai),
             ("Seasons assigned", result.seasons_assigned),
             ("Successful responses still missing season", result.still_missing),
             ("Success rate", f"{result.success_rate:.1%}"),
@@ -850,7 +1111,10 @@ def _report_season_backfill(result: SeasonBackfillResult) -> None:
     if result.selected >= 100 and result.success_rate < DEGRADED_SUCCESS_RATE:
         _workflow_warning(
             "TV season backfill degraded",
-            f"Only {result.updated}/{result.selected} records updated; {result.temporary_errors} were temporary API failures.",
+            (
+                f"Only {result.updated + result.removed_hentai}/{result.selected} "
+                f"records handled; {result.temporary_errors} were temporary API failures."
+            ),
         )
 
 
@@ -858,6 +1122,7 @@ def _report_catalogue(result: CatalogueRefreshResult) -> None:
     print(
         "Catalogue refresh: "
         f"selected={result.selected}, updated={result.updated}, "
+        f"removed_hentai={result.removed_hentai}, "
         f"not_found={result.not_found}, temporary={result.temporary_errors}, "
         f"invalid={result.invalid_payloads}, missing_mal_id={result.missing_mal_id}, "
         f"success_rate={result.success_rate:.1%}."
@@ -867,6 +1132,7 @@ def _report_catalogue(result: CatalogueRefreshResult) -> None:
         [
             ("Selected", result.selected),
             ("Updated", result.updated),
+            ("Hentai records removed", result.removed_hentai),
             ("Success rate", f"{result.success_rate:.1%}"),
             ("Temporary API failures", result.temporary_errors),
             ("Not found", result.not_found),
@@ -876,8 +1142,19 @@ def _report_catalogue(result: CatalogueRefreshResult) -> None:
     if result.selected >= 100 and result.success_rate < DEGRADED_SUCCESS_RATE:
         _workflow_warning(
             "Catalogue refresh degraded",
-            f"Only {result.updated}/{result.selected} records updated; {result.temporary_errors} were temporary API failures.",
+            (
+                f"Only {result.updated + result.removed_hentai}/{result.selected} "
+                f"records handled; {result.temporary_errors} were temporary API failures."
+            ),
         )
+
+
+def _report_hentai_cleanup(removed: int) -> None:
+    print(f"Hentai cleanup: removed={removed}.")
+    _append_step_summary(
+        "Adult-content cleanup",
+        [("Hentai anime removed", removed)],
+    )
 
 
 def get_season_coverage() -> SeasonCoverage:
@@ -926,26 +1203,41 @@ def run_scheduled_sync(
     if page_limit <= 0:
         raise ValueError("page_limit must be positive")
 
+    removed_hentai = remove_hentai_anime()
+
     current_result = sync_current_season()
     _report_current_season(current_result)
 
     bulk_result = sync_bulk_anime_seasons(max_pages=page_limit)
     _report_bulk_seasons(bulk_result)
 
+    supplemental_result = sync_supplemental_anime_types(max_pages=page_limit)
+    _report_supplemental_catalogue(supplemental_result)
+
     backfill_result = backfill_missing_seasons(limit=limit, batch_size=batch_size)
     _report_season_backfill(backfill_result)
 
     catalogue_result = refresh_catalogue(limit=limit, batch_size=batch_size)
     _report_catalogue(catalogue_result)
+    removed_hentai += (
+        current_result.removed_hentai
+        + bulk_result.removed_hentai
+        + supplemental_result.removed_hentai
+        + backfill_result.removed_hentai
+        + catalogue_result.removed_hentai
+    )
+    _report_hentai_cleanup(removed_hentai)
 
     coverage = get_season_coverage()
     _report_season_coverage(coverage)
     return ScheduledSyncResult(
         current_season=current_result,
         bulk_seasons=bulk_result,
+        supplemental_catalogue=supplemental_result,
         season_backfill=backfill_result,
         catalogue=catalogue_result,
         coverage=coverage,
+        removed_hentai=removed_hentai,
     )
 
 

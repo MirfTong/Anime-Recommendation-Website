@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from sqlalchemy import select
 
-from backend.app import app
+from backend.app import _anime_statement, _normalized_type, app
 from backend.models import Anime, db
 
 
@@ -36,6 +36,42 @@ class AppTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertTrue(all(item["season"] == "winter" for item in body["items"]))
+
+    def test_type_filter_values_are_normalized(self):
+        self.assertEqual(_normalized_type("Movie"), "MOVIE")
+        self.assertEqual(_normalized_type("tv_special"), "SPECIAL")
+
+    def test_public_api_excludes_hentai_records_and_filter_options(self):
+        anime_response = self.client.get(
+            "/api/v1/anime", query_string={"genre": "Hentai"}
+        )
+        genre_response = self.client.get("/api/v1/genres")
+        tag_response = self.client.get(
+            "/api/v1/tags", query_string={"q": "hentai"}
+        )
+
+        self.assertEqual(anime_response.status_code, 200)
+        self.assertEqual(anime_response.get_json()["items"], [])
+        self.assertFalse(
+            any(
+                name.strip().casefold() == "hentai"
+                for name in genre_response.get_json()["items"]
+            )
+        )
+        self.assertFalse(
+            any(
+                name.strip().casefold() == "hentai"
+                for name in tag_response.get_json()["items"]
+            )
+        )
+
+    def test_public_query_checks_every_stored_genre_representation(self):
+        sql = str(_anime_statement()).lower()
+
+        self.assertIn("genre.name", sql)
+        self.assertIn("unnest(anime.genres)", sql)
+        self.assertIn("unnest(anime.genres_detailed)", sql)
+        self.assertGreaterEqual(sql.count("lower(trim("), 3)
 
     def test_detailed_tag_catalogue_supports_search(self):
         response = self.client.get("/api/v1/genres")

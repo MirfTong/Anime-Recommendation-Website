@@ -28,6 +28,21 @@ def ensure_anime_schema() -> None:
             text(f"ALTER TABLE anime ADD COLUMN IF NOT EXISTS {definition}")
         )
 
+    # Keep legacy CSV labels and Jikan labels aligned with the exact values
+    # used by the frontend type filter.
+    db.session.execute(
+        text(
+            "UPDATE anime SET type = CASE "
+            "WHEN REPLACE(UPPER(TRIM(type)), '_', ' ') = 'TV SPECIAL' "
+            "THEN 'SPECIAL' "
+            "ELSE UPPER(TRIM(type)) END "
+            "WHERE type IS NOT NULL AND type <> CASE "
+            "WHEN REPLACE(UPPER(TRIM(type)), '_', ' ') = 'TV SPECIAL' "
+            "THEN 'SPECIAL' "
+            "ELSE UPPER(TRIM(type)) END"
+        )
+    )
+
     db.session.execute(
         text(
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_anime_mal_id "
