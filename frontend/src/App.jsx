@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const EMPTY_FILTERS = {
   q: "",
@@ -9,6 +9,8 @@ const EMPTY_FILTERS = {
   type: "",
   genre: [],
 };
+
+const TOP_RATED_FILTERS = { ...EMPTY_FILTERS, type: "TV" };
 
 function queryString(filters, page = 1) {
   const params = new URLSearchParams({ page: String(page), per_page: "24" });
@@ -66,13 +68,14 @@ function DetailModal({ anime, onClose }) {
 }
 
 export default function App() {
-  const [filters, setFilters] = useState(EMPTY_FILTERS);
+  const [filters, setFilters] = useState(TOP_RATED_FILTERS);
   const [genres, setGenres] = useState([]);
   const [anime, setAnime] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(null);
+  const genreDropdownRef = useRef(null);
 
   const loadAnime = useCallback(async (page = 1, activeFilters = filters) => {
     setLoading(true); setError("");
@@ -86,8 +89,18 @@ export default function App() {
 
   useEffect(() => {
     fetch("/api/v1/genres").then((response) => response.json()).then((body) => setGenres(body.items ?? [])).catch(() => setGenres([]));
-    loadAnime(1, EMPTY_FILTERS);
+    loadAnime(1, TOP_RATED_FILTERS);
   }, []); // Initial catalogue only; filters are submitted explicitly.
+
+  useEffect(() => {
+    const closeGenreDropdown = (event) => {
+      if (!genreDropdownRef.current?.contains(event.target)) {
+        genreDropdownRef.current?.removeAttribute("open");
+      }
+    };
+    document.addEventListener("pointerdown", closeGenreDropdown);
+    return () => document.removeEventListener("pointerdown", closeGenreDropdown);
+  }, []);
 
   const submitFilters = (event) => { event.preventDefault(); loadAnime(1); };
   const showRandom = async () => {
@@ -112,8 +125,8 @@ export default function App() {
       : [...current.genre, genre],
   }));
   const clearSelections = () => {
-    setFilters({ ...EMPTY_FILTERS, genre: [] });
-    loadAnime(1, EMPTY_FILTERS);
+    setFilters(TOP_RATED_FILTERS);
+    loadAnime(1, TOP_RATED_FILTERS);
   };
   const hasSelections = Object.values(filters).some((value) => Array.isArray(value) ? value.length > 0 : Boolean(value));
 
@@ -127,7 +140,7 @@ export default function App() {
       <form className="mb-8 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl backdrop-blur sm:grid-cols-2 lg:grid-cols-4" onSubmit={submitFilters}>
         <input className="filter-input sm:col-span-2" name="q" placeholder="Search anime" value={filters.q} onChange={changeFilter} />
         <div className="relative">
-          <details className="group">
+          <details ref={genreDropdownRef} className="group">
             <summary className="filter-input flex cursor-pointer list-none items-center justify-between marker:hidden">
               <span>{filters.genre.length ? `${filters.genre.length} genres selected` : "All genres"}</span>
               <span className="text-violet-300 transition group-open:rotate-180">⌄</span>
