@@ -13,6 +13,7 @@ const EMPTY_FILTERS = {
 };
 
 const PAGE_WINDOW_SIZE = 8;
+const TOP_RATED_FILTERS = { ...EMPTY_FILTERS, type: "TV" };
 
 function queryString(filters, page = 1) {
   const params = new URLSearchParams({ page: String(page), per_page: "24" });
@@ -88,7 +89,7 @@ function DetailModal({ anime, onClose }) {
 }
 
 export default function App() {
-  const [filters, setFilters] = useState(EMPTY_FILTERS);
+  const [filters, setFilters] = useState(TOP_RATED_FILTERS);
   const [genres, setGenres] = useState([]);
   const [tagOptions, setTagOptions] = useState([]);
   const [tagQuery, setTagQuery] = useState("");
@@ -149,7 +150,7 @@ export default function App() {
 
   useEffect(() => {
     fetch("/api/v1/genres").then((response) => response.json()).then((body) => setGenres(body.items ?? [])).catch(() => setGenres([]));
-    loadAnime(1, EMPTY_FILTERS);
+    loadAnime(1, TOP_RATED_FILTERS);
     loadSeasonalAnime();
   }, []); // Initial catalogue only; filters are submitted explicitly.
 
@@ -203,9 +204,9 @@ export default function App() {
       : [...current.tag, tag],
   }));
   const clearSelections = () => {
-    setFilters({ ...EMPTY_FILTERS, genre: [] });
+    setFilters(TOP_RATED_FILTERS);
     setViewMode("home");
-    loadAnime(1, EMPTY_FILTERS);
+    loadAnime(1, TOP_RATED_FILTERS);
   };
   const hasSelections = Object.values(filters).some((value) => Array.isArray(value) ? value.length > 0 : Boolean(value));
   const matchingGenres = genres.filter((genre) => genre.toLowerCase().includes(tagQuery.trim().toLowerCase()));
