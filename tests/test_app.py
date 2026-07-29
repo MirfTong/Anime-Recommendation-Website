@@ -6,12 +6,14 @@ from sqlalchemy.dialects import postgresql
 
 from backend.app import (
     _anime_statement,
+    _catalogue_rows_subquery,
     _filtered_anime_statement,
     _filtered_manga_statement,
     _manga_statement,
     _normalized_content_type,
     _normalized_status,
     _normalized_type,
+    _ordered_catalogue_rows,
     _request_filter_signature,
     _serialize_manga,
     app,
@@ -50,6 +52,109 @@ class AppTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertTrue(all(item["season"] == "winter" for item in body["items"]))
+
+    def test_catalogue_supports_database_ordered_sort_options(self):
+        expectations = {
+            "top_rated": ("score", True),
+            "newest": ("year", True),
+            "oldest": ("year", False),
+            "most_episodes": ("episodes", True),
+        }
+        for sort, (field, reverse) in expectations.items():
+            with self.subTest(sort=sort):
+                response = self.client.get(
+                    "/api/v1/catalogue",
+                    query_string={
+                        "content_type": "ANIME",
+                        "sort": sort,
+                        "per_page": 8,
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                values = [
+                    item[field]
+                    for item in response.get_json()["items"]
+                    if item[field] is not None
+                ]
+                self.assertEqual(values, sorted(values, reverse=reverse))
+
+        title_response = self.client.get(
+            "/api/v1/catalogue",
+            query_string={
+                "content_type": "MANGA",
+                "sort": "title",
+                "per_page": 8,
+            },
+        )
+        repeated_title_response = self.client.get(
+            "/api/v1/catalogue",
+            query_string={
+                "content_type": "MANGA",
+                "sort": "title",
+                "per_page": 8,
+            },
+        )
+        self.assertEqual(title_response.status_code, 200)
+        self.assertEqual(
+            title_response.get_json()["items"],
+            repeated_title_response.get_json()["items"],
+        )
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=MANGA&sort=title"
+        ):
+            catalogue_rows = _catalogue_rows_subquery({"MANGA"})
+            title_sql = str(
+                _ordered_catalogue_rows(catalogue_rows, "title").compile(
+                    dialect=postgresql.dialect()
+                )
+            ).lower()
+        self.assertIn("order by lower(catalogue_rows.title)", title_sql)
+
+    def test_sort_options_are_validated_for_the_selected_content(self):
+        anime_response = self.client.get(
+            "/api/v1/catalogue",
+            query_string={
+                "content_type": "ANIME",
+                "sort": "most_chapters",
+            },
+        )
+        mixed_response = self.client.get(
+            "/api/v1/catalogue",
+            query_string={
+                "content_type": "ALL",
+                "sort": "most_episodes",
+            },
+        )
+
+        self.assertEqual(anime_response.status_code, 400)
+        self.assertEqual(mixed_response.status_code, 400)
+
+    def test_catalogue_exposes_freshness_only_from_available_sync_data(self):
+        response = self.client.get(
+            "/api/v1/catalogue",
+            query_string={"content_type": "ANIME", "per_page": 1},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("updated_at", response.get_json())
+
+    def test_anime_maximum_episode_filter_supports_short_series(self):
+        response = self.client.get(
+            "/api/v1/catalogue",
+            query_string={
+                "content_type": "ANIME",
+                "max_episodes": 13,
+                "per_page": 8,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            all(
+                item["episodes"] is not None and item["episodes"] <= 13
+                for item in response.get_json()["items"]
+            )
+        )
 
     def test_type_filter_values_are_normalized(self):
         self.assertEqual(_normalized_type("Movie"), "MOVIE")
