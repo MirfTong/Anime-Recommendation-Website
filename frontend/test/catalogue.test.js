@@ -8,6 +8,7 @@ import {
   itemContentType,
   itemMetadata,
   queryString,
+  usesTopRatedAnimeHomepage,
   visiblePageNumbers,
 } from "../src/catalogue.js";
 
@@ -20,6 +21,13 @@ test("clear filters are visually blank while the anime homepage stays TV-ranked"
   assert.equal(cleared.tag.length, 0);
   assert.equal(TOP_RATED_FILTERS.type, "TV");
   assert.equal(filtersMatch(cleared, filtersFor("MANGA")), true);
+});
+
+test("explicitly choosing all anime types leaves the TV-only homepage", () => {
+  const cleared = filtersFor("ANIME");
+
+  assert.equal(usesTopRatedAnimeHomepage("ANIME", cleared), true);
+  assert.equal(usesTopRatedAnimeHomepage("ANIME", cleared, true), false);
 });
 
 test("anime queries send anime filters and omit readable-title filters", () => {

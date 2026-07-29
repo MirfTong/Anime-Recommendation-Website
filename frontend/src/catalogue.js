@@ -40,6 +40,16 @@ export function filtersMatch(left, right) {
   });
 }
 
+export function usesTopRatedAnimeHomepage(
+  contentType,
+  filters,
+  allTypesExplicitlySelected = false,
+) {
+  return contentType === "ANIME"
+    && filtersMatch(filters, filtersFor())
+    && !allTypesExplicitlySelected;
+}
+
 export function queryString(filters, page = 1, contentType = "ANIME") {
   const params = new URLSearchParams({
     content_type: contentType,
