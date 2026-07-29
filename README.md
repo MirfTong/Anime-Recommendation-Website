@@ -6,27 +6,6 @@ KyoQuan is a React single-page application backed by a Flask REST API and
 PostgreSQL. It supports one searchable catalogue for Anime, Manga, and Manhwa,
 with metadata populated incrementally from Tenrai and Jikan-compatible APIs.
 
-## Architecture
-
-```text
-Tenrai/Jikan APIs
-       |
-       v
-rate-limited Python client
-       |
-       v
-resumable Anime + Manga/Manhwa ETL
-       |
-       v
-PostgreSQL <-> Flask REST API <-> React/Vite frontend
-```
-
-The database keeps the existing `anime` table unchanged and adds a dedicated
-`manga` table for both Manga and Manhwa. `manga.content_type` is constrained to
-`MANGA` or `MANHWA`, while `mal_id` is unique because both types share
-MyAnimeList's manga ID namespace. This avoids a risky rewrite of the deployed
-anime schema while still providing a unified API.
-
 Genres are normalized across all three content types:
 
 - `genre` stores each genre name once.
