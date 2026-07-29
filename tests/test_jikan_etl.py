@@ -37,6 +37,11 @@ from backend.jobs.jikan_etl import (
     sync_supplemental_anime_types,
 )
 from backend.models import Anime
+from backend.jobs.manga_etl import (
+    MangaCatalogueSyncResult,
+    MangaRefreshResult,
+    MangaTypeSyncResult,
+)
 from backend.services.jikan_client import (
     JikanAnimePage,
     JikanSeasonPage,
@@ -109,6 +114,7 @@ class JikanEtlTests(unittest.TestCase):
             _is_hentai({"explicit_genres": [{"name": " HENTAI "}]})
         )
         self.assertTrue(_is_hentai({"rating": "Rx - Hentai"}))
+        self.assertTrue(_is_hentai({"genres": [{"name": " Erotica "}]}))
         self.assertFalse(
             _is_hentai(
                 {
@@ -240,9 +246,14 @@ class JikanEtlTests(unittest.TestCase):
         )
         backfill = SeasonBackfillResult(removed_hentai=4)
         catalogue = CatalogueRefreshResult(removed_hentai=5)
+        manga_catalogue = MangaCatalogueSyncResult(
+            scans={"manga": MangaTypeSyncResult(removed_adult=2)}
+        )
+        manga_refresh = MangaRefreshResult(removed_adult=3)
         coverage = SeasonCoverage(total_tv=100, classified_tv=75)
         with (
             patch("backend.jobs.jikan_etl.remove_hentai_anime", return_value=6),
+            patch("backend.jobs.jikan_etl.remove_adult_manga", return_value=7),
             patch("backend.jobs.jikan_etl.sync_current_season", return_value=current),
             patch(
                 "backend.jobs.jikan_etl.sync_bulk_anime_seasons", return_value=bulk
@@ -257,12 +268,23 @@ class JikanEtlTests(unittest.TestCase):
             patch(
                 "backend.jobs.jikan_etl.refresh_catalogue", return_value=catalogue
             ) as catalogue_sync,
+            patch(
+                "backend.jobs.jikan_etl.sync_manga_catalogue",
+                return_value=manga_catalogue,
+            ) as manga_sync,
+            patch(
+                "backend.jobs.jikan_etl.refresh_manga_catalogue",
+                return_value=manga_refresh,
+            ) as manga_refresh_sync,
             patch("backend.jobs.jikan_etl.get_season_coverage", return_value=coverage),
             patch("backend.jobs.jikan_etl._report_current_season"),
             patch("backend.jobs.jikan_etl._report_bulk_seasons"),
             patch("backend.jobs.jikan_etl._report_supplemental_catalogue"),
             patch("backend.jobs.jikan_etl._report_season_backfill"),
             patch("backend.jobs.jikan_etl._report_catalogue"),
+            patch("backend.jobs.jikan_etl.report_manga_catalogue"),
+            patch("backend.jobs.jikan_etl.report_manga_cleanup"),
+            patch("backend.jobs.jikan_etl.report_manga_refresh"),
             patch("backend.jobs.jikan_etl._report_hentai_cleanup"),
             patch("backend.jobs.jikan_etl._report_season_coverage"),
         ):
@@ -272,7 +294,12 @@ class JikanEtlTests(unittest.TestCase):
         supplemental_sync.assert_called_once_with(max_pages=3)
         backfill_sync.assert_called_once_with(limit=7, batch_size=2)
         catalogue_sync.assert_called_once_with(limit=7, batch_size=2)
+        manga_sync.assert_called_once_with(max_pages=3)
+        manga_refresh_sync.assert_called_once_with(limit=7, batch_size=2)
         self.assertEqual(result.supplemental_catalogue, supplemental)
+        self.assertEqual(result.manga_catalogue, manga_catalogue)
+        self.assertEqual(result.manga_refresh, manga_refresh)
+        self.assertEqual(result.removed_adult_manga, 12)
         self.assertEqual(result.removed_hentai, 21)
         self.assertEqual(result.coverage, coverage)
         self.assertEqual(coverage.rate, 0.75)
@@ -709,7 +736,7 @@ class JikanEtlTests(unittest.TestCase):
             self.assertEqual(sync_call.kwargs["max_consecutive_failures"], 3)
         self.assertEqual(result.inserted, sum(range(1, 5)))
 
-    def test_cleanup_deletes_every_matching_anime_and_hentai_genre(self):
+    def test_cleanup_deletes_matching_adult_anime_but_keeps_shared_genres(self):
         with (
             patch("backend.jobs.jikan_etl._ensure_schema"),
             patch("backend.jobs.jikan_etl.db") as mock_db,
@@ -718,7 +745,9 @@ class JikanEtlTests(unittest.TestCase):
             removed = remove_hentai_anime()
 
         self.assertEqual(removed, 2)
-        self.assertEqual(mock_db.session.execute.call_count, 3)
+        # The shared Genre row is retained because Manga/Manhwa may still
+        # reference the same normalized value; only links and anime are deleted.
+        self.assertEqual(mock_db.session.execute.call_count, 2)
         cleanup_sql = str(mock_db.session.scalars.call_args.args[0]).lower()
         self.assertIn("anime_genre", cleanup_sql)
         self.assertIn("unnest(anime.genres)", cleanup_sql)

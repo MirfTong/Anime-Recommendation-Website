@@ -5,8 +5,12 @@ from sqlalchemy import text
 from backend.models import db
 
 
-def ensure_anime_schema() -> None:
-    """Create the catalogue schema and safely add columns used by newer releases."""
+def ensure_catalogue_schema() -> None:
+    """Create anime/manga tables and apply safe additive catalogue migrations."""
+    # pg_trgm makes the API's leading-wildcard title searches indexable. It is
+    # a trusted PostgreSQL extension and must exist before ORM indexes are made.
+    db.session.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+    db.session.commit()
     db.create_all()
 
     # Older CSV imports required these fields, but Jikan can legitimately omit
@@ -70,4 +74,34 @@ def ensure_anime_schema() -> None:
             "ON anime (season, score)"
         )
     )
+    db.session.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_anime_genre_genre_anime "
+            "ON anime_genre (genre_id, anime_id)"
+        )
+    )
+    db.session.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_anime_genres_detailed_gin "
+            "ON anime USING GIN (genres_detailed)"
+        )
+    )
+    for index_sql in (
+        "CREATE INDEX IF NOT EXISTS ix_anime_title_trgm "
+        "ON anime USING GIN (title gin_trgm_ops)",
+        "CREATE INDEX IF NOT EXISTS ix_anime_alternative_title_trgm "
+        "ON anime USING GIN (alternative_title gin_trgm_ops)",
+        "CREATE INDEX IF NOT EXISTS ix_manga_title_trgm "
+        "ON manga USING GIN (title gin_trgm_ops)",
+        "CREATE INDEX IF NOT EXISTS ix_manga_alternative_title_trgm "
+        "ON manga USING GIN (alternative_title gin_trgm_ops)",
+        "CREATE INDEX IF NOT EXISTS ix_manga_content_status_normalized_score "
+        "ON manga (content_type, LOWER(BTRIM(status)), score DESC)",
+    ):
+        db.session.execute(text(index_sql))
     db.session.commit()
+
+
+def ensure_anime_schema() -> None:
+    """Backward-compatible entry point used by the existing anime jobs."""
+    ensure_catalogue_schema()

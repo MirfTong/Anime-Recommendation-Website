@@ -24,6 +24,8 @@ class JikanWorkflowTests(unittest.TestCase):
         )
         self.assertIn(command, workflow)
         self.assertEqual(workflow.count("python -m backend.jobs.jikan_etl"), 1)
+        self.assertIn("Sync Anime, Manga, and Manhwa", workflow)
+        self.assertIn("Scheduled catalogue metadata sync", workflow)
 
 
 if __name__ == "__main__":

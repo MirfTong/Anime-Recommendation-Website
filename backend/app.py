@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import exists, func, literal, or_, select, union_all
 from sqlalchemy.orm import selectinload
 
-from backend.models import Anime, Genre, db
+from backend.models import Anime, AnimeGenre, Genre, Manga, MangaGenre, db
 from backend.schema import ensure_anime_schema
 
 
@@ -30,6 +31,45 @@ MAX_PAGE_SIZE = 100
 MAX_TAG_OPTIONS = 100
 VALID_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
 TYPE_ALIASES = {"TV SPECIAL": "SPECIAL"}
+CONTENT_TYPE_SCOPES = {
+    "ANIME": frozenset({"ANIME"}),
+    "MANGA": frozenset({"MANGA"}),
+    "MANHWA": frozenset({"MANHWA"}),
+    "ALL": frozenset({"ANIME", "MANGA", "MANHWA"}),
+}
+ADULT_GENRE_NAMES = ("erotica", "hentai")
+
+
+@dataclass(frozen=True)
+class CommonFilters:
+    query: str
+    min_score: float | None
+    min_year: int | None
+    max_year: int | None
+    genres: tuple[str, ...]
+    tags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AnimeFilters:
+    min_episodes: int | None
+    anime_types: tuple[str, ...]
+    seasons: tuple[str, ...]
+
+    @property
+    def active(self) -> bool:
+        return bool(self.min_episodes or self.anime_types or self.seasons)
+
+
+@dataclass(frozen=True)
+class MangaFilters:
+    statuses: tuple[str, ...]
+    min_chapters: int | None
+    min_volumes: int | None
+
+    @property
+    def active(self) -> bool:
+        return bool(self.statuses or self.min_chapters or self.min_volumes)
 
 
 def _current_season_identity(now: datetime | None = None) -> tuple[int, str]:
@@ -101,10 +141,90 @@ def _normalized_type(value: str) -> str:
     return TYPE_ALIASES.get(normalized, normalized)
 
 
+def _normalized_content_type(value: str, *, allow_all: bool = True) -> str:
+    normalized = value.strip().upper()
+    valid_types = CONTENT_TYPE_SCOPES if allow_all else {
+        key: scope for key, scope in CONTENT_TYPE_SCOPES.items() if key != "ALL"
+    }
+    if normalized not in valid_types:
+        choices = "ANIME, MANGA, MANHWA, or ALL" if allow_all else (
+            "ANIME, MANGA, or MANHWA"
+        )
+        raise ApiError(f"content_type must be {choices}")
+    return normalized
+
+
+def _content_type_argument(*, default: str) -> str:
+    value = request.args.get("content_type")
+    if value is None or not value.strip():
+        return default
+    return _normalized_content_type(value)
+
+
+def _normalized_status(value: str) -> str:
+    """Normalize UI constants such as NOT_YET_PUBLISHED to provider labels."""
+    return " ".join(value.replace("_", " ").split()).casefold()
+
+
+def _escaped_search_pattern(query: str) -> str:
+    escaped = (
+        query.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    return f"%{escaped}%"
+
+
+def _common_filter_values() -> CommonFilters:
+    min_year = _integer_argument("min_year", minimum=1, maximum=3000)
+    max_year = _integer_argument("max_year", minimum=1, maximum=3000)
+    if min_year is not None and max_year is not None and min_year > max_year:
+        raise ApiError("min_year cannot be greater than max_year")
+    return CommonFilters(
+        query=request.args.get("q", "").strip(),
+        min_score=_float_argument("min_score", minimum=0, maximum=10),
+        min_year=min_year,
+        max_year=max_year,
+        genres=tuple(_list_argument("genre")),
+        tags=tuple(_list_argument("tag")),
+    )
+
+
+def _anime_filter_values() -> AnimeFilters:
+    seasons = tuple(season.lower() for season in _list_argument("season"))
+    invalid_seasons = set(seasons).difference(VALID_SEASONS)
+    if invalid_seasons:
+        raise ApiError("season must be winter, spring, summer, or fall")
+    return AnimeFilters(
+        min_episodes=_integer_argument(
+            "min_episodes", minimum=1, maximum=10000
+        ),
+        anime_types=tuple(
+            _normalized_type(value) for value in _list_argument("type")
+        ),
+        seasons=seasons,
+    )
+
+
+def _manga_filter_values() -> MangaFilters:
+    return MangaFilters(
+        statuses=tuple(
+            _normalized_status(value) for value in _list_argument("status")
+        ),
+        min_chapters=_integer_argument(
+            "min_chapters", minimum=1, maximum=1_000_000
+        ),
+        min_volumes=_integer_argument(
+            "min_volumes", minimum=1, maximum=100_000
+        ),
+    )
+
+
 def _serialize_anime(anime: Anime, *, detailed: bool = False) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": anime.animeID,
         "mal_id": anime.mal_id,
+        "content_type": "ANIME",
         "title": anime.title,
         "alternative_title": anime.alternative_title,
         "type": anime.type,
@@ -126,80 +246,356 @@ def _serialize_anime(anime: Anime, *, detailed: bool = False) -> dict[str, Any]:
     return payload
 
 
-def _anime_statement():
-    """Base public query that never exposes adult-only Hentai records."""
-    legacy_genre = func.unnest(Anime.legacy_genres).column_valued(
-        "legacy_genre"
+def _serialize_manga(manga: Manga, *, detailed: bool = False) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": manga.mangaID,
+        "mal_id": manga.mal_id,
+        "content_type": manga.content_type,
+        "title": manga.title,
+        "alternative_title": manga.alternative_title,
+        "type": manga.manga_type,
+        "manga_type": manga.manga_type,
+        "status": manga.status,
+        "year": manga.publication_year,
+        "publication_year": manga.publication_year,
+        "score": manga.score,
+        "chapters": manga.chapters,
+        "volumes": manga.volumes,
+        "image_url": manga.image_url,
+        "mal_url": manga.mal_url,
+        "genres": [genre.name for genre in manga.genre_entries],
+    }
+    if detailed:
+        payload["synopsis"] = manga.synopsis
+        payload["genres_detailed"] = manga.genres_detailed or []
+        payload["last_jikan_sync"] = (
+            manga.last_jikan_sync.isoformat() if manga.last_jikan_sync else None
+        )
+    return payload
+
+
+def _public_statement(model):
+    """Return a model query that excludes every stored adult classification."""
+    legacy_genre = func.unnest(model.legacy_genres).column_valued(
+        f"{model.__tablename__}_legacy_genre"
     )
-    detailed_genre = func.unnest(Anime.genres_detailed).column_valued(
-        "detailed_genre"
+    detailed_genre = func.unnest(model.genres_detailed).column_valued(
+        f"{model.__tablename__}_detailed_genre"
     )
-    return (
-        select(Anime)
+    statement = (
+        select(model)
         .where(
-            ~Anime.genre_entries.any(
-                func.lower(func.trim(Genre.name)) == "hentai"
+            ~model.genre_entries.any(
+                func.lower(func.trim(Genre.name)).in_(ADULT_GENRE_NAMES)
             ),
             ~exists(
                 select(1).where(
-                    func.lower(func.trim(legacy_genre)) == "hentai"
+                    func.lower(func.trim(legacy_genre)).in_(
+                        ADULT_GENRE_NAMES
+                    )
                 )
             ),
             ~exists(
                 select(1).where(
-                    func.lower(func.trim(detailed_genre)) == "hentai"
+                    func.lower(func.trim(detailed_genre)).in_(
+                        ADULT_GENRE_NAMES
+                    )
                 )
             ),
         )
-        .options(selectinload(Anime.genre_entries))
+        .options(selectinload(model.genre_entries))
     )
+    return statement
 
 
-def _filtered_anime_statement():
-    query = request.args.get("q", "").strip()
-    min_score = _float_argument("min_score", minimum=0, maximum=10)
-    min_year = _integer_argument("min_year", minimum=1, maximum=3000)
-    max_year = _integer_argument("max_year", minimum=1, maximum=3000)
-    min_episodes = _integer_argument("min_episodes", minimum=1, maximum=10000)
-    anime_types = [_normalized_type(value) for value in _list_argument("type")]
-    seasons = [season.lower() for season in _list_argument("season")]
-    genres = _list_argument("genre")
-    tags = _list_argument("tag")
+def _anime_statement():
+    """Base public anime query."""
+    return _public_statement(Anime)
 
-    invalid_seasons = set(seasons).difference(VALID_SEASONS)
-    if invalid_seasons:
-        raise ApiError("season must be winter, spring, summer, or fall")
 
-    if min_year is not None and max_year is not None and min_year > max_year:
-        raise ApiError("min_year cannot be greater than max_year")
+def _manga_statement(
+    content_types: frozenset[str] | set[str] | None = None,
+):
+    """Base public Manga/Manhwa query."""
+    statement = _public_statement(Manga)
+    if content_types is not None:
+        statement = statement.where(
+            Manga.content_type.in_(sorted(content_types))
+        )
+    return statement
 
-    statement = _anime_statement().where(Anime.score.is_not(None))
-    if query:
-        escaped_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        pattern = f"%{escaped_query}%"
+
+def _apply_common_filters(
+    statement,
+    model,
+    year_column,
+    filters: CommonFilters,
+):
+    statement = statement.where(model.score.is_not(None))
+    if filters.query:
+        pattern = _escaped_search_pattern(filters.query)
         statement = statement.where(
             or_(
-                Anime.title.ilike(pattern, escape="\\"),
-                Anime.alternative_title.ilike(pattern, escape="\\"),
+                model.title.ilike(pattern, escape="\\"),
+                model.alternative_title.ilike(pattern, escape="\\"),
             )
         )
-    if min_score is not None:
-        statement = statement.where(Anime.score >= min_score)
-    if min_year is not None:
-        statement = statement.where(Anime.year >= min_year)
-    if max_year is not None:
-        statement = statement.where(Anime.year <= max_year)
-    if min_episodes is not None:
-        statement = statement.where(Anime.episodes >= min_episodes)
-    if anime_types:
-        statement = statement.where(Anime.type.in_(anime_types))
-    if seasons:
-        statement = statement.where(Anime.season.in_(seasons))
-    for genre in genres:
-        statement = statement.where(Anime.genre_entries.any(Genre.name == genre))
-    for tag in tags:
-        statement = statement.where(Anime.genres_detailed.contains([tag]))
+    if filters.min_score is not None:
+        statement = statement.where(model.score >= filters.min_score)
+    if filters.min_year is not None:
+        statement = statement.where(year_column >= filters.min_year)
+    if filters.max_year is not None:
+        statement = statement.where(year_column <= filters.max_year)
+    for genre in filters.genres:
+        statement = statement.where(
+            model.genre_entries.any(Genre.name == genre)
+        )
+    for tag in filters.tags:
+        statement = statement.where(model.genres_detailed.contains([tag]))
     return statement
+
+
+def _filtered_anime_statement(
+    common_filters: CommonFilters | None = None,
+    anime_filters: AnimeFilters | None = None,
+):
+    common_filters = common_filters or _common_filter_values()
+    anime_filters = anime_filters or _anime_filter_values()
+    statement = _apply_common_filters(
+        _anime_statement(), Anime, Anime.year, common_filters
+    )
+    if anime_filters.min_episodes is not None:
+        statement = statement.where(
+            Anime.episodes >= anime_filters.min_episodes
+        )
+    if anime_filters.anime_types:
+        statement = statement.where(
+            Anime.type.in_(anime_filters.anime_types)
+        )
+    if anime_filters.seasons:
+        statement = statement.where(Anime.season.in_(anime_filters.seasons))
+    return statement
+
+
+def _filtered_manga_statement(
+    content_types: frozenset[str] | set[str],
+    common_filters: CommonFilters | None = None,
+    manga_filters: MangaFilters | None = None,
+):
+    common_filters = common_filters or _common_filter_values()
+    manga_filters = manga_filters or _manga_filter_values()
+    statement = _apply_common_filters(
+        _manga_statement(content_types),
+        Manga,
+        Manga.publication_year,
+        common_filters,
+    )
+    if manga_filters.statuses:
+        statement = statement.where(
+            func.lower(func.trim(Manga.status)).in_(
+                manga_filters.statuses
+            )
+        )
+    if manga_filters.min_chapters is not None:
+        statement = statement.where(
+            Manga.chapters >= manga_filters.min_chapters
+        )
+    if manga_filters.min_volumes is not None:
+        statement = statement.where(
+            Manga.volumes >= manga_filters.min_volumes
+        )
+    return statement
+
+
+def _catalogue_rows_subquery(
+    content_types: frozenset[str] | set[str],
+):
+    """Build one normalized identity stream for deterministic mixed paging."""
+    common_filters = _common_filter_values()
+    anime_filters = _anime_filter_values()
+    manga_filters = _manga_filter_values()
+    effective_types = set(content_types)
+
+    # A medium-specific filter cannot sensibly match rows from the other
+    # medium. This also makes such filters useful when content_type=ALL.
+    if anime_filters.active:
+        effective_types.intersection_update({"ANIME"})
+    if manga_filters.active:
+        effective_types.difference_update({"ANIME"})
+
+    branches = []
+    if "ANIME" in effective_types:
+        anime_rows = (
+            _filtered_anime_statement(common_filters, anime_filters)
+            .order_by(None)
+            .subquery("filtered_anime")
+        )
+        branches.append(
+            select(
+                literal("ANIME").label("content_type"),
+                anime_rows.c.anime_id.label("record_id"),
+                anime_rows.c.mal_id.label("mal_id"),
+                anime_rows.c.score.label("score"),
+                anime_rows.c.title.label("title"),
+            )
+        )
+
+    manga_content_types = effective_types.intersection({"MANGA", "MANHWA"})
+    if manga_content_types:
+        manga_rows = (
+            _filtered_manga_statement(
+                manga_content_types, common_filters, manga_filters
+            )
+            .order_by(None)
+            .subquery("filtered_manga")
+        )
+        branches.append(
+            select(
+                manga_rows.c.content_type.label("content_type"),
+                manga_rows.c.manga_id.label("record_id"),
+                manga_rows.c.mal_id.label("mal_id"),
+                manga_rows.c.score.label("score"),
+                manga_rows.c.title.label("title"),
+            )
+        )
+
+    if not branches:
+        return None
+    combined = branches[0] if len(branches) == 1 else union_all(*branches)
+    return combined.subquery("catalogue_rows")
+
+
+def _ordered_catalogue_rows(catalogue_rows):
+    return select(
+        catalogue_rows.c.content_type,
+        catalogue_rows.c.record_id,
+        catalogue_rows.c.mal_id,
+        catalogue_rows.c.score,
+        catalogue_rows.c.title,
+    ).order_by(
+        catalogue_rows.c.score.desc(),
+        func.lower(catalogue_rows.c.title),
+        catalogue_rows.c.title,
+        catalogue_rows.c.content_type,
+        catalogue_rows.c.mal_id.nulls_last(),
+        catalogue_rows.c.record_id,
+    )
+
+
+def _serialize_catalogue_rows(rows) -> list[dict[str, Any]]:
+    """Hydrate normalized identity rows without losing their global order."""
+    anime_ids = [
+        row.record_id for row in rows if row.content_type == "ANIME"
+    ]
+    manga_ids = [
+        row.record_id for row in rows if row.content_type != "ANIME"
+    ]
+    entries_by_key: dict[tuple[str, int], Anime | Manga] = {}
+
+    if anime_ids:
+        anime = db.session.scalars(
+            _anime_statement().where(Anime.animeID.in_(anime_ids))
+        ).all()
+        entries_by_key.update(
+            {("ANIME", entry.animeID): entry for entry in anime}
+        )
+    if manga_ids:
+        manga = db.session.scalars(
+            _manga_statement().where(Manga.mangaID.in_(manga_ids))
+        ).all()
+        entries_by_key.update(
+            {
+                (entry.content_type, entry.mangaID): entry
+                for entry in manga
+            }
+        )
+
+    items = []
+    for row in rows:
+        entry = entries_by_key.get((row.content_type, row.record_id))
+        if isinstance(entry, Anime):
+            items.append(_serialize_anime(entry))
+        elif isinstance(entry, Manga):
+            items.append(_serialize_manga(entry))
+    return items
+
+
+def _list_catalogue(content_types: frozenset[str] | set[str]):
+    page = _integer_argument("page", minimum=1) or 1
+    per_page = (
+        _integer_argument(
+            "per_page", minimum=1, maximum=MAX_PAGE_SIZE
+        )
+        or 24
+    )
+    catalogue_rows = _catalogue_rows_subquery(content_types)
+    if catalogue_rows is None:
+        total = 0
+        items = []
+    else:
+        total = (
+            db.session.scalar(
+                select(func.count()).select_from(catalogue_rows)
+            )
+            or 0
+        )
+        rows = db.session.execute(
+            _ordered_catalogue_rows(catalogue_rows)
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        ).all()
+        items = _serialize_catalogue_rows(rows)
+    return jsonify(
+        {
+            "items": items,
+            "pagination": {
+                "page": page,
+                "per_page": per_page,
+                "total": total,
+                "pages": (total + per_page - 1) // per_page,
+            },
+        }
+    )
+
+
+def _random_catalogue(content_types: frozenset[str] | set[str]):
+    limit = _integer_argument("limit", minimum=1, maximum=12) or 6
+    catalogue_rows = _catalogue_rows_subquery(content_types)
+    if catalogue_rows is None:
+        return jsonify({"items": []})
+    rows = db.session.execute(
+        select(
+            catalogue_rows.c.content_type,
+            catalogue_rows.c.record_id,
+            catalogue_rows.c.mal_id,
+            catalogue_rows.c.score,
+            catalogue_rows.c.title,
+        )
+        .order_by(func.random())
+        .limit(limit)
+    ).all()
+    return jsonify({"items": _serialize_catalogue_rows(rows)})
+
+
+def _catalogue_detail_response(content_type: str, mal_id: int):
+    normalized_type = _normalized_content_type(
+        content_type, allow_all=False
+    )
+    if normalized_type == "ANIME":
+        entry = db.session.scalar(
+            _anime_statement().where(Anime.mal_id == mal_id)
+        )
+        if entry is None:
+            raise ApiError("Anime not found", 404)
+        return jsonify({"item": _serialize_anime(entry, detailed=True)})
+
+    entry = db.session.scalar(
+        _manga_statement({normalized_type}).where(Manga.mal_id == mal_id)
+    )
+    if entry is None:
+        label = "Manga" if normalized_type == "MANGA" else "Manhwa"
+        raise ApiError(f"{label} not found", 404)
+    return jsonify({"item": _serialize_manga(entry, detailed=True)})
 
 
 @app.get(f"{API_PREFIX}/anime")
@@ -284,12 +680,99 @@ def anime_detail(mal_id: int):
     return jsonify({"item": _serialize_anime(anime, detailed=True)})
 
 
+@app.get(f"{API_PREFIX}/catalogue")
+def list_catalogue():
+    """Search Anime, Manga, Manhwa, or the combined public catalogue."""
+    scope = _content_type_argument(default="ALL")
+    return _list_catalogue(CONTENT_TYPE_SCOPES[scope])
+
+
+@app.get(f"{API_PREFIX}/catalogue/random")
+def random_catalogue():
+    """Return a scoped random selection from the combined catalogue."""
+    scope = _content_type_argument(default="ALL")
+    return _random_catalogue(CONTENT_TYPE_SCOPES[scope])
+
+
+@app.get(f"{API_PREFIX}/catalogue/<content_type>/<int:mal_id>")
+def catalogue_detail(content_type: str, mal_id: int):
+    """Return a type-qualified detail record without MAL-ID ambiguity."""
+    return _catalogue_detail_response(content_type, mal_id)
+
+
+@app.get(f"{API_PREFIX}/manga")
+def list_manga():
+    return _list_catalogue(CONTENT_TYPE_SCOPES["MANGA"])
+
+
+@app.get(f"{API_PREFIX}/manga/random")
+def random_manga():
+    return _random_catalogue(CONTENT_TYPE_SCOPES["MANGA"])
+
+
+@app.get(f"{API_PREFIX}/manga/<int:mal_id>")
+def manga_detail(mal_id: int):
+    return _catalogue_detail_response("MANGA", mal_id)
+
+
+@app.get(f"{API_PREFIX}/manhwa")
+def list_manhwa():
+    return _list_catalogue(CONTENT_TYPE_SCOPES["MANHWA"])
+
+
+@app.get(f"{API_PREFIX}/manhwa/random")
+def random_manhwa():
+    return _random_catalogue(CONTENT_TYPE_SCOPES["MANHWA"])
+
+
+@app.get(f"{API_PREFIX}/manhwa/<int:mal_id>")
+def manhwa_detail(mal_id: int):
+    return _catalogue_detail_response("MANHWA", mal_id)
+
+
 @app.get(f"{API_PREFIX}/genres")
 def list_genres():
+    scope = _content_type_argument(default="ANIME")
+    content_types = CONTENT_TYPE_SCOPES[scope]
+    branches = []
+
+    if "ANIME" in content_types:
+        public_anime = (
+            _anime_statement().order_by(None).subquery("public_anime_genres")
+        )
+        branches.append(
+            select(Genre.name.label("name"))
+            .join(AnimeGenre, AnimeGenre.genre_id == Genre.id)
+            .join(
+                public_anime,
+                public_anime.c.anime_id == AnimeGenre.anime_id,
+            )
+        )
+
+    manga_content_types = content_types.intersection({"MANGA", "MANHWA"})
+    if manga_content_types:
+        public_manga = (
+            _manga_statement(manga_content_types)
+            .order_by(None)
+            .subquery("public_manga_genres")
+        )
+        branches.append(
+            select(Genre.name.label("name"))
+            .join(MangaGenre, MangaGenre.genre_id == Genre.id)
+            .join(
+                public_manga,
+                public_manga.c.manga_id == MangaGenre.manga_id,
+            )
+        )
+
+    names = branches[0] if len(branches) == 1 else union_all(*branches)
+    available_genres = names.subquery("available_genres")
+    normalized_name = func.lower(func.trim(available_genres.c.name))
     genres = db.session.scalars(
-        select(Genre.name)
-        .where(func.lower(func.trim(Genre.name)) != "hentai")
-        .order_by(Genre.name)
+        select(available_genres.c.name)
+        .where(~normalized_name.in_(ADULT_GENRE_NAMES))
+        .distinct()
+        .order_by(available_genres.c.name)
     ).all()
     return jsonify({"items": genres})
 
@@ -297,16 +780,47 @@ def list_genres():
 @app.get(f"{API_PREFIX}/tags")
 def list_detailed_tags():
     """Search detailed genre tags without sending thousands of options to the UI."""
+    scope = _content_type_argument(default="ANIME")
+    content_types = CONTENT_TYPE_SCOPES[scope]
     query = request.args.get("q", "").strip()
     limit = _integer_argument("limit", minimum=1, maximum=MAX_TAG_OPTIONS) or 50
-    detailed_tags = select(func.unnest(Anime.genres_detailed).label("tag")).subquery()
+    branches = []
+
+    if "ANIME" in content_types:
+        public_anime = (
+            _anime_statement().order_by(None).subquery("public_anime_tags")
+        )
+        branches.append(
+            select(
+                func.unnest(public_anime.c.genres_detailed).label("tag")
+            )
+        )
+
+    manga_content_types = content_types.intersection({"MANGA", "MANHWA"})
+    if manga_content_types:
+        public_manga = (
+            _manga_statement(manga_content_types)
+            .order_by(None)
+            .subquery("public_manga_tags")
+        )
+        branches.append(
+            select(
+                func.unnest(public_manga.c.genres_detailed).label("tag")
+            )
+        )
+
+    tag_names = branches[0] if len(branches) == 1 else union_all(*branches)
+    detailed_tags = tag_names.subquery("detailed_tags")
     statement = select(detailed_tags.c.tag).where(detailed_tags.c.tag.is_not(None))
     statement = statement.where(
-        func.lower(func.trim(detailed_tags.c.tag)) != "hentai"
+        ~func.lower(func.trim(detailed_tags.c.tag)).in_(ADULT_GENRE_NAMES)
     )
     if query:
-        escaped_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        statement = statement.where(detailed_tags.c.tag.ilike(f"%{escaped_query}%", escape="\\"))
+        statement = statement.where(
+            detailed_tags.c.tag.ilike(
+                _escaped_search_pattern(query), escape="\\"
+            )
+        )
     tags = db.session.scalars(
         statement
         .distinct()

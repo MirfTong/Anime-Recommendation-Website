@@ -1,126 +1,165 @@
-# KyoQuan Anime Finder 
+# KyoQuan Catalogue
 
 <https://kyoquan.onrender.com/>
 
-A React single-page application backed by a Flask REST API for exploring an
-anime catalogue by genre, rating, episode count, and other metadata. PostgreSQL
-is the runtime data store, with Tenrai and Jikan-compatible catalogue sources.
+KyoQuan is a React single-page application backed by a Flask REST API and
+PostgreSQL. It supports one searchable catalogue for Anime, Manga, and Manhwa,
+with metadata populated incrementally from Tenrai and Jikan-compatible APIs.
+
+## Architecture
+
+```text
+Tenrai/Jikan APIs
+       |
+       v
+rate-limited Python client
+       |
+       v
+resumable Anime + Manga/Manhwa ETL
+       |
+       v
+PostgreSQL <-> Flask REST API <-> React/Vite frontend
+```
+
+The database keeps the existing `anime` table unchanged and adds a dedicated
+`manga` table for both Manga and Manhwa. `manga.content_type` is constrained to
+`MANGA` or `MANHWA`, while `mal_id` is unique because both types share
+MyAnimeList's manga ID namespace. This avoids a risky rewrite of the deployed
+anime schema while still providing a unified API.
+
+Genres are normalized across all three content types:
+
+- `genre` stores each genre name once.
+- `anime_genre` connects Anime to genres.
+- `manga_genre` connects Manga and Manhwa to the same genre rows.
+- `genres_detailed` arrays retain searchable themes, demographics, explicit
+  categories, and other detailed tags.
+
+Frequently filtered score, year, type, season, status, chapter, volume, genre,
+and tag columns have PostgreSQL indexes. The schema enables PostgreSQL's trusted
+`pg_trgm` extension for indexed partial-title searches. Hentai and Erotica
+records are rejected during discovery and detail refresh, removed during
+cleanup, and excluded again from public API queries as defense in depth.
 
 ## Project layout
 
 ```text
-backend/             Flask application, models, API client, and sync jobs
-frontend/            React and Vite source
-tests/               Backend test suite
-.github/workflows/   Scheduled catalogue sync
-static/react/        Generated React build output (not committed)
+backend/app.py                    Flask REST API and React build host
+backend/models.py                 PostgreSQL ORM models and relationships
+backend/schema.py                 safe additive schema setup
+backend/services/jikan_client.py  shared provider client and request limiter
+backend/jobs/jikan_etl.py         scheduled Anime + readable-title orchestration
+backend/jobs/manga_etl.py         Manga/Manhwa discovery, refresh, and cleanup
+frontend/src/App.jsx              React catalogue interface
+tests/                            backend and ETL regression tests
+.github/workflows/jikan-sync.yml  scheduled catalogue sync
 ```
 
 ## Local setup
 
-1. Create `.env` from `.env.example` and set `DATABASE_URL`.
-2. Install Python dependencies with `uv sync` (or use the included virtual
-   environment).
+1. Create `.env` from `.env.example` and set `DATABASE_URL` to PostgreSQL.
+2. Install Python dependencies with `uv sync`, or use the included virtual
+   environment.
 3. Install and build the frontend:
 
    ```powershell
-   npm --prefix frontend install
+   npm --prefix frontend ci
    npm --prefix frontend run build
    ```
 
-4. Seed the catalogue from the current season:
-
-   ```powershell
-   .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --season current
-   ```
-
-5. Run the API and React host:
+4. Run the API and React host:
 
    ```powershell
    .\.venv\Scripts\python.exe -m backend.app
    ```
 
-For production, use `gunicorn backend.app:app` after building the frontend.
+For production, build the frontend and start `gunicorn backend.app:app`.
 
-## API
+## REST API
 
-Flask serves the React application at `/`; its JSON API is available under
-`/api/v1`:
+The canonical endpoints are:
 
-- `GET /api/v1/anime` — paginated search and filters (`q`, `min_score`,
-  `min_year`, `max_year`, `min_episodes`, `type`, `season`, and `genre`)
-- `GET /api/v1/anime/random?limit=6` — random rated anime
-- `GET /api/v1/anime/<mal_id>` — a detailed anime record
-- `GET /api/v1/genres` — available genre filters
+- `GET /api/v1/catalogue` searches and filters the catalogue.
+- `GET /api/v1/catalogue/random` returns a random selection.
+- `GET /api/v1/catalogue/<content_type>/<mal_id>` returns full details.
+- `GET /api/v1/genres` lists normalized genres.
+- `GET /api/v1/tags` searches detailed tags.
 
-## Anime catalogue sync
+Use `content_type=ANIME`, `MANGA`, `MANHWA`, or `ALL`. Common list filters are
+`q`, `genre`, `tag`, `min_score`, `min_year`, `max_year`, `page`, and
+`per_page`. Anime also supports `type`, `season`, and `min_episodes`. Manga and
+Manhwa support `status`, `min_chapters`, and `min_volumes`.
 
-The catalogue is populated and refreshed by `backend.jobs.jikan_etl`. To add
-the current season, including sequels:
+The existing `/api/v1/anime`, `/api/v1/anime/random`,
+`/api/v1/anime/seasonal`, and `/api/v1/anime/<mal_id>` routes remain available.
+Convenience `/api/v1/manga` and `/api/v1/manhwa` list, random, and detail routes
+are also provided.
 
-```powershell
-.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --season current
-```
+## Provider client
 
-For a historical season, pass both its name and year, for example
-`--season fall --year 2025`. To refresh the existing catalogue, run:
+`backend.services.jikan_client` uses Tenrai's Jikan-compatible v1 API as its
+primary provider and public Jikan v4 as a fallback. Override the endpoints with
+`ANIME_API_BASE_URL` and `ANIME_API_FALLBACK_BASE_URL`.
 
-```powershell
-.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --limit 500
-```
+Anime and manga calls share one process-wide limiter capped at three requests
+per second and 55 requests per minute. Temporary network failures and 5xx
+responses have bounded retries; HTTP 429 responses honor a cooldown. Paginated
+catalogue scans stay pinned to the primary provider so page boundaries cannot
+change during a cursor-based run.
 
-Missing TV season classifications are filled from a dedicated per-anime queue.
-Every title is marked attempted even when the provider is temporarily
-unavailable, so the next run advances instead of getting stuck:
+## ETL behavior
 
-```powershell
-.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --backfill-seasons --limit 1000
-```
-
-The TV-only bulk command scans 40 catalogue pages per run. With 50 entries per
-page, up to 2,000 existing TV records can be examined with only 40 requests:
-
-```powershell
-.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --bulk-seasons --page-limit 40
-```
-
-The client uses Tenrai's Jikan-compatible v1 API as its primary provider and
-the public Jikan v4 API as a fallback. Override either endpoint with
-`ANIME_API_BASE_URL` or `ANIME_API_FALLBACK_BASE_URL`. Calls remain limited to
-three requests per second and 55 per minute, with bounded retries for temporary
-gateway errors. Per-title lookups can use the fallback safely, including a
-one-minute primary cooldown after a sustained 429 response. Paginated
-current-season and bulk scans stay pinned to one provider so page boundaries
-cannot change mid-cursor. They commit one page at a time and preserve a failed
-page for the next run, so later failures do not discard or skip data.
-
-## Scheduled sync
-
-The GitHub Actions workflow runs every three hours. Each run resumes up to 10
-pages of current-season discovery, scans up to 40 pages each for TV, OVA, ONA,
-Special, and TV Special, refreshes the next 1,000 TV anime still missing season
-metadata, and refreshes the next 1,000 general catalogue records. OVA, ONA,
-Special, and TV Special scans have independent persistent cursors, so a failed
-type retries its own page without holding back the others. Existing
-Hentai-classified records are removed before the import, and every import path
-rejects or removes new Hentai classifications from Jikan.
-
-Eight scheduled runs use roughly 16,000 detail requests per day plus the bulk
-page requests, staying below the provider's 40,000-request public daily cap.
-All phases run in one Python process so the rolling rate limiter remains active
-between phases. The Actions summary reports per-type progress, removals, and
-final TV season coverage, while the concurrency group keeps database writes
-sequential. Before enabling it, add a repository Actions secret named
-`DATABASE_URL` with the external PostgreSQL URL.
-
-The same complete pass can be started manually without resetting the limiter
-between phases:
+Run all scheduled phases locally with:
 
 ```powershell
 .\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --scheduled-sync --page-limit 40 --limit 1000
 ```
 
-For Render, use this build command:
+The scheduled orchestration:
+
+1. cleans stored adult-only records;
+2. discovers current and historical Anime, including OVA, ONA, and Specials;
+3. scans Manga and Manhwa catalogue pages independently;
+4. refreshes Anime detail and missing-season queues;
+5. refreshes the oldest-attempted Manga/Manhwa detail rows; and
+6. reports coverage, failures, removals, and cursor progress.
+
+Manga and Manhwa use separate persistent `jikan_sync_state` cursor keys. Each
+successful page is committed with its next cursor, while a failed page remains
+pending for a later run. A completed scan wraps to page 1 so new provider
+records and changed listing metadata are discovered on future passes. Detail
+refresh uses `last_jikan_attempt` ordering so missing, invalid, or temporarily
+unavailable records are still marked attempted and cannot trap the queue.
+
+Useful focused commands are:
+
+```powershell
+# Discover Manga and Manhwa catalogue pages
+.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --manga-catalogue --page-limit 40
+
+# Refresh the next 1,000 readable-title details
+.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --refresh-manga --limit 1000
+
+# Import the current Anime season
+.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --season current
+
+# Refresh the existing Anime catalogue
+.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --limit 1000
+```
+
+## Scheduled GitHub Actions sync
+
+`.github/workflows/jikan-sync.yml` runs every three hours and uses a concurrency
+group so manual and scheduled jobs never write simultaneously. All phases run
+inside one Python process, which preserves the shared rate limiter. The GitHub
+Actions step summary reports Manga and Manhwa pages completed and failed,
+records inserted and updated, adult records removed, and each independent next
+page cursor, alongside the existing Anime metrics.
+
+Add the external PostgreSQL URL as a repository Actions secret named
+`DATABASE_URL` before running the workflow.
+
+For Render, use:
 
 ```bash
 npm --prefix frontend ci && npm --prefix frontend run build && pip install -r requirements.txt
@@ -128,12 +167,27 @@ npm --prefix frontend ci && npm --prefix frontend run build && pip install -r re
 
 ## Tests
 
+Run the complete backend suite:
+
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
+Run the frontend production-build validation:
+
+```powershell
+npm --prefix frontend ci
+npm --prefix frontend test
+npm --prefix frontend run build
+```
+
+The regression suite covers provider URLs and fallbacks, Manga/Manhwa mapping,
+adult-content exclusion, duplicate-safe page application, independent cursors,
+refresh-queue progression, API filtering, and workflow configuration.
+
 ## Tech stack
 
-- Python, Flask, Flask-SQLAlchemy, and PostgreSQL
-- Tenrai v1 and Jikan v4-compatible anime APIs
-- React, Vite, Tailwind CSS
+- Python, Flask, Flask-SQLAlchemy, SQLAlchemy, and PostgreSQL
+- Tenrai v1 and Jikan v4-compatible APIs
+- React, Vite, and Tailwind CSS
+- GitHub Actions and Render

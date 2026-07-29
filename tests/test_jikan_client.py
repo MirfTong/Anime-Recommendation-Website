@@ -6,6 +6,7 @@ from urllib.error import HTTPError
 from backend.services.jikan_client import (
     JikanAnimePage,
     JikanClient,
+    JikanMangaPage,
     JikanSeasonPage,
     JikanTemporaryError,
     PRIMARY_429_COOLDOWN_SECONDS,
@@ -61,6 +62,60 @@ class JikanClientTests(unittest.TestCase):
 
         self.assertEqual(client.get_anime_full(1), {"data": {"mal_id": 1}})
         self.assertEqual(seen_urls, ["https://api.tenrai.org/v1/anime/1/full"])
+
+    def test_fetches_basic_and_full_manga_payloads(self):
+        seen_urls = []
+        clock = FakeClock()
+
+        def opener(request, *, timeout):
+            seen_urls.append(request.full_url)
+            return Response(b'{"data": {"mal_id": 121, "type": "Manhwa"}}')
+
+        client = JikanClient(
+            opener=opener,
+            clock=clock,
+            sleeper=clock.sleep,
+            fallback_base_url="",
+        )
+
+        self.assertEqual(
+            client.get_manga(121),
+            {"data": {"mal_id": 121, "type": "Manhwa"}},
+        )
+        self.assertEqual(
+            client.get_manga_full(121),
+            {"data": {"mal_id": 121, "type": "Manhwa"}},
+        )
+        self.assertEqual(
+            seen_urls,
+            [
+                "https://api.tenrai.org/v1/manga/121",
+                "https://api.tenrai.org/v1/manga/121/full",
+            ],
+        )
+
+    def test_manga_full_falls_back_to_basic_endpoint_on_timeout(self):
+        requested_urls = []
+
+        def opener(request, *, timeout):
+            requested_urls.append(request.full_url)
+            if request.full_url.endswith("/full"):
+                raise TimeoutError("full manga endpoint timed out")
+            return Response(b'{"data": {"mal_id": 1, "type": "Manga"}}')
+
+        client = JikanClient(opener=opener, fallback_base_url="")
+
+        self.assertEqual(
+            client.get_manga_full(1),
+            {"data": {"mal_id": 1, "type": "Manga"}},
+        )
+        self.assertEqual(
+            requested_urls,
+            [
+                "https://api.tenrai.org/v1/manga/1/full",
+                "https://api.tenrai.org/v1/manga/1",
+            ],
+        )
 
     def test_supports_configurable_primary_and_fallback_providers(self):
         requested_urls = []
@@ -380,6 +435,97 @@ class JikanClientTests(unittest.TestCase):
                 "https://api.tenrai.org/v1/anime?type=tv&limit=50&order_by=mal_id&sort=asc&page=2"
             ],
         )
+
+    def test_returns_safe_for_work_manga_and_manhwa_catalogue_pages(self):
+        requested_urls = []
+        clock = FakeClock()
+
+        def opener(request, *, timeout):
+            requested_urls.append(request.full_url)
+            return Response(
+                b'{"data": [{"mal_id": 121}], "pagination": '
+                b'{"has_next_page": true, "last_visible_page": 109}}'
+            )
+
+        client = JikanClient(
+            opener=opener,
+            clock=clock,
+            sleeper=clock.sleep,
+            fallback_base_url="",
+        )
+
+        manga_page = client.get_manga_catalogue_page(
+            manga_type=" Manga ", page=2
+        )
+        manhwa_page = client.get_manga_catalogue_page(
+            manga_type="MANHWA", page=3
+        )
+
+        expected_page_two = JikanMangaPage(
+            entries=[{"mal_id": 121}],
+            page=2,
+            has_next_page=True,
+            last_visible_page=109,
+        )
+        expected_page_three = JikanMangaPage(
+            entries=[{"mal_id": 121}],
+            page=3,
+            has_next_page=True,
+            last_visible_page=109,
+        )
+        self.assertEqual(manga_page, expected_page_two)
+        self.assertEqual(manhwa_page, expected_page_three)
+        self.assertEqual(
+            requested_urls,
+            [
+                "https://api.tenrai.org/v1/manga?type=manga&limit=50"
+                "&order_by=mal_id&sort=asc&page=2&sfw=true",
+                "https://api.tenrai.org/v1/manga?type=manhwa&limit=50"
+                "&order_by=mal_id&sort=asc&page=3&sfw=true",
+            ],
+        )
+
+    def test_manga_catalogue_rejects_invalid_type_page_and_envelope(self):
+        client = JikanClient(opener=lambda *args, **kwargs: None)
+
+        for manga_type in ("manhua", "", 1, None):
+            with self.subTest(manga_type=manga_type):
+                with self.assertRaises(ValueError):
+                    client.get_manga_catalogue_page(manga_type=manga_type)
+
+        for page in (0, -1, True):
+            with self.subTest(page=page):
+                with self.assertRaises(ValueError):
+                    client.get_manga_catalogue_page(
+                        manga_type="manga", page=page
+                    )
+
+        invalid_envelopes = (
+            b'{"data": null, "pagination": {"has_next_page": false}}',
+            b'{"data": [], "pagination": {"has_next_page": "false"}}',
+            b'{"data": [{}], "pagination": '
+            b'{"has_next_page": false, "current_page": 2}}',
+            b'{"data": [{}], "pagination": '
+            b'{"has_next_page": false, "current_page": true}}',
+            b'{"data": [], "pagination": '
+            b'{"has_next_page": true, "last_visible_page": 2}}',
+            b'{"data": [{}], "pagination": '
+            b'{"has_next_page": true, "last_visible_page": 1}}',
+            b'{"data": [{}], "pagination": '
+            b'{"has_next_page": false, "last_visible_page": 2}}',
+            b'{"data": [], "pagination": '
+            b'{"has_next_page": false, "last_visible_page": true}}',
+            b'{"data": [], "pagination": '
+            b'{"has_next_page": false, "last_visible_page": 0}}',
+        )
+        for payload in invalid_envelopes:
+            with self.subTest(payload=payload):
+                invalid_client = JikanClient(
+                    opener=lambda request, *, timeout: Response(payload),
+                    fallback_base_url="",
+                )
+                with self.assertRaises(JikanTemporaryError):
+                    invalid_client.get_manga_catalogue_page(manga_type="manga")
 
     def test_bulk_catalogue_supports_supplemental_anime_types(self):
         requested_urls = []

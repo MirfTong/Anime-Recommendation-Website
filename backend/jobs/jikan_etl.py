@@ -1,4 +1,4 @@
-r"""Incrementally refresh PostgreSQL from Jikan-compatible anime APIs."""
+r"""Run the resumable Anime, Manga, and Manhwa catalogue synchronization."""
 
 from __future__ import annotations
 
@@ -16,6 +16,17 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import selectinload
 
 from backend.app import app
+from backend.jobs.manga_etl import (
+    DEFAULT_MANGA_REFRESH_LIMIT,
+    MangaCatalogueSyncResult,
+    MangaRefreshResult,
+    refresh_manga_catalogue,
+    remove_adult_manga,
+    report_manga_catalogue,
+    report_manga_cleanup,
+    report_manga_refresh,
+    sync_manga_catalogue,
+)
 from backend.models import Anime, AnimeGenre, Genre, JikanSyncState, db
 from backend.schema import ensure_anime_schema
 from backend.services.jikan_client import (
@@ -33,6 +44,7 @@ from backend.services.jikan_client import (
 SKIPPABLE_JIKAN_STATUS_CODES = frozenset({404, 429, 500, 502, 503, 504})
 TEMPORARY_JIKAN_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 JIKAN_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
+ADULT_GENRE_NAMES = frozenset({"hentai", "erotica"})
 TYPE_ALIASES = {"TV SPECIAL": "SPECIAL"}
 SUPPLEMENTAL_PROVIDER_TYPES = ("ova", "ona", "special", "tv_special")
 SUPPLEMENTAL_STATE_KEYS = {
@@ -172,8 +184,11 @@ class ScheduledSyncResult:
     supplemental_catalogue: SupplementalCatalogueSyncResult
     season_backfill: SeasonBackfillResult
     catalogue: CatalogueRefreshResult
+    manga_catalogue: MangaCatalogueSyncResult
+    manga_refresh: MangaRefreshResult
     coverage: SeasonCoverage
     removed_hentai: int
+    removed_adult_manga: int
 
 
 def _names(entries: Any) -> list[str]:
@@ -199,9 +214,12 @@ def _detailed_genres(data: dict[str, Any], current: list[str]) -> list[str]:
 
 
 def _is_hentai(data: dict[str, Any]) -> bool:
-    """Return whether Jikan classifies an anime as Hentai."""
+    """Return whether Jikan classifies an anime as adult-only."""
     for field_name in ("genres", "explicit_genres", "themes", "demographics"):
-        if any(name.casefold() == "hentai" for name in _names(data.get(field_name))):
+        if any(
+            name.casefold() in ADULT_GENRE_NAMES
+            for name in _names(data.get(field_name))
+        ):
             return True
     rating = data.get("rating")
     return isinstance(rating, str) and "hentai" in rating.casefold()
@@ -374,7 +392,7 @@ def _ensure_schema() -> None:
 
 
 def remove_hentai_anime() -> int:
-    """Delete anime classified as Hentai in any stored genre representation."""
+    """Delete anime classified as Hentai or Erotica in stored genres."""
     with app.app_context():
         _ensure_schema()
         anime_ids = list(
@@ -385,13 +403,13 @@ def remove_hentai_anime() -> int:
                     "SELECT 1 FROM anime_genre "
                     "JOIN genre ON genre.id = anime_genre.genre_id "
                     "WHERE anime_genre.anime_id = anime.anime_id "
-                    "AND LOWER(TRIM(genre.name)) = 'hentai'"
+                    "AND LOWER(TRIM(genre.name)) IN ('hentai', 'erotica')"
                     ") OR EXISTS ("
                     "SELECT 1 FROM unnest(anime.genres) AS legacy(value) "
-                    "WHERE LOWER(TRIM(legacy.value)) = 'hentai'"
+                    "WHERE LOWER(TRIM(legacy.value)) IN ('hentai', 'erotica')"
                     ") OR EXISTS ("
                     "SELECT 1 FROM unnest(anime.genres_detailed) AS detail(value) "
-                    "WHERE LOWER(TRIM(detail.value)) = 'hentai'"
+                    "WHERE LOWER(TRIM(detail.value)) IN ('hentai', 'erotica')"
                     ")"
                 )
             )
@@ -401,9 +419,6 @@ def remove_hentai_anime() -> int:
                 delete(AnimeGenre).where(AnimeGenre.anime_id.in_(anime_ids))
             )
             db.session.execute(delete(Anime).where(Anime.animeID.in_(anime_ids)))
-        db.session.execute(
-            delete(Genre).where(func.lower(func.trim(Genre.name)) == "hentai")
-        )
         db.session.commit()
         return len(anime_ids)
 
@@ -417,9 +432,11 @@ def _fetch_anime_data(
     except JikanTemporaryError:
         return AnimeFetchResult(None, "temporary")
     except HTTPError as error:
-        if error.code == 404:
+        status_code = error.code
+        error.close()
+        if status_code == 404:
             return AnimeFetchResult(None, "not_found")
-        if error.code in TEMPORARY_JIKAN_STATUS_CODES:
+        if status_code in TEMPORARY_JIKAN_STATUS_CODES:
             return AnimeFetchResult(None, "temporary")
         db.session.rollback()
         raise
@@ -724,9 +741,11 @@ def sync_current_season(
             result.pages_failed += 1
             break
         except HTTPError as error:
-            if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
+            status_code = error.code
+            error.close()
+            if status_code not in SKIPPABLE_JIKAN_STATUS_CODES:
                 raise
-            resume_page = 1 if error.code == 404 and page > 1 else page
+            resume_page = 1 if status_code == 404 and page > 1 else page
             _record_page_error(state_key, resume_page, error)
             result.pages_failed += 1
             result.next_page = resume_page
@@ -795,9 +814,11 @@ def _sync_bulk_anime_type(
                 break
             continue
         except HTTPError as error:
-            if error.code not in SKIPPABLE_JIKAN_STATUS_CODES:
+            status_code = error.code
+            error.close()
+            if status_code not in SKIPPABLE_JIKAN_STATUS_CODES:
                 raise
-            if error.code == 404 and page > 1:
+            if status_code == 404 and page > 1:
                 _record_page_error(state_key, 1, error)
                 result.pages_failed += 1
                 result.complete = True
@@ -808,7 +829,7 @@ def _sync_bulk_anime_type(
             result.next_page = page
             # A sustained 429 is a provider-wide quota signal. Retrying later
             # preserves this page instead of silently losing valid rows.
-            if error.code == 429:
+            if status_code == 429:
                 break
             consecutive_failures += 1
             if consecutive_failures >= max_consecutive_failures:
@@ -1150,10 +1171,10 @@ def _report_catalogue(result: CatalogueRefreshResult) -> None:
 
 
 def _report_hentai_cleanup(removed: int) -> None:
-    print(f"Hentai cleanup: removed={removed}.")
+    print(f"Adult anime cleanup: removed={removed}.")
     _append_step_summary(
         "Adult-content cleanup",
-        [("Hentai anime removed", removed)],
+        [("Hentai or Erotica anime removed", removed)],
     )
 
 
@@ -1219,6 +1240,21 @@ def run_scheduled_sync(
 
     catalogue_result = refresh_catalogue(limit=limit, batch_size=batch_size)
     _report_catalogue(catalogue_result)
+
+    # Preserve the established Anime pipeline even if a new readable-title
+    # provider phase fails unexpectedly.
+    removed_adult_manga = remove_adult_manga()
+    report_manga_cleanup(removed_adult_manga)
+    manga_result = sync_manga_catalogue(max_pages=page_limit)
+    report_manga_catalogue(manga_result)
+
+    manga_refresh_result = refresh_manga_catalogue(
+        limit=limit, batch_size=batch_size
+    )
+    report_manga_refresh(manga_refresh_result)
+    removed_adult_manga += (
+        manga_result.removed_adult + manga_refresh_result.removed_adult
+    )
     removed_hentai += (
         current_result.removed_hentai
         + bulk_result.removed_hentai
@@ -1236,8 +1272,11 @@ def run_scheduled_sync(
         supplemental_catalogue=supplemental_result,
         season_backfill=backfill_result,
         catalogue=catalogue_result,
+        manga_catalogue=manga_result,
+        manga_refresh=manga_refresh_result,
         coverage=coverage,
         removed_hentai=removed_hentai,
+        removed_adult_manga=removed_adult_manga,
     )
 
 
@@ -1272,6 +1311,16 @@ def main() -> None:
         help="Run every scheduled sync phase in one rate-limited process.",
     )
     parser.add_argument(
+        "--manga-catalogue",
+        action="store_true",
+        help="Discover and update Manga and Manhwa catalogue pages.",
+    )
+    parser.add_argument(
+        "--refresh-manga",
+        action="store_true",
+        help="Refresh the oldest-attempted Manga and Manhwa details.",
+    )
+    parser.add_argument(
         "--page-limit",
         type=int,
         help="Maximum bulk catalogue pages to process.",
@@ -1288,8 +1337,13 @@ def main() -> None:
         parser.error("--year requires --season winter, spring, summer, or fall")
     if args.season and args.anime_id:
         parser.error("--anime-id cannot be combined with --season")
-    if args.page_limit is not None and not (args.bulk_seasons or args.scheduled_sync):
-        parser.error("--page-limit requires --bulk-seasons or --scheduled-sync")
+    if args.page_limit is not None and not (
+        args.bulk_seasons or args.manga_catalogue or args.scheduled_sync
+    ):
+        parser.error(
+            "--page-limit requires --bulk-seasons, --manga-catalogue, "
+            "or --scheduled-sync"
+        )
     if args.bulk_seasons and args.limit is not None:
         parser.error("--limit is not used with --bulk-seasons")
     page_limit = args.page_limit or BULK_SEASON_MAX_PAGES_PER_RUN
@@ -1300,6 +1354,8 @@ def main() -> None:
             or args.season
             or args.year is not None
             or args.anime_id
+            or args.manga_catalogue
+            or args.refresh_manga
         ):
             parser.error(
                 "--scheduled-sync cannot be combined with another sync selection"
@@ -1308,6 +1364,36 @@ def main() -> None:
             limit=args.limit or DEFAULT_SEASON_BACKFILL_LIMIT,
             batch_size=args.batch_size,
             page_limit=page_limit,
+        )
+    elif args.manga_catalogue:
+        if (
+            args.bulk_seasons
+            or args.backfill_seasons
+            or args.refresh_manga
+            or args.season
+            or args.year is not None
+            or args.anime_id
+        ):
+            parser.error(
+                "--manga-catalogue cannot be combined with another sync selection"
+            )
+        report_manga_catalogue(sync_manga_catalogue(max_pages=page_limit))
+    elif args.refresh_manga:
+        if (
+            args.bulk_seasons
+            or args.backfill_seasons
+            or args.season
+            or args.year is not None
+            or args.anime_id
+        ):
+            parser.error(
+                "--refresh-manga cannot be combined with another sync selection"
+            )
+        report_manga_refresh(
+            refresh_manga_catalogue(
+                limit=args.limit or DEFAULT_MANGA_REFRESH_LIMIT,
+                batch_size=args.batch_size,
+            )
         )
     elif args.bulk_seasons:
         if (

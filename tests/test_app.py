@@ -2,9 +2,19 @@ import unittest
 from unittest.mock import patch
 
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 
-from backend.app import _anime_statement, _normalized_type, app
-from backend.models import Anime, db
+from backend.app import (
+    _anime_statement,
+    _filtered_manga_statement,
+    _manga_statement,
+    _normalized_content_type,
+    _normalized_status,
+    _normalized_type,
+    _serialize_manga,
+    app,
+)
+from backend.models import Anime, Manga, db
 
 
 class AppTests(unittest.TestCase):
@@ -41,6 +51,10 @@ class AppTests(unittest.TestCase):
         self.assertEqual(_normalized_type("Movie"), "MOVIE")
         self.assertEqual(_normalized_type("tv_special"), "SPECIAL")
 
+    def test_readable_catalogue_filter_values_are_normalized(self):
+        self.assertEqual(_normalized_content_type(" manhwa "), "MANHWA")
+        self.assertEqual(_normalized_status("NOT_YET_PUBLISHED"), "not yet published")
+
     def test_public_api_excludes_hentai_records_and_filter_options(self):
         anime_response = self.client.get(
             "/api/v1/anime", query_string={"genre": "Hentai"}
@@ -72,6 +86,155 @@ class AppTests(unittest.TestCase):
         self.assertIn("unnest(anime.genres)", sql)
         self.assertIn("unnest(anime.genres_detailed)", sql)
         self.assertGreaterEqual(sql.count("lower(trim("), 3)
+
+    def test_manga_public_query_excludes_every_adult_representation(self):
+        sql = str(
+            _manga_statement({"MANGA", "MANHWA"}).compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).lower()
+
+        self.assertIn("genre.name", sql)
+        self.assertIn("unnest(manga.genres)", sql)
+        self.assertIn("unnest(manga.genres_detailed)", sql)
+        self.assertIn("erotica", sql)
+        self.assertIn("hentai", sql)
+        self.assertGreaterEqual(sql.count("lower(trim("), 3)
+
+    def test_manga_serializer_exposes_print_metadata(self):
+        manga = Manga(
+            mangaID=9,
+            mal_id=42,
+            content_type="MANHWA",
+            title="Example Manhwa",
+            alternative_title="Alternate",
+            synopsis="A synopsis.",
+            manga_type="Manhwa",
+            publication_year=2024,
+            status="Publishing",
+            score=8.1,
+            chapters=50,
+            volumes=5,
+            mal_url="https://myanimelist.net/manga/42",
+            image_url="https://example.test/cover.jpg",
+            legacy_genres=[],
+            genres_detailed=["school"],
+        )
+
+        item = _serialize_manga(manga, detailed=True)
+
+        self.assertEqual(item["content_type"], "MANHWA")
+        self.assertEqual(item["publication_year"], 2024)
+        self.assertEqual(item["chapters"], 50)
+        self.assertEqual(item["volumes"], 5)
+        self.assertEqual(item["synopsis"], "A synopsis.")
+        self.assertEqual(item["genres_detailed"], ["school"])
+
+    def test_canonical_catalogue_supports_all_content(self):
+        response = self.client.get(
+            "/api/v1/catalogue",
+            query_string={"content_type": "ALL", "per_page": 2},
+        )
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("items", body)
+        self.assertEqual(body["pagination"]["per_page"], 2)
+        self.assertTrue(
+            all(
+                item["content_type"] in {"ANIME", "MANGA", "MANHWA"}
+                for item in body["items"]
+            )
+        )
+
+    def test_manga_and_manhwa_filters_and_aliases_are_available(self):
+        for content_type, alias in (("MANGA", "manga"), ("MANHWA", "manhwa")):
+            with self.subTest(content_type=content_type):
+                response = self.client.get(
+                    "/api/v1/catalogue",
+                    query_string={
+                        "content_type": content_type,
+                        "status": "PUBLISHING",
+                        "min_chapters": 1,
+                        "min_volumes": 1,
+                        "min_score": 1,
+                        "min_year": 1900,
+                        "genre": "Action",
+                        "tag": "school",
+                        "per_page": 2,
+                    },
+                )
+                alias_response = self.client.get(
+                    f"/api/v1/{alias}", query_string={"per_page": 1}
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(alias_response.status_code, 200)
+                self.assertTrue(
+                    all(
+                        item["content_type"] == content_type
+                        for item in response.get_json()["items"]
+                    )
+                )
+
+    def test_manhwa_filter_query_contains_every_requested_predicate(self):
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=MANHWA&status=PUBLISHING"
+            "&min_chapters=25&min_volumes=3&min_score=7&min_year=2000"
+            "&max_year=2030&genre=Action&tag=school"
+        ):
+            statement = _filtered_manga_statement({"MANHWA"})
+        sql = str(
+            statement.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).lower()
+
+        self.assertIn("manga.content_type in ('manhwa')", sql)
+        self.assertIn("lower(trim(manga.status)) in ('publishing')", sql)
+        self.assertIn("manga.chapters >= 25", sql)
+        self.assertIn("manga.volumes >= 3", sql)
+        self.assertIn("manga.score >= 7", sql)
+        self.assertIn("manga.publication_year >= 2000", sql)
+        self.assertIn("manga.publication_year <= 2030", sql)
+        self.assertIn("genre.name = 'action'", sql)
+        self.assertIn("manga.genres_detailed @> array['school']", sql)
+
+    def test_content_scoped_facets_and_random_endpoint_are_available(self):
+        genre_response = self.client.get(
+            "/api/v1/genres", query_string={"content_type": "MANHWA"}
+        )
+        tag_response = self.client.get(
+            "/api/v1/tags",
+            query_string={"content_type": "MANGA", "q": "school"},
+        )
+        random_response = self.client.get(
+            "/api/v1/catalogue/random",
+            query_string={"content_type": "ALL", "limit": 2},
+        )
+
+        self.assertEqual(genre_response.status_code, 200)
+        self.assertEqual(tag_response.status_code, 200)
+        self.assertEqual(random_response.status_code, 200)
+        self.assertLessEqual(len(random_response.get_json()["items"]), 2)
+
+    def test_invalid_catalogue_content_type_returns_json_error(self):
+        response = self.client.get(
+            "/api/v1/catalogue", query_string={"content_type": "NOVEL"}
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("content_type must be", response.get_json()["error"]["message"])
+
+    def test_unknown_manga_and_manhwa_details_return_json_404(self):
+        for content_type in ("MANGA", "MANHWA"):
+            with self.subTest(content_type=content_type):
+                response = self.client.get(
+                    f"/api/v1/catalogue/{content_type}/999999999"
+                )
+                self.assertEqual(response.status_code, 404)
 
     def test_detailed_tag_catalogue_supports_search(self):
         response = self.client.get("/api/v1/genres")
