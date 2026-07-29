@@ -91,13 +91,13 @@ class Genre(db.Model):
         back_populates="genre", cascade="all, delete-orphan"
     )
     anime_entries: Mapped[list[Anime]] = relationship(
-        secondary="anime_genre", viewonly=True, lazy="selectin"
+        secondary="anime_genre", viewonly=True
     )
     manga_links: Mapped[list["MangaGenre"]] = relationship(
         back_populates="genre", cascade="all, delete-orphan"
     )
     manga_entries: Mapped[list["Manga"]] = relationship(
-        secondary="manga_genre", viewonly=True, lazy="selectin"
+        secondary="manga_genre", viewonly=True
     )
 
 
