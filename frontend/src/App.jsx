@@ -457,7 +457,7 @@ export default function App() {
           onClick={showRandom}
           type="button"
         >
-          Randomize {contentType === "ALL" ? "all" : contentDetails.label}
+          Randomize {contentType === "ALL" ? "All" : contentDetails.label}
         </button>
       </header>
 
