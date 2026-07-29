@@ -29,6 +29,7 @@ test("clear filters are visually blank while the anime homepage stays TV-ranked"
   const cleared = filtersFor("ANIME");
 
   assert.equal(cleared.type, "");
+  assert.equal(cleared.status, "");
   assert.equal(cleared.genre.length, 0);
   assert.equal(cleared.tag.length, 0);
   assert.equal(TOP_RATED_FILTERS.type, "TV");
@@ -55,6 +56,7 @@ test("anime queries send anime filters and omit readable-title filters", () => {
     q: "monster",
     type: "TV",
     season: "spring",
+    status: "CURRENTLY_AIRING",
     min_episodes: "12",
     min_chapters: "50",
     genre: ["Drama", "Mystery"],
@@ -65,6 +67,7 @@ test("anime queries send anime filters and omit readable-title filters", () => {
   assert.equal(params.get("page"), "3");
   assert.equal(params.get("type"), "TV");
   assert.equal(params.get("season"), "spring");
+  assert.equal(params.get("status"), "CURRENTLY_AIRING");
   assert.equal(params.get("min_episodes"), "12");
   assert.equal(params.get("genre"), "Drama,Mystery");
   assert.equal(params.get("sort"), DEFAULT_SORT);
@@ -122,6 +125,17 @@ test("cards use episodes for anime and chapters plus volumes for print media", (
       episodes: 24,
     }),
     ["TV", "Spring", 2014, "24 eps"],
+  );
+  assert.deepEqual(
+    itemMetadata({
+      content_type: "ANIME",
+      type: "TV",
+      status: "CURRENTLY_AIRING",
+      season: "spring",
+      year: 2026,
+      episodes: 12,
+    }),
+    ["TV", "Currently Airing", "Spring", 2026, "12 eps"],
   );
   assert.deepEqual(
     itemMetadata({
@@ -212,6 +226,29 @@ test("anime homepage URL state preserves the implicit TV query", () => {
   assert.equal(restored.filters.type, "");
 });
 
+test("anime airing status survives shareable URL round-trips", () => {
+  const filters = {
+    ...filtersFor(),
+    type: "TV",
+    status: "CURRENTLY_AIRING",
+  };
+  const search = catalogueUrlSearch({
+    contentType: "ANIME",
+    filters,
+    page: 2,
+    view: "results",
+  });
+  const restored = catalogueStateFromSearch(search);
+
+  assert.equal(restored.contentType, "ANIME");
+  assert.equal(restored.page, 2);
+  assert.equal(restored.filters.status, "CURRENTLY_AIRING");
+  assert.equal(
+    new URLSearchParams(search).get("status"),
+    "CURRENTLY_AIRING",
+  );
+});
+
 test("presets create clean, media-relevant filter state", () => {
   const animePresets = presetsFor("ANIME", new Date("2026-07-15T12:00:00Z"));
   const seasonal = animePresets.find(({ id }) => id === "new-season");
@@ -223,10 +260,16 @@ test("presets create clean, media-relevant filter state", () => {
   assert.deepEqual(
     {
       type: filtersFromPreset(seasonal).type,
+      status: filtersFromPreset(seasonal).status,
       season: filtersFromPreset(seasonal).season,
       min_year: filtersFromPreset(seasonal).min_year,
     },
-    { type: "TV", season: "summer", min_year: "2026" },
+    {
+      type: "TV",
+      status: "CURRENTLY_AIRING",
+      season: "summer",
+      min_year: "2026",
+    },
   );
   assert.equal(filtersFromPreset(shortSeries).max_episodes, "13");
   assert.equal(filtersFromPreset(completedManga).status, "FINISHED");
@@ -238,6 +281,7 @@ test("active chips represent each removable catalogue filter", () => {
     ...filtersFor(),
     type: "TV",
     season: "spring",
+    status: "FINISHED_AIRING",
     min_score: "8",
     min_year: "2020",
     max_year: "2026",
@@ -259,6 +303,7 @@ test("active chips represent each removable catalogue filter", () => {
       "max_episodes",
       "type",
       "season",
+      "status",
     ],
   );
 });
@@ -278,11 +323,16 @@ test("removing a chip clears only its matching filter value", () => {
     withoutAction,
     { key: "type", value: "TV" },
   );
+  const withoutStatus = filtersWithoutChip(
+    { ...withoutAction, status: "CURRENTLY_AIRING" },
+    { key: "status", value: "CURRENTLY_AIRING" },
+  );
 
   assert.deepEqual(withoutAction.genre, ["Drama"]);
   assert.deepEqual(withoutAction.tag, ["school"]);
   assert.equal(withoutAction.type, "TV");
   assert.equal(withoutType.type, "");
+  assert.equal(withoutStatus.status, "");
   assert.deepEqual(filters.genre, ["Action", "Drama"]);
 });
 

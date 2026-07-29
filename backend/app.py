@@ -32,6 +32,17 @@ FRONTEND_BUILD_DIR = PROJECT_ROOT / "static" / "react"
 MAX_PAGE_SIZE = 100
 MAX_TAG_OPTIONS = 100
 VALID_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
+VALID_ANIME_STATUSES = frozenset(
+    {"CURRENTLY_AIRING", "FINISHED_AIRING", "NOT_YET_AIRED"}
+)
+ANIME_STATUS_ALIASES = {
+    "AIRING": "CURRENTLY_AIRING",
+    "CURRENTLY_AIRING": "CURRENTLY_AIRING",
+    "FINISHED": "FINISHED_AIRING",
+    "FINISHED_AIRING": "FINISHED_AIRING",
+    "NOT_YET_AIRED": "NOT_YET_AIRED",
+    "NOT_YET_AIRING": "NOT_YET_AIRED",
+}
 COMMON_SORTS = frozenset({"top_rated", "newest", "oldest", "title"})
 ANIME_SORTS = COMMON_SORTS | {"most_episodes"}
 PRINT_SORTS = COMMON_SORTS | {"most_chapters"}
@@ -88,6 +99,7 @@ class AnimeFilters:
     max_episodes: int | None
     anime_types: tuple[str, ...]
     seasons: tuple[str, ...]
+    statuses: tuple[str, ...]
 
     @property
     def active(self) -> bool:
@@ -96,6 +108,7 @@ class AnimeFilters:
             or self.max_episodes
             or self.anime_types
             or self.seasons
+            or self.statuses
         )
 
 
@@ -241,6 +254,17 @@ def _normalized_status(value: str) -> str:
     return " ".join(value.replace("_", " ").split()).casefold()
 
 
+def _normalized_anime_status(value: str) -> str:
+    normalized = "_".join(value.replace("-", " ").split()).upper()
+    status = ANIME_STATUS_ALIASES.get(normalized)
+    if status is None:
+        raise ApiError(
+            "anime status must be CURRENTLY_AIRING, FINISHED_AIRING, "
+            "or NOT_YET_AIRED"
+        )
+    return status
+
+
 def _escaped_search_pattern(query: str) -> str:
     escaped = (
         query.replace("\\", "\\\\")
@@ -265,7 +289,7 @@ def _common_filter_values() -> CommonFilters:
     )
 
 
-def _anime_filter_values() -> AnimeFilters:
+def _anime_filter_values(*, include_status: bool = True) -> AnimeFilters:
     seasons = tuple(season.lower() for season in _list_argument("season"))
     invalid_seasons = set(seasons).difference(VALID_SEASONS)
     if invalid_seasons:
@@ -289,13 +313,26 @@ def _anime_filter_values() -> AnimeFilters:
             _normalized_type(value) for value in _list_argument("type")
         ),
         seasons=seasons,
+        statuses=(
+            tuple(
+                _normalized_anime_status(value)
+                for value in _list_argument("status")
+            )
+            if include_status
+            else ()
+        ),
     )
 
 
-def _manga_filter_values() -> MangaFilters:
+def _manga_filter_values(*, include_status: bool = True) -> MangaFilters:
     return MangaFilters(
-        statuses=tuple(
-            _normalized_status(value) for value in _list_argument("status")
+        statuses=(
+            tuple(
+                _normalized_status(value)
+                for value in _list_argument("status")
+            )
+            if include_status
+            else ()
         ),
         min_chapters=_integer_argument(
             "min_chapters", minimum=1, maximum=1_000_000
@@ -315,6 +352,7 @@ def _serialize_anime(anime: Anime, *, detailed: bool = False) -> dict[str, Any]:
         "alternative_title": anime.alternative_title,
         "type": anime.type,
         "season": anime.season,
+        "status": anime.status,
         "year": anime.year,
         "score": anime.score,
         "episodes": anime.episodes,
@@ -438,6 +476,8 @@ def _filtered_anime_statement(
         )
     if anime_filters.seasons:
         statement = statement.where(Anime.season.in_(anime_filters.seasons))
+    if anime_filters.statuses:
+        statement = statement.where(Anime.status.in_(anime_filters.statuses))
     return statement
 
 
@@ -476,9 +516,18 @@ def _catalogue_rows_subquery(
 ):
     """Build one normalized identity stream for deterministic mixed paging."""
     common_filters = _common_filter_values()
-    anime_filters = _anime_filter_values()
-    manga_filters = _manga_filter_values()
     effective_types = set(content_types)
+    includes_anime = "ANIME" in effective_types
+    includes_print = bool(
+        effective_types.intersection({"MANGA", "MANHWA"})
+    )
+    if includes_anime and includes_print and _list_argument("status"):
+        raise ApiError(
+            "status cannot be shared across mixed content; select Anime, "
+            "Manga, or Manhwa first"
+        )
+    anime_filters = _anime_filter_values(include_status=not includes_print)
+    manga_filters = _manga_filter_values(include_status=not includes_anime)
 
     # A medium-specific filter cannot sensibly match rows from the other
     # medium. This also makes such filters useful when content_type=ALL.

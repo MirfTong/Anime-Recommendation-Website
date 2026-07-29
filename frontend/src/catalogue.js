@@ -37,6 +37,7 @@ const ANIME_FILTER_KEYS = [
   "max_episodes",
   "type",
   "season",
+  "status",
 ];
 const PRINT_FILTER_KEYS = [
   ...COMMON_FILTER_KEYS,
@@ -219,6 +220,7 @@ export function itemMetadata(item, detailed = false) {
   if (contentType === "ANIME") {
     return [
       item.type || "Anime",
+      formatStatus(item.status),
       formatSeason(item.season),
       year,
       `${item.episodes ?? "?"} ${detailed ? "episodes" : "eps"}`,
@@ -263,6 +265,7 @@ export function presetsFor(contentType, now = new Date()) {
         label: "New this season",
         filters: {
           type: "TV",
+          status: "CURRENTLY_AIRING",
           season: currentSeason(now),
           min_year: String(now.getFullYear()),
           max_year: String(now.getFullYear()),
@@ -369,7 +372,7 @@ export function responsiveFilterPanelClasses(mobileOpen, moreOpen) {
   return [
     mobileOpen ? "grid" : "hidden",
     moreOpen ? "sm:grid" : "sm:hidden",
-    "gap-3 sm:col-span-2 sm:grid-cols-2 lg:col-span-5 lg:grid-cols-5",
+    "gap-3 sm:col-span-2 sm:grid-cols-2 lg:col-span-6 lg:grid-cols-6",
   ].join(" ");
 }
 

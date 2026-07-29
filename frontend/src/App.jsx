@@ -842,7 +842,7 @@ export default function App() {
       </div>
 
       <form
-        className="relative z-20 mb-4 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl backdrop-blur sm:grid-cols-2 lg:grid-cols-5"
+        className="relative z-20 mb-4 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl backdrop-blur sm:grid-cols-2 lg:grid-cols-6"
         onSubmit={submitFilters}
       >
         <label className="sm:col-span-2 lg:col-span-2">
@@ -882,7 +882,7 @@ export default function App() {
 
         {contentType === "ANIME" && (
           <label
-            id="media-type-filter"
+            id="anime-type-filter"
             className={`${mobileFiltersOpen ? "block" : "hidden"} sm:block`}
           >
             <span className="sr-only">Anime type</span>
@@ -904,9 +904,36 @@ export default function App() {
           </label>
         )}
 
+        {contentType === "ANIME" && (
+          <label
+            id="anime-status-filter"
+            className={`${mobileFiltersOpen ? "block" : "hidden"} sm:block`}
+          >
+            <span className="sr-only">Airing status</span>
+            <select
+              className="filter-input !bg-slate-950"
+              name="status"
+              value={filters.status}
+              onChange={changeFilter}
+              style={{ colorScheme: "dark" }}
+            >
+              <option className="bg-slate-950" value="">All statuses</option>
+              <option className="bg-slate-950" value="CURRENTLY_AIRING">
+                Currently Airing
+              </option>
+              <option className="bg-slate-950" value="FINISHED_AIRING">
+                Finished Airing
+              </option>
+              <option className="bg-slate-950" value="NOT_YET_AIRED">
+                Not Yet Aired
+              </option>
+            </select>
+          </label>
+        )}
+
         {(contentType === "MANGA" || contentType === "MANHWA") && (
           <label
-            id="media-type-filter"
+            id="print-status-filter"
             className={`${mobileFiltersOpen ? "block" : "hidden"} sm:block`}
           >
             <span className="sr-only">Publication status</span>
@@ -934,7 +961,11 @@ export default function App() {
             className="flex-1 rounded-xl border border-white/15 px-3 py-3 text-sm font-semibold text-slate-200 transition hover:border-violet-400 hover:text-white sm:hidden"
             type="button"
             aria-controls={`genre-tag-filter${
-              contentType === "ALL" ? "" : " media-type-filter"
+              contentType === "ANIME"
+                ? " anime-type-filter anime-status-filter"
+                : contentType === "ALL"
+                  ? ""
+                  : " print-status-filter"
             } mobile-more-filters`}
             aria-expanded={mobileFiltersOpen}
             onClick={() => setMobileFiltersOpen((open) => !open)}
@@ -1067,7 +1098,7 @@ export default function App() {
           )}
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2 sm:col-span-2 lg:col-span-5">
+        <div className="flex flex-wrap items-center justify-between gap-2 sm:col-span-2 lg:col-span-6">
           <button
             className="hidden rounded-lg border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-violet-400 hover:text-white sm:inline-flex"
             type="button"

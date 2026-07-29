@@ -92,6 +92,7 @@ def ensure_catalogue_schema() -> None:
         "last_season_attempt TIMESTAMP WITH TIME ZONE",
         "mal_id INTEGER",
         "season VARCHAR(6)",
+        "status VARCHAR(30)",
         "synopsis TEXT",
         "is_adult BOOLEAN NOT NULL DEFAULT FALSE",
     ):
@@ -139,6 +140,22 @@ def ensure_catalogue_schema() -> None:
         text(
             "CREATE INDEX IF NOT EXISTS ix_anime_season_score "
             "ON anime (season, score)"
+        )
+    )
+    db.session.execute(
+        text(
+            "UPDATE anime SET status = CASE "
+            "WHEN REPLACE(UPPER(TRIM(status)), ' ', '_') "
+            "IN ('CURRENTLY_AIRING', 'AIRING') "
+            "THEN 'CURRENTLY_AIRING' "
+            "WHEN REPLACE(UPPER(TRIM(status)), ' ', '_') "
+            "IN ('FINISHED_AIRING', 'FINISHED') "
+            "THEN 'FINISHED_AIRING' "
+            "WHEN REPLACE(UPPER(TRIM(status)), ' ', '_') "
+            "IN ('NOT_YET_AIRED', 'NOT_YET_AIRING') "
+            "THEN 'NOT_YET_AIRED' "
+            "ELSE status END "
+            "WHERE status IS NOT NULL"
         )
     )
     db.session.execute(
@@ -207,6 +224,8 @@ def ensure_catalogue_schema() -> None:
         "ON anime (is_adult)",
         "CREATE INDEX IF NOT EXISTS ix_anime_public_score "
         "ON anime (is_adult, score)",
+        "CREATE INDEX IF NOT EXISTS ix_anime_status_score "
+        "ON anime (status, score DESC)",
         "CREATE INDEX IF NOT EXISTS ix_manga_title_trgm "
         "ON manga USING GIN (title gin_trgm_ops)",
         "CREATE INDEX IF NOT EXISTS ix_manga_alternative_title_trgm "
