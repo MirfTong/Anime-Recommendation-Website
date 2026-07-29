@@ -111,6 +111,7 @@ class MangaMappingTests(unittest.TestCase):
         self.assertEqual(manga.publication_year, 2006)
         self.assertEqual(manga.status, "Finished")
         self.assertEqual(manga.score, 8.75)
+        self.assertFalse(manga.is_adult)
         self.assertEqual(manga.chapters, 42)
         self.assertEqual(manga.volumes, 7)
         self.assertEqual(
@@ -127,6 +128,35 @@ class MangaMappingTests(unittest.TestCase):
             ["Drama"],
         )
         self.assertIsNotNone(manga.last_jikan_sync)
+
+    def test_manga_mapping_maintains_the_indexed_adult_flag(self):
+        manga = manga_record()
+
+        _update_manga(
+            manga,
+            {
+                "mal_id": 1,
+                "type": "Manga",
+                "rating": "Rx - Hentai",
+                "genres": [],
+            },
+            {},
+            expected_content_type="MANGA",
+        )
+        self.assertTrue(manga.is_adult)
+
+        _update_manga(
+            manga,
+            {
+                "mal_id": 1,
+                "type": "Manga",
+                "rating": "PG-13",
+                "genres": [],
+            },
+            {},
+            expected_content_type="MANGA",
+        )
+        self.assertFalse(manga.is_adult)
 
     def test_publication_year_uses_nested_year_then_iso_fallback(self):
         self.assertEqual(

@@ -1,4 +1,5 @@
 import unittest
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from email.message import Message
 from types import SimpleNamespace
@@ -123,6 +124,15 @@ class JikanEtlTests(unittest.TestCase):
                 }
             )
         )
+
+    def test_anime_mapping_maintains_the_indexed_adult_flag(self):
+        anime = anime_record()
+
+        _update_anime(anime, {"rating": "Rx - Hentai", "genres": []}, {})
+        self.assertTrue(anime.is_adult)
+
+        _update_anime(anime, {"rating": "PG-13", "genres": []}, {})
+        self.assertFalse(anime.is_adult)
 
     def test_updates_anime_season_from_jikan(self):
         anime = anime_record()
@@ -251,43 +261,83 @@ class JikanEtlTests(unittest.TestCase):
         )
         manga_refresh = MangaRefreshResult(removed_adult=3)
         coverage = SeasonCoverage(total_tv=100, classified_tv=75)
-        with (
-            patch("backend.jobs.jikan_etl.remove_hentai_anime", return_value=6),
-            patch("backend.jobs.jikan_etl.remove_adult_manga", return_value=7),
-            patch("backend.jobs.jikan_etl.sync_current_season", return_value=current),
-            patch(
-                "backend.jobs.jikan_etl.sync_bulk_anime_seasons", return_value=bulk
-            ) as bulk_sync,
-            patch(
-                "backend.jobs.jikan_etl.sync_supplemental_anime_types",
-                return_value=supplemental,
-            ) as supplemental_sync,
-            patch(
-                "backend.jobs.jikan_etl.backfill_missing_seasons", return_value=backfill
-            ) as backfill_sync,
-            patch(
-                "backend.jobs.jikan_etl.refresh_catalogue", return_value=catalogue
-            ) as catalogue_sync,
-            patch(
-                "backend.jobs.jikan_etl.sync_manga_catalogue",
-                return_value=manga_catalogue,
-            ) as manga_sync,
-            patch(
-                "backend.jobs.jikan_etl.refresh_manga_catalogue",
-                return_value=manga_refresh,
-            ) as manga_refresh_sync,
-            patch("backend.jobs.jikan_etl.get_season_coverage", return_value=coverage),
-            patch("backend.jobs.jikan_etl._report_current_season"),
-            patch("backend.jobs.jikan_etl._report_bulk_seasons"),
-            patch("backend.jobs.jikan_etl._report_supplemental_catalogue"),
-            patch("backend.jobs.jikan_etl._report_season_backfill"),
-            patch("backend.jobs.jikan_etl._report_catalogue"),
-            patch("backend.jobs.jikan_etl.report_manga_catalogue"),
-            patch("backend.jobs.jikan_etl.report_manga_cleanup"),
-            patch("backend.jobs.jikan_etl.report_manga_refresh"),
-            patch("backend.jobs.jikan_etl._report_hentai_cleanup"),
-            patch("backend.jobs.jikan_etl._report_season_coverage"),
-        ):
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch("backend.jobs.jikan_etl.remove_hentai_anime", return_value=6)
+            )
+            stack.enter_context(
+                patch("backend.jobs.jikan_etl.remove_adult_manga", return_value=7)
+            )
+            stack.enter_context(
+                patch(
+                    "backend.jobs.jikan_etl.sync_current_season",
+                    return_value=current,
+                )
+            )
+            bulk_sync = stack.enter_context(
+                patch(
+                    "backend.jobs.jikan_etl.sync_bulk_anime_seasons",
+                    return_value=bulk,
+                )
+            )
+            supplemental_sync = stack.enter_context(
+                patch(
+                    "backend.jobs.jikan_etl.sync_supplemental_anime_types",
+                    return_value=supplemental,
+                )
+            )
+            backfill_sync = stack.enter_context(
+                patch(
+                    "backend.jobs.jikan_etl.backfill_missing_seasons",
+                    return_value=backfill,
+                )
+            )
+            catalogue_sync = stack.enter_context(
+                patch(
+                    "backend.jobs.jikan_etl.refresh_catalogue",
+                    return_value=catalogue,
+                )
+            )
+            manga_sync = stack.enter_context(
+                patch(
+                    "backend.jobs.jikan_etl.sync_manga_catalogue",
+                    return_value=manga_catalogue,
+                )
+            )
+            manga_refresh_sync = stack.enter_context(
+                patch(
+                    "backend.jobs.jikan_etl.refresh_manga_catalogue",
+                    return_value=manga_refresh,
+                )
+            )
+            facet_sync = stack.enter_context(
+                patch(
+                    "backend.jobs.jikan_etl.refresh_catalogue_facets",
+                    return_value=123,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "backend.jobs.jikan_etl.get_season_coverage",
+                    return_value=coverage,
+                )
+            )
+            for report_name in (
+                "_report_current_season",
+                "_report_bulk_seasons",
+                "_report_supplemental_catalogue",
+                "_report_season_backfill",
+                "_report_catalogue",
+                "report_manga_catalogue",
+                "report_manga_cleanup",
+                "report_manga_refresh",
+                "_report_hentai_cleanup",
+                "_report_catalogue_facets",
+                "_report_season_coverage",
+            ):
+                stack.enter_context(
+                    patch(f"backend.jobs.jikan_etl.{report_name}")
+                )
             result = run_scheduled_sync(limit=7, batch_size=2, page_limit=3)
 
         bulk_sync.assert_called_once_with(max_pages=3)
@@ -296,6 +346,7 @@ class JikanEtlTests(unittest.TestCase):
         catalogue_sync.assert_called_once_with(limit=7, batch_size=2)
         manga_sync.assert_called_once_with(max_pages=3)
         manga_refresh_sync.assert_called_once_with(limit=7, batch_size=2)
+        facet_sync.assert_called_once_with()
         self.assertEqual(result.supplemental_catalogue, supplemental)
         self.assertEqual(result.manga_catalogue, manga_catalogue)
         self.assertEqual(result.manga_refresh, manga_refresh)

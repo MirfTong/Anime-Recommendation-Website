@@ -16,9 +16,12 @@ Genres are normalized across all three content types:
 
 Frequently filtered score, year, type, season, status, chapter, volume, genre,
 and tag columns have PostgreSQL indexes. The schema enables PostgreSQL's trusted
-`pg_trgm` extension for indexed partial-title searches. Hentai and Erotica
-records are rejected during discovery and detail refresh, removed during
-cleanup, and excluded again from public API queries as defense in depth.
+`pg_trgm` extension for indexed partial-title searches. The ETL maintains an
+indexed `is_adult` flag so public queries do not repeatedly scan genre arrays.
+It also rebuilds the indexed `catalogue_facet` table for genre/tag options.
+Five-minute process caches reuse facet results and exact pagination totals.
+Hentai and Erotica records are rejected during discovery and detail refresh,
+removed during cleanup, and excluded from public API queries.
 
 ## Local setup
 
