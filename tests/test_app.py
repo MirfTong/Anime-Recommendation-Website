@@ -10,11 +10,13 @@ from backend.app import (
     _filtered_anime_statement,
     _filtered_manga_statement,
     _manga_statement,
+    _normalized_anime_status,
     _normalized_content_type,
     _normalized_status,
     _normalized_type,
     _ordered_catalogue_rows,
     _request_filter_signature,
+    _serialize_anime,
     _serialize_manga,
     app,
     response_cache,
@@ -35,6 +37,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(body["items"]), 2)
         self.assertEqual(body["pagination"]["per_page"], 2)
         self.assertGreaterEqual(body["items"][0]["year"], 2020)
+        self.assertIn("status", body["items"][0])
 
     def test_anime_detail_returns_detailed_tags(self):
         response = self.client.get("/api/v1/anime/52991")
@@ -163,6 +166,80 @@ class AppTests(unittest.TestCase):
     def test_readable_catalogue_filter_values_are_normalized(self):
         self.assertEqual(_normalized_content_type(" manhwa "), "MANHWA")
         self.assertEqual(_normalized_status("NOT_YET_PUBLISHED"), "not yet published")
+        self.assertEqual(
+            _normalized_anime_status("Currently Airing"),
+            "CURRENTLY_AIRING",
+        )
+
+    def test_anime_serializer_exposes_normalized_airing_status(self):
+        anime = Anime(
+            animeID=12,
+            mal_id=24,
+            title="Example Anime",
+            alternative_title=None,
+            synopsis=None,
+            type="TV",
+            season="summer",
+            status="CURRENTLY_AIRING",
+            year=2026,
+            score=8.0,
+            episodes=12,
+            mal_url="https://myanimelist.net/anime/24",
+            sequel=False,
+            image_url="",
+            legacy_genres=[],
+            genres_detailed=[],
+        )
+
+        item = _serialize_anime(anime)
+
+        self.assertEqual(item["status"], "CURRENTLY_AIRING")
+
+    def test_anime_status_filter_uses_canonical_indexed_predicate(self):
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ANIME"
+            "&status=Currently%20Airing"
+        ):
+            statement = _filtered_anime_statement()
+        sql = str(
+            statement.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).lower()
+
+        self.assertIn(
+            "anime.status in ('currently_airing')",
+            sql,
+        )
+
+    def test_anime_and_print_status_semantics_are_kept_separate(self):
+        invalid_anime = self.client.get(
+            "/api/v1/catalogue",
+            query_string={
+                "content_type": "ANIME",
+                "status": "PUBLISHING",
+            },
+        )
+        mixed_status = self.client.get(
+            "/api/v1/catalogue",
+            query_string={
+                "content_type": "ALL",
+                "status": "CURRENTLY_AIRING",
+            },
+        )
+        print_status = self.client.get(
+            "/api/v1/catalogue",
+            query_string={
+                "content_type": "MANGA",
+                "status": "FINISHED",
+                "per_page": 1,
+            },
+        )
+
+        self.assertEqual(invalid_anime.status_code, 400)
+        self.assertEqual(mixed_status.status_code, 400)
+        self.assertEqual(print_status.status_code, 200)
 
     def test_public_api_excludes_hentai_records_and_filter_options(self):
         anime_response = self.client.get(

@@ -46,6 +46,14 @@ TEMPORARY_JIKAN_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 JIKAN_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
 ADULT_GENRE_NAMES = frozenset({"hentai", "erotica"})
 TYPE_ALIASES = {"TV SPECIAL": "SPECIAL"}
+ANIME_STATUS_ALIASES = {
+    "AIRING": "CURRENTLY_AIRING",
+    "CURRENTLY_AIRING": "CURRENTLY_AIRING",
+    "FINISHED": "FINISHED_AIRING",
+    "FINISHED_AIRING": "FINISHED_AIRING",
+    "NOT_YET_AIRED": "NOT_YET_AIRED",
+    "NOT_YET_AIRING": "NOT_YET_AIRED",
+}
 SUPPLEMENTAL_PROVIDER_TYPES = ("ova", "ona", "special", "tv_special")
 SUPPLEMENTAL_STATE_KEYS = {
     anime_type: f"bulk:catalogue:{anime_type}:v1"
@@ -240,6 +248,14 @@ def _anime_type(value: Any, *, fallback: str = "UNKNOWN") -> str:
     return TYPE_ALIASES.get(normalized, normalized)
 
 
+def _anime_status(value: Any) -> str | None:
+    """Map provider airing labels onto stable database and API values."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = "_".join(value.replace("-", " ").split()).upper()
+    return ANIME_STATUS_ALIASES.get(normalized)
+
+
 def _synopsis(value: Any) -> str | None:
     """Normalize Jikan's optional plot summary for storage."""
     if not isinstance(value, str):
@@ -309,6 +325,10 @@ def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) 
     if "synopsis" in data:
         anime.synopsis = _synopsis(data.get("synopsis"))
     anime.type = _anime_type(data.get("type"), fallback=_anime_type(anime.type))
+    if "status" in data:
+        incoming_status = _anime_status(data.get("status"))
+        if incoming_status is not None:
+            anime.status = incoming_status
     incoming_season = _season(data.get("season"))
     if incoming_season is None and _is_tv(anime.type):
         incoming_season = _season_from_air_date(data)
@@ -377,6 +397,7 @@ def _new_anime(data: dict[str, Any]) -> Anime:
         synopsis=_synopsis(data.get("synopsis")),
         type=anime_type,
         season=season,
+        status=_anime_status(data.get("status")),
         year=data.get("year"),
         score=_valid_score(data.get("score")),
         is_adult=_is_hentai(data),

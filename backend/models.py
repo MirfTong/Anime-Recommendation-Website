@@ -21,6 +21,7 @@ class Anime(db.Model):
         Index("ix_anime_public_score", "is_adult", "score"),
         Index("ix_anime_type_score", "type", "score"),
         Index("ix_anime_season_score", "season", "score"),
+        Index("ix_anime_status_score", "status", "score"),
         Index(
             "ix_anime_genres_detailed_gin",
             "genres_detailed",
@@ -50,6 +51,8 @@ class Anime(db.Model):
     type: Mapped[str] = mapped_column(index=True)
     # Jikan returns one of winter, spring, summer, fall, or no season.
     season: Mapped[str | None] = mapped_column(String(6), index=True)
+    # Canonical Jikan airing state, or null until the ETL supplies one.
+    status: Mapped[str | None] = mapped_column(String(30))
     # Airing and unreleased anime may not have these values yet.
     year: Mapped[int | None] = mapped_column(index=True)
     score: Mapped[float | None] = mapped_column(index=True)

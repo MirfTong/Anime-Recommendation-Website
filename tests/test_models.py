@@ -12,6 +12,20 @@ SCHEMA_SOURCE = (
 
 
 class MangaSchemaTests(unittest.TestCase):
+    def test_anime_table_contains_nullable_indexed_airing_status(self):
+        self.assertIn("status", Anime.__table__.columns)
+        self.assertTrue(Anime.__table__.c.status.nullable)
+        self.assertIn(
+            "ix_anime_status_score",
+            {index.name for index in Anime.__table__.indexes},
+        )
+        schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
+        self.assertIn('"status VARCHAR(30)"', schema_source)
+        self.assertIn(
+            "CREATE INDEX IF NOT EXISTS ix_anime_status_score",
+            schema_source,
+        )
+
     def test_manga_table_contains_the_complete_catalogue_shape(self):
         columns = set(Manga.__table__.columns.keys())
 

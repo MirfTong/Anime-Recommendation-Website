@@ -17,12 +17,14 @@ from backend.jobs.jikan_etl import (
     SeasonCoverage,
     SupplementalCatalogueSyncResult,
     _apply_season_page,
+    _anime_status,
     _anime_type,
     _detailed_genres,
     _current_season_identity,
     _fetch_anime_data,
     _is_hentai,
     _names,
+    _new_anime,
     _prepared_season_entry,
     _season,
     _season_from_air_date,
@@ -50,7 +52,12 @@ from backend.services.jikan_client import (
 )
 
 
-def anime_record(*, anime_type="TV", season="summer"):
+def anime_record(
+    *,
+    anime_type="TV",
+    season="summer",
+    status="FINISHED_AIRING",
+):
     return Anime(
         animeID=1,
         mal_id=1,
@@ -59,6 +66,7 @@ def anime_record(*, anime_type="TV", season="summer"):
         synopsis=None,
         type=anime_type,
         season=season,
+        status=status,
         year=2020,
         score=8.0,
         episodes=12,
@@ -110,6 +118,13 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(_anime_type("tv_special"), "SPECIAL")
         self.assertEqual(_anime_type(" TV Special "), "SPECIAL")
 
+    def test_normalizes_supported_jikan_airing_statuses(self):
+        self.assertEqual(_anime_status("Currently Airing"), "CURRENTLY_AIRING")
+        self.assertEqual(_anime_status("Finished Airing"), "FINISHED_AIRING")
+        self.assertEqual(_anime_status("Not yet aired"), "NOT_YET_AIRED")
+        self.assertIsNone(_anime_status("Cancelled"))
+        self.assertIsNone(_anime_status(None))
+
     def test_detects_hentai_from_categories_or_rating(self):
         self.assertTrue(
             _is_hentai({"explicit_genres": [{"name": " HENTAI "}]})
@@ -138,6 +153,43 @@ class JikanEtlTests(unittest.TestCase):
         anime = anime_record()
         _update_anime(anime, {"season": "Fall", "genres": []}, {})
         self.assertEqual(anime.season, "fall")
+
+    def test_updates_anime_status_without_erasing_valid_sparse_data(self):
+        anime = anime_record(status="FINISHED_AIRING")
+
+        _update_anime(
+            anime,
+            {"status": "Currently Airing", "genres": []},
+            {},
+        )
+        self.assertEqual(anime.status, "CURRENTLY_AIRING")
+
+        _update_anime(anime, {"genres": []}, {})
+        self.assertEqual(anime.status, "CURRENTLY_AIRING")
+
+        _update_anime(anime, {"status": {"bad": "value"}, "genres": []}, {})
+        self.assertEqual(anime.status, "CURRENTLY_AIRING")
+
+    def test_new_anime_stores_normalized_status_or_null(self):
+        airing = _new_anime(
+            {
+                "mal_id": 10,
+                "title": "Airing",
+                "type": "TV",
+                "status": "Currently Airing",
+            }
+        )
+        unknown = _new_anime(
+            {
+                "mal_id": 11,
+                "title": "Unknown",
+                "type": "TV",
+                "status": "Cancelled",
+            }
+        )
+
+        self.assertEqual(airing.status, "CURRENTLY_AIRING")
+        self.assertIsNone(unknown.status)
 
     def test_updates_anime_synopsis_from_jikan_detail_payload(self):
         anime = anime_record()
@@ -242,6 +294,27 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(result.invalid_payloads, 2)
         self.assertEqual(mock_db.session.execute.call_count, 2)
         self.assertGreaterEqual(mock_db.session.commit.call_count, 3)
+
+    def test_catalogue_refresh_updates_airing_status(self):
+        anime = anime_record(status=None)
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [[anime], []]
+            result = refresh_catalogue(
+                anime_ids=[1],
+                fetch_anime=lambda _mal_id: {
+                    "data": {
+                        "mal_id": 1,
+                        "status": "Finished Airing",
+                        "genres": [],
+                    }
+                },
+            )
+
+        self.assertEqual(result.updated, 1)
+        self.assertEqual(anime.status, "FINISHED_AIRING")
 
     def test_health_metrics_flag_a_low_success_run(self):
         result = CatalogueRefreshResult(selected=1000, updated=43, temporary_errors=957)
@@ -365,7 +438,12 @@ class JikanEtlTests(unittest.TestCase):
 
     def test_season_sync_reuses_and_forces_listing_data(self):
         anime = SimpleNamespace(mal_id=1)
-        seasonal_data = {"mal_id": 1, "title": "Example", "type": "TV"}
+        seasonal_data = {
+            "mal_id": 1,
+            "title": "Example",
+            "type": "TV",
+            "status": "Currently Airing",
+        }
         with (
             patch("backend.jobs.jikan_etl._ensure_schema"),
             patch("backend.jobs.jikan_etl._update_anime") as update_anime,
@@ -382,6 +460,7 @@ class JikanEtlTests(unittest.TestCase):
         mapped_data = update_anime.call_args.args[1]
         self.assertEqual(mapped_data["season"], "summer")
         self.assertEqual(mapped_data["year"], 2026)
+        self.assertEqual(mapped_data["status"], "Currently Airing")
 
     def test_season_sync_deletes_existing_hentai_records(self):
         anime = SimpleNamespace(mal_id=1)
@@ -640,7 +719,12 @@ class JikanEtlTests(unittest.TestCase):
         )
 
     def test_bulk_page_repairs_a_stale_local_type_from_provider_tv_data(self):
-        anime = SimpleNamespace(mal_id=1, type="Unknown", season=None)
+        anime = SimpleNamespace(
+            mal_id=1,
+            type="Unknown",
+            season=None,
+            status=None,
+        )
         state = SimpleNamespace(
             next_page=1,
             last_attempt_at=None,
@@ -651,9 +735,17 @@ class JikanEtlTests(unittest.TestCase):
         def update_anime(record, data, _genres):
             record.type = data["type"]
             record.season = data["season"]
+            record.status = _anime_status(data.get("status"))
 
         page = JikanAnimePage(
-            entries=[{"mal_id": 1, "type": "TV", "season": "winter"}],
+            entries=[
+                {
+                    "mal_id": 1,
+                    "type": "TV",
+                    "season": "winter",
+                    "status": "Currently Airing",
+                }
+            ],
             page=1,
             has_next_page=True,
         )
@@ -676,6 +768,7 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(result.seasons_assigned, 1)
         self.assertEqual(anime.type, "TV")
         self.assertEqual(anime.season, "winter")
+        self.assertEqual(anime.status, "CURRENTLY_AIRING")
 
     def test_type_filtered_page_uses_requested_type_when_payload_omits_it(self):
         anime = SimpleNamespace(mal_id=1, season=None)
