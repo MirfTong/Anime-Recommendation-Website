@@ -20,20 +20,6 @@ and tag columns have PostgreSQL indexes. The schema enables PostgreSQL's trusted
 records are rejected during discovery and detail refresh, removed during
 cleanup, and excluded again from public API queries as defense in depth.
 
-## Project layout
-
-```text
-backend/app.py                    Flask REST API and React build host
-backend/models.py                 PostgreSQL ORM models and relationships
-backend/schema.py                 safe additive schema setup
-backend/services/jikan_client.py  shared provider client and request limiter
-backend/jobs/jikan_etl.py         scheduled Anime + readable-title orchestration
-backend/jobs/manga_etl.py         Manga/Manhwa discovery, refresh, and cleanup
-frontend/src/App.jsx              React catalogue interface
-tests/                            backend and ETL regression tests
-.github/workflows/jikan-sync.yml  scheduled catalogue sync
-```
-
 ## Local setup
 
 1. Create `.env` from `.env.example` and set `DATABASE_URL` to PostgreSQL.
