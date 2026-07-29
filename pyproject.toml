@@ -1,7 +1,7 @@
 [project]
 name = "anime-rec"
 version = "0.1.0"
-description = "Add your description here"
+description = "KyoQuan Anime, Manga, and Manhwa catalogue"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

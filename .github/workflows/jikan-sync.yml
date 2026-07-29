@@ -1,8 +1,8 @@
-name: Scheduled anime metadata sync
+name: Scheduled catalogue metadata sync
 
 on:
   schedule:
-    # Eight runs/day stays comfortably below the public provider's daily cap.
+    # Anime, Manga, and Manhwa share one limiter across eight daily runs.
     - cron: "0 */3 * * *"
   workflow_dispatch:
 
@@ -28,5 +28,5 @@ jobs:
           python-version: "3.14"
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Run the complete rate-limited metadata sync
+      - name: Sync Anime, Manga, and Manhwa
         run: python -m backend.jobs.jikan_etl --scheduled-sync --page-limit 40 --limit 1000

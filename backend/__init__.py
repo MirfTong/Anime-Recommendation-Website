@@ -1,1 +1,1 @@
-"""Backend package for the anime catalogue API and sync jobs."""
+"""Backend package for the Anime, Manga, and Manhwa catalogue."""
