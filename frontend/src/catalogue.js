@@ -5,12 +5,15 @@ export const CONTENT_TYPES = [
   { value: "ALL", label: "All", resultLabel: "titles" },
 ];
 
+export const DEFAULT_SORT = "top_rated";
+
 const EMPTY_FILTERS = {
   q: "",
   min_score: "",
   min_year: "",
   max_year: "",
   min_episodes: "",
+  max_episodes: "",
   min_chapters: "",
   min_volumes: "",
   type: "",
@@ -20,6 +23,27 @@ const EMPTY_FILTERS = {
   tag: [],
 };
 
+const COMMON_FILTER_KEYS = [
+  "q",
+  "min_score",
+  "min_year",
+  "max_year",
+  "genre",
+  "tag",
+];
+const ANIME_FILTER_KEYS = [
+  ...COMMON_FILTER_KEYS,
+  "min_episodes",
+  "max_episodes",
+  "type",
+  "season",
+];
+const PRINT_FILTER_KEYS = [
+  ...COMMON_FILTER_KEYS,
+  "min_chapters",
+  "min_volumes",
+  "status",
+];
 const PAGE_WINDOW_SIZE = 8;
 
 export function filtersFor() {
@@ -41,9 +65,9 @@ export function filtersMatch(left, right) {
 }
 
 export function scoreLabel(value) {
-  if (value === null || value === undefined || value === "") return "N/A";
+  if (value === null || value === undefined || value === "") return "?";
   const numericValue = Number(value);
-  return Number.isFinite(numericValue) ? numericValue.toFixed(2) : "N/A";
+  return Number.isFinite(numericValue) ? numericValue.toFixed(2) : "?";
 }
 
 export function usesTopRatedAnimeHomepage(
@@ -56,26 +80,109 @@ export function usesTopRatedAnimeHomepage(
     && !allTypesExplicitlySelected;
 }
 
-export function queryString(filters, page = 1, contentType = "ANIME") {
-  const params = new URLSearchParams({
-    content_type: contentType,
-    page: String(page),
-    per_page: "24",
-  });
-  const commonKeys = ["q", "min_score", "min_year", "max_year", "genre", "tag"];
-  const activeKeys = contentType === "ANIME"
-    ? [...commonKeys, "min_episodes", "type", "season"]
-    : contentType === "MANGA" || contentType === "MANHWA"
-      ? [...commonKeys, "min_chapters", "min_volumes", "status"]
-      : commonKeys;
+function filterKeysFor(contentType) {
+  if (contentType === "ANIME") return ANIME_FILTER_KEYS;
+  if (contentType === "MANGA" || contentType === "MANHWA") {
+    return PRINT_FILTER_KEYS;
+  }
+  return COMMON_FILTER_KEYS;
+}
 
-  activeKeys.forEach((key) => {
+function addFilterParams(params, filters, contentType) {
+  filterKeysFor(contentType).forEach((key) => {
     const value = filters[key];
     if (Array.isArray(value) ? value.length > 0 : value) {
       params.set(key, Array.isArray(value) ? value.join(",") : value);
     }
   });
+}
+
+export function queryString(
+  filters,
+  page = 1,
+  contentType = "ANIME",
+  sort = DEFAULT_SORT,
+) {
+  const params = new URLSearchParams({
+    content_type: contentType,
+    page: String(page),
+    per_page: "24",
+    sort,
+  });
+  addFilterParams(params, filters, contentType);
   return params.toString();
+}
+
+export function catalogueUrlSearch({
+  contentType = "ANIME",
+  filters = filtersFor(),
+  page = 1,
+  sort = DEFAULT_SORT,
+  view = "results",
+} = {}) {
+  const params = new URLSearchParams();
+  if (contentType !== "ANIME") params.set("content_type", contentType);
+  if (page > 1) params.set("page", String(page));
+  if (sort !== DEFAULT_SORT) params.set("sort", sort);
+  if (view === "home") {
+    params.set("view", "home");
+  } else {
+    addFilterParams(params, filters, contentType);
+  }
+  const value = params.toString();
+  return value ? `?${value}` : "";
+}
+
+function commaSeparatedValues(params, key) {
+  return params
+    .getAll(key)
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .filter((value, index, values) => values.indexOf(value) === index);
+}
+
+export function catalogueStateFromSearch(search = "") {
+  const params = new URLSearchParams(search);
+  const requestedContentType = (params.get("content_type") ?? "ANIME").toUpperCase();
+  const contentType = CONTENT_TYPES.some(({ value }) => value === requestedContentType)
+    ? requestedContentType
+    : "ANIME";
+  const validSortValues = sortOptionsFor(contentType).map(({ value }) => value);
+  const requestedSort = params.get("sort") ?? DEFAULT_SORT;
+  const sort = validSortValues.includes(requestedSort) ? requestedSort : DEFAULT_SORT;
+  const requestedPage = Number(params.get("page") ?? 1);
+  const page = Number.isInteger(requestedPage) && requestedPage > 0
+    ? requestedPage
+    : 1;
+  const view = params.get("view") === "home" && contentType === "ANIME"
+    ? "home"
+    : "results";
+  const filters = filtersFor();
+  if (view !== "home") {
+    filterKeysFor(contentType).forEach((key) => {
+      filters[key] = Array.isArray(filters[key])
+        ? commaSeparatedValues(params, key)
+        : params.get(key) ?? "";
+    });
+  }
+  const hasState = [...params.keys()].some((key) => (
+    [
+      "content_type",
+      "page",
+      "sort",
+      "view",
+      ...filterKeysFor(contentType),
+    ].includes(key)
+  ));
+  return {
+    contentType,
+    filters,
+    page,
+    sort,
+    view: hasState ? view : "home",
+    hasState,
+  };
 }
 
 export function contentTypeDetails(value) {
@@ -125,6 +232,165 @@ export function itemMetadata(item, detailed = false) {
     `${item.chapters ?? "?"} ${detailed ? "chapters" : "ch"}`,
     `${item.volumes ?? "?"} ${detailed ? "volumes" : "vols"}`,
   ].filter(Boolean);
+}
+
+export function sortOptionsFor(contentType) {
+  const options = [
+    { value: "top_rated", label: "Top rated" },
+    { value: "newest", label: "Newest release" },
+    { value: "oldest", label: "Oldest release" },
+    { value: "title", label: "A–Z" },
+  ];
+  if (contentType === "ANIME") {
+    options.push({ value: "most_episodes", label: "Most episodes" });
+  } else if (contentType === "MANGA" || contentType === "MANHWA") {
+    options.push({ value: "most_chapters", label: "Most chapters" });
+  }
+  return options;
+}
+
+function currentSeason(now) {
+  const seasons = ["winter", "spring", "summer", "fall"];
+  return seasons[Math.floor(now.getMonth() / 3)];
+}
+
+export function presetsFor(contentType, now = new Date()) {
+  const presets = [];
+  if (contentType === "ANIME") {
+    presets.push(
+      {
+        id: "new-season",
+        label: "New this season",
+        filters: {
+          type: "TV",
+          season: currentSeason(now),
+          min_year: String(now.getFullYear()),
+          max_year: String(now.getFullYear()),
+        },
+      },
+      {
+        id: "short-series",
+        label: "Short series",
+        filters: { type: "TV", max_episodes: "13" },
+      },
+      {
+        id: "movies",
+        label: "Movies",
+        filters: { type: "MOVIE" },
+      },
+    );
+  }
+  presets.push({
+    id: "highly-rated",
+    label: "Highly rated",
+    filters: { min_score: "8" },
+  });
+  if (contentType === "MANGA") {
+    presets.push({
+      id: "completed-manga",
+      label: "Completed manga",
+      filters: { status: "FINISHED" },
+    });
+  }
+  if (contentType === "MANHWA") {
+    presets.push({
+      id: "ongoing-manhwa",
+      label: "Ongoing manhwa",
+      filters: { status: "PUBLISHING" },
+    });
+  }
+  return presets;
+}
+
+export function filtersFromPreset(preset) {
+  return {
+    ...filtersFor(),
+    ...preset.filters,
+  };
+}
+
+export function activeFilterChips(filters, contentType) {
+  const chips = [];
+  filters.genre.forEach((value) => {
+    chips.push({ key: "genre", value, label: value });
+  });
+  filters.tag.forEach((value) => {
+    chips.push({ key: "tag", value, label: `Tag: ${value}` });
+  });
+  const scalarLabels = {
+    type: (value) => `Type: ${value}`,
+    season: (value) => `Season: ${formatSeason(value)}`,
+    min_score: (value) => `Score: ${value}+`,
+    min_year: (value) => `From: ${value}`,
+    max_year: (value) => `To: ${value}`,
+    status: (value) => `Status: ${formatStatus(value)}`,
+    min_episodes: (value) => `Episodes: ${value}+`,
+    max_episodes: (value) => `Episodes: up to ${value}`,
+    min_chapters: (value) => `Chapters: ${value}+`,
+    min_volumes: (value) => `Volumes: ${value}+`,
+  };
+  filterKeysFor(contentType).forEach((key) => {
+    if (
+      key !== "q"
+      && !Array.isArray(filters[key])
+      && filters[key]
+      && scalarLabels[key]
+    ) {
+      chips.push({ key, value: filters[key], label: scalarLabels[key](filters[key]) });
+    }
+  });
+  return chips;
+}
+
+export function filtersWithoutChip(filters, chip) {
+  const nextFilters = {
+    ...filters,
+    genre: [...filters.genre],
+    tag: [...filters.tag],
+  };
+  if (Array.isArray(nextFilters[chip.key])) {
+    nextFilters[chip.key] = nextFilters[chip.key].filter(
+      (value) => value !== chip.value,
+    );
+  } else if (Object.hasOwn(nextFilters, chip.key)) {
+    nextFilters[chip.key] = "";
+  }
+  return nextFilters;
+}
+
+export function validatedPage(value, totalPages) {
+  const page = Number(value);
+  return Number.isInteger(page) && page >= 1 && page <= totalPages
+    ? page
+    : null;
+}
+
+export function responsiveFilterPanelClasses(mobileOpen, moreOpen) {
+  return [
+    mobileOpen ? "grid" : "hidden",
+    moreOpen ? "sm:grid" : "sm:hidden",
+    "gap-3 sm:col-span-2 sm:grid-cols-2 lg:col-span-5 lg:grid-cols-5",
+  ].join(" ");
+}
+
+export function formatFreshness(timestamp, now = new Date()) {
+  if (!timestamp) return null;
+  const updated = new Date(timestamp);
+  if (Number.isNaN(updated.getTime())) return null;
+  const elapsedMinutes = Math.max(
+    0,
+    Math.floor((now.getTime() - updated.getTime()) / 60_000),
+  );
+  if (elapsedMinutes < 1) return "Catalogue updated just now";
+  if (elapsedMinutes < 60) {
+    return `Catalogue updated ${elapsedMinutes} minute${elapsedMinutes === 1 ? "" : "s"} ago`;
+  }
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) {
+    return `Catalogue updated ${elapsedHours} hour${elapsedHours === 1 ? "" : "s"} ago`;
+  }
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  return `Catalogue updated ${elapsedDays} day${elapsedDays === 1 ? "" : "s"} ago`;
 }
 
 export function visiblePageNumbers(currentPage, totalPages) {

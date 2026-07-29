@@ -32,6 +32,9 @@ FRONTEND_BUILD_DIR = PROJECT_ROOT / "static" / "react"
 MAX_PAGE_SIZE = 100
 MAX_TAG_OPTIONS = 100
 VALID_SEASONS = frozenset({"winter", "spring", "summer", "fall"})
+COMMON_SORTS = frozenset({"top_rated", "newest", "oldest", "title"})
+ANIME_SORTS = COMMON_SORTS | {"most_episodes"}
+PRINT_SORTS = COMMON_SORTS | {"most_chapters"}
 TYPE_ALIASES = {"TV SPECIAL": "SPECIAL"}
 CONTENT_TYPE_SCOPES = {
     "ANIME": frozenset({"ANIME"}),
@@ -82,12 +85,18 @@ class CommonFilters:
 @dataclass(frozen=True)
 class AnimeFilters:
     min_episodes: int | None
+    max_episodes: int | None
     anime_types: tuple[str, ...]
     seasons: tuple[str, ...]
 
     @property
     def active(self) -> bool:
-        return bool(self.min_episodes or self.anime_types or self.seasons)
+        return bool(
+            self.min_episodes
+            or self.max_episodes
+            or self.anime_types
+            or self.seasons
+        )
 
 
 @dataclass(frozen=True)
@@ -210,6 +219,23 @@ def _content_type_argument(*, default: str) -> str:
     return _normalized_content_type(value)
 
 
+def _sort_argument(content_types: frozenset[str] | set[str]) -> str:
+    """Validate sorting against the selected media scope."""
+    sort = request.args.get("sort", "top_rated").strip().lower()
+    normalized_types = frozenset(content_types)
+    if normalized_types == frozenset({"ANIME"}):
+        valid_sorts = ANIME_SORTS
+    elif normalized_types.issubset({"MANGA", "MANHWA"}):
+        valid_sorts = PRINT_SORTS
+    else:
+        valid_sorts = COMMON_SORTS
+    if sort not in valid_sorts:
+        raise ApiError(
+            "sort must be " + ", ".join(sorted(valid_sorts))
+        )
+    return sort
+
+
 def _normalized_status(value: str) -> str:
     """Normalize UI constants such as NOT_YET_PUBLISHED to provider labels."""
     return " ".join(value.replace("_", " ").split()).casefold()
@@ -244,10 +270,21 @@ def _anime_filter_values() -> AnimeFilters:
     invalid_seasons = set(seasons).difference(VALID_SEASONS)
     if invalid_seasons:
         raise ApiError("season must be winter, spring, summer, or fall")
+    min_episodes = _integer_argument(
+        "min_episodes", minimum=1, maximum=10000
+    )
+    max_episodes = _integer_argument(
+        "max_episodes", minimum=1, maximum=10000
+    )
+    if (
+        min_episodes is not None
+        and max_episodes is not None
+        and min_episodes > max_episodes
+    ):
+        raise ApiError("min_episodes cannot be greater than max_episodes")
     return AnimeFilters(
-        min_episodes=_integer_argument(
-            "min_episodes", minimum=1, maximum=10000
-        ),
+        min_episodes=min_episodes,
+        max_episodes=max_episodes,
         anime_types=tuple(
             _normalized_type(value) for value in _list_argument("type")
         ),
@@ -391,6 +428,10 @@ def _filtered_anime_statement(
         statement = statement.where(
             Anime.episodes >= anime_filters.min_episodes
         )
+    if anime_filters.max_episodes is not None:
+        statement = statement.where(
+            Anime.episodes <= anime_filters.max_episodes
+        )
     if anime_filters.anime_types:
         statement = statement.where(
             Anime.type.in_(anime_filters.anime_types)
@@ -460,6 +501,8 @@ def _catalogue_rows_subquery(
                 anime_rows.c.mal_id.label("mal_id"),
                 anime_rows.c.score.label("score"),
                 anime_rows.c.title.label("title"),
+                anime_rows.c.year.label("year"),
+                anime_rows.c.episodes.label("length"),
             )
         )
 
@@ -479,6 +522,8 @@ def _catalogue_rows_subquery(
                 manga_rows.c.mal_id.label("mal_id"),
                 manga_rows.c.score.label("score"),
                 manga_rows.c.title.label("title"),
+                manga_rows.c.publication_year.label("year"),
+                manga_rows.c.chapters.label("length"),
             )
         )
 
@@ -488,20 +533,95 @@ def _catalogue_rows_subquery(
     return combined.subquery("catalogue_rows")
 
 
-def _ordered_catalogue_rows(catalogue_rows):
-    return select(
+def _ordered_catalogue_rows(catalogue_rows, sort: str):
+    statement = select(
         catalogue_rows.c.content_type,
         catalogue_rows.c.record_id,
         catalogue_rows.c.mal_id,
         catalogue_rows.c.score,
         catalogue_rows.c.title,
-    ).order_by(
-        catalogue_rows.c.score.desc().nullslast(),
+    )
+    score_order = catalogue_rows.c.score.desc().nullslast()
+    title_order = (
         func.lower(catalogue_rows.c.title),
         catalogue_rows.c.title,
+    )
+    if sort == "newest":
+        primary_order = (
+            catalogue_rows.c.year.desc().nullslast(),
+            score_order,
+            *title_order,
+        )
+    elif sort == "oldest":
+        primary_order = (
+            catalogue_rows.c.year.asc().nullslast(),
+            score_order,
+            *title_order,
+        )
+    elif sort == "title":
+        primary_order = (*title_order, score_order)
+    elif sort in {"most_episodes", "most_chapters"}:
+        primary_order = (
+            catalogue_rows.c.length.desc().nullslast(),
+            score_order,
+            *title_order,
+        )
+    else:
+        primary_order = (score_order, *title_order)
+    return statement.order_by(
+        *primary_order,
         catalogue_rows.c.content_type,
         catalogue_rows.c.mal_id.nulls_last(),
         catalogue_rows.c.record_id,
+    )
+
+
+def _catalogue_freshness(
+    content_types: frozenset[str] | set[str],
+) -> str | None:
+    """Return a cached latest successful ETL timestamp for this scope."""
+    normalized_types = frozenset(content_types)
+
+    def load_freshness() -> str | None:
+        timestamps = []
+        if "ANIME" in normalized_types:
+            anime_timestamp = db.session.scalar(
+                select(func.max(Anime.last_jikan_sync)).where(
+                    Anime.is_adult.is_(False)
+                )
+            )
+            if anime_timestamp is not None:
+                timestamps.append(anime_timestamp)
+        if normalized_types.intersection({"MANGA", "MANHWA"}):
+            manga_timestamp = db.session.scalar(
+                select(func.max(Manga.last_jikan_sync)).where(
+                    Manga.is_adult.is_(False),
+                    Manga.content_type.in_(
+                        sorted(
+                            normalized_types.intersection(
+                                {"MANGA", "MANHWA"}
+                            )
+                        )
+                    ),
+                )
+            )
+            if manga_timestamp is not None:
+                timestamps.append(manga_timestamp)
+        if not timestamps:
+            return None
+
+        def comparable(timestamp: datetime) -> datetime:
+            return (
+                timestamp.replace(tzinfo=timezone.utc)
+                if timestamp.tzinfo is None
+                else timestamp.astimezone(timezone.utc)
+            )
+
+        return max(timestamps, key=comparable).isoformat()
+
+    return response_cache.get_or_create(
+        ("catalogue-freshness", tuple(sorted(normalized_types))),
+        load_freshness,
     )
 
 
@@ -543,6 +663,27 @@ def _serialize_catalogue_rows(rows) -> list[dict[str, Any]]:
     return items
 
 
+def _ordered_anime_statement(statement, sort: str):
+    """Apply the same deterministic sort contract to the anime alias route."""
+    score_order = Anime.score.desc().nullslast()
+    title_order = (func.lower(Anime.title), Anime.title)
+    if sort == "newest":
+        order = (Anime.year.desc().nullslast(), score_order, *title_order)
+    elif sort == "oldest":
+        order = (Anime.year.asc().nullslast(), score_order, *title_order)
+    elif sort == "title":
+        order = (*title_order, score_order)
+    elif sort == "most_episodes":
+        order = (
+            Anime.episodes.desc().nullslast(),
+            score_order,
+            *title_order,
+        )
+    else:
+        order = (score_order, *title_order)
+    return statement.order_by(*order, Anime.mal_id.nulls_last(), Anime.animeID)
+
+
 def _list_catalogue(content_types: frozenset[str] | set[str]):
     page = _integer_argument("page", minimum=1) or 1
     per_page = (
@@ -551,6 +692,7 @@ def _list_catalogue(content_types: frozenset[str] | set[str]):
         )
         or 24
     )
+    sort = _sort_argument(content_types)
     catalogue_rows = _catalogue_rows_subquery(content_types)
     if catalogue_rows is None:
         total = 0
@@ -560,7 +702,7 @@ def _list_catalogue(content_types: frozenset[str] | set[str]):
             "catalogue-total",
             tuple(sorted(content_types)),
             _request_filter_signature(
-                exclude={"content_type", "page", "per_page"}
+                exclude={"content_type", "page", "per_page", "sort"}
             ),
         )
         total = _cached_scalar_count(
@@ -568,7 +710,7 @@ def _list_catalogue(content_types: frozenset[str] | set[str]):
             select(func.count()).select_from(catalogue_rows),
         )
         rows = db.session.execute(
-            _ordered_catalogue_rows(catalogue_rows)
+            _ordered_catalogue_rows(catalogue_rows, sort)
             .offset((page - 1) * per_page)
             .limit(per_page)
         ).all()
@@ -582,6 +724,7 @@ def _list_catalogue(content_types: frozenset[str] | set[str]):
                 "total": total,
                 "pages": (total + per_page - 1) // per_page,
             },
+            "updated_at": _catalogue_freshness(content_types),
         }
     )
 
@@ -628,19 +771,22 @@ def _catalogue_detail_response(content_type: str, mal_id: int):
 
 @app.get(f"{API_PREFIX}/anime")
 def list_anime():
-    """Search and filter anime with score-sorted pagination."""
+    """Search, filter, and deterministically sort anime."""
     page = _integer_argument("page", minimum=1) or 1
     per_page = _integer_argument("per_page", minimum=1, maximum=MAX_PAGE_SIZE) or 24
+    sort = _sort_argument(CONTENT_TYPE_SCOPES["ANIME"])
     statement = _filtered_anime_statement()
     total = _cached_scalar_count(
         (
             "anime-total",
-            _request_filter_signature(exclude={"page", "per_page"}),
+            _request_filter_signature(exclude={"page", "per_page", "sort"}),
         ),
         select(func.count()).select_from(statement.order_by(None).subquery()),
     )
     items = db.session.scalars(
-        statement.order_by(Anime.score.desc().nullslast(), Anime.title).offset((page - 1) * per_page).limit(per_page)
+        _ordered_anime_statement(statement, sort)
+        .offset((page - 1) * per_page)
+        .limit(per_page)
     ).all()
     return jsonify(
         {
@@ -651,6 +797,9 @@ def list_anime():
                 "total": total,
                 "pages": (total + per_page - 1) // per_page,
             },
+            "updated_at": _catalogue_freshness(
+                CONTENT_TYPE_SCOPES["ANIME"]
+            ),
         }
     )
 
