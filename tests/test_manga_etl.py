@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from sqlalchemy.exc import OperationalError
+
 # Importing the Flask module normally applies the PostgreSQL schema eagerly.
 # These tests mock every persistence boundary, so suppress that import-time
 # migration and use an isolated in-memory URI rather than touching a real DB.
@@ -321,7 +323,6 @@ class MangaPageSyncTests(unittest.TestCase):
             raise rate_limit_error
 
         with (
-            patch("backend.jobs.manga_etl.ensure_anime_schema"),
             patch("backend.jobs.manga_etl._next_page", return_value=12),
             patch("backend.jobs.manga_etl._record_page_error") as record_error,
         ):
@@ -348,7 +349,6 @@ class MangaPageSyncTests(unittest.TestCase):
             )
 
         with (
-            patch("backend.jobs.manga_etl.ensure_anime_schema"),
             patch("backend.jobs.manga_etl._next_page", return_value=8),
             patch("backend.jobs.manga_etl._record_page_error") as record_error,
         ):
@@ -368,6 +368,53 @@ class MangaPageSyncTests(unittest.TestCase):
             all(call.args[1] == 8 for call in record_error.call_args_list)
         )
 
+    def test_database_deadlock_retries_the_same_manga_page(self):
+        page = JikanMangaPage(
+            entries=[{"mal_id": 1, "type": "Manga", "title": "Example"}],
+            page=10,
+            has_next_page=False,
+            last_visible_page=10,
+        )
+        deadlock = OperationalError(
+            "SELECT genre",
+            {},
+            SimpleNamespace(pgcode="40P01"),
+        )
+        fetched_pages = []
+
+        def fetch_page(*, manga_type, page):
+            fetched_pages.append((manga_type, page))
+            return page_result
+
+        page_result = page
+        with (
+            patch("backend.jobs.manga_etl.db") as mock_db,
+            patch("backend.jobs.manga_etl._next_page", return_value=10),
+            patch(
+                "backend.jobs.manga_etl._apply_manga_page",
+                side_effect=[deadlock, MangaPageApplyResult(saved=1, inserted=1)],
+            ),
+            patch("backend.jobs.manga_etl._record_page_error") as record_error,
+            patch("backend.jobs.manga_etl.sleep") as retry_sleep,
+        ):
+            result = _sync_manga_type(
+                provider_type="manga",
+                state_key=MANGA_STATE_KEYS["manga"],
+                max_pages=2,
+                fetch_page=fetch_page,
+            )
+
+        self.assertEqual(fetched_pages, [("manga", 10), ("manga", 10)])
+        self.assertEqual(result.pages_failed, 1)
+        self.assertEqual(result.pages_completed, 1)
+        self.assertEqual(result.inserted, 1)
+        self.assertEqual(result.next_page, 1)
+        mock_db.session.rollback.assert_called_once()
+        record_error.assert_called_once_with(
+            MANGA_STATE_KEYS["manga"], 10, deadlock
+        )
+        retry_sleep.assert_called_once_with(1)
+
     def test_provider_page_cap_wraps_cursor_for_the_next_refresh_cycle(self):
         capped_page = JikanMangaPage(
             entries=[{"mal_id": 1, "type": "Manga", "title": "Example"}],
@@ -376,7 +423,6 @@ class MangaPageSyncTests(unittest.TestCase):
             last_visible_page=1001,
         )
         with (
-            patch("backend.jobs.manga_etl.ensure_anime_schema"),
             patch("backend.jobs.manga_etl._next_page", return_value=1000),
             patch(
                 "backend.jobs.manga_etl._apply_manga_page",
@@ -447,7 +493,6 @@ class MangaRefreshTests(unittest.TestCase):
             }
 
         with (
-            patch("backend.jobs.manga_etl.ensure_anime_schema"),
             patch("backend.jobs.manga_etl.db") as mock_db,
         ):
             mock_db.session.scalars.side_effect = [records, []]

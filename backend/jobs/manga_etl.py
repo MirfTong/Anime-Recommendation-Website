@@ -8,15 +8,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from time import sleep
 from typing import Any
 from urllib.error import HTTPError
 
 from sqlalchemy import delete, func, select, text
-from sqlalchemy.orm import selectinload
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import lazyload, selectinload
 
 from backend.app import app
 from backend.models import Genre, JikanSyncState, Manga, MangaGenre, db
-from backend.schema import ensure_anime_schema
 from backend.services.jikan_client import (
     JikanMangaPage,
     JikanTemporaryError,
@@ -38,6 +39,7 @@ DEFAULT_MANGA_MAX_PAGES = 40
 DEFAULT_MANGA_REFRESH_LIMIT = 1000
 MAX_CONSECUTIVE_FAILURES = 3
 PROVIDER_MAX_PAGE = 1000
+DEADLOCK_SQLSTATE = "40P01"
 
 
 @dataclass
@@ -324,6 +326,11 @@ def _record_page_error(key: str, page: int, error: BaseException) -> None:
         db.session.commit()
 
 
+def _is_database_deadlock(error: OperationalError) -> bool:
+    """Identify PostgreSQL's retryable deadlock error without masking others."""
+    return getattr(error.orig, "pgcode", None) == DEADLOCK_SQLSTATE
+
+
 def _apply_manga_page(
     page_result: JikanMangaPage,
     *,
@@ -363,11 +370,20 @@ def _apply_manga_page(
                 select(Manga)
                 .where(Manga.mal_id.in_(ids))
                 .options(
+                    lazyload("*"),
                     selectinload(Manga.genre_links).selectinload(MangaGenre.genre)
                 )
             )
         }
-        genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
+        # Genre's inverse Anime/Manga relationships are not needed while
+        # linking this page. Keep them lazy so a small Manga import never
+        # triggers a catalogue-wide Anime relationship query.
+        genres = {
+            genre.name: genre
+            for genre in db.session.scalars(
+                select(Genre).options(lazyload("*"))
+            )
+        }
         result = MangaPageApplyResult(
             skipped=len(page_result.entries) - len(data_by_mal_id)
         )
@@ -424,8 +440,6 @@ def _sync_manga_type(
     if max_consecutive_failures <= 0:
         raise ValueError("max_consecutive_failures must be positive")
 
-    with app.app_context():
-        ensure_anime_schema()
     page = _next_page(state_key)
     result = MangaTypeSyncResult(next_page=page)
     consecutive_failures = 0
@@ -470,11 +484,27 @@ def _sync_manga_type(
         ):
             result.provider_page_limit_exceeded = True
 
-        applied = _apply_manga_page(
-            fetched,
-            provider_type=provider_type,
-            state_key=state_key,
-        )
+        try:
+            applied = _apply_manga_page(
+                fetched,
+                provider_type=provider_type,
+                state_key=state_key,
+            )
+        except OperationalError as error:
+            if not _is_database_deadlock(error):
+                raise
+            # The page commit did not complete. Leave its cursor in place so
+            # this bounded retry cannot skip catalogue records.
+            with app.app_context():
+                db.session.rollback()
+            _record_page_error(state_key, page, error)
+            result.pages_failed += 1
+            result.next_page = page
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                break
+            sleep(consecutive_failures)
+            continue
         result.pages_completed += 1
         result.inserted += applied.inserted
         result.updated += applied.updated
@@ -565,11 +595,11 @@ def refresh_manga_catalogue(
         raise ValueError("batch_size must be positive")
 
     with app.app_context():
-        ensure_anime_schema()
         manga_rows = list(
             db.session.scalars(
                 select(Manga)
                 .options(
+                    lazyload("*"),
                     selectinload(Manga.genre_links).selectinload(MangaGenre.genre)
                 )
                 .order_by(
@@ -579,7 +609,12 @@ def refresh_manga_catalogue(
                 .limit(limit)
             )
         )
-        genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
+        genres = {
+            genre.name: genre
+            for genre in db.session.scalars(
+                select(Genre).options(lazyload("*"))
+            )
+        }
         result = MangaRefreshResult(selected=len(manga_rows))
 
         for attempted, manga in enumerate(manga_rows, start=1):
@@ -617,7 +652,6 @@ def refresh_manga_catalogue(
 def remove_adult_manga() -> int:
     """Delete stored Manga or Manhwa marked Hentai or Erotica."""
     with app.app_context():
-        ensure_anime_schema()
         manga_ids = list(
             db.session.scalars(
                 text(
