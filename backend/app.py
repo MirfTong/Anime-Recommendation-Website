@@ -6,14 +6,16 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
-from sqlalchemy import exists, func, literal, or_, select, union_all
+from sqlalchemy import func, literal, or_, select, union_all
 from sqlalchemy.orm import selectinload
 
-from backend.models import Anime, AnimeGenre, Genre, Manga, MangaGenre, db
+from backend.models import Anime, CatalogueFacet, Genre, Manga, db
 from backend.schema import ensure_anime_schema
 
 
@@ -37,7 +39,34 @@ CONTENT_TYPE_SCOPES = {
     "MANHWA": frozenset({"MANHWA"}),
     "ALL": frozenset({"ANIME", "MANGA", "MANHWA"}),
 }
-ADULT_GENRE_NAMES = ("erotica", "hentai")
+CACHE_TTL_SECONDS = 300
+
+
+class TtlCache:
+    """Small process-local cache for repeatable catalogue metadata queries."""
+
+    def __init__(self) -> None:
+        self._values: dict[tuple[Any, ...], tuple[float, Any]] = {}
+        self._lock = Lock()
+
+    def get_or_create(self, key: tuple[Any, ...], factory):
+        now = monotonic()
+        with self._lock:
+            cached = self._values.get(key)
+            if cached is not None and cached[0] > now:
+                return cached[1]
+
+        value = factory()
+        with self._lock:
+            self._values[key] = (now + CACHE_TTL_SECONDS, value)
+        return value
+
+    def clear(self) -> None:
+        with self._lock:
+            self._values.clear()
+
+
+response_cache = TtlCache()
 
 
 @dataclass(frozen=True)
@@ -133,6 +162,26 @@ def _list_argument(name: str) -> list[str]:
     for raw_value in request.args.getlist(name):
         values.extend(value.strip() for value in raw_value.split(",") if value.strip())
     return list(dict.fromkeys(values))
+
+
+def _request_filter_signature(*, exclude: set[str]) -> tuple[Any, ...]:
+    return tuple(
+        sorted(
+            (
+                key,
+                tuple(request.args.getlist(key)),
+            )
+            for key in request.args
+            if key not in exclude
+        )
+    )
+
+
+def _cached_scalar_count(key: tuple[Any, ...], statement) -> int:
+    return response_cache.get_or_create(
+        key,
+        lambda: int(db.session.scalar(statement) or 0),
+    )
 
 
 def _normalized_type(value: str) -> str:
@@ -275,37 +324,12 @@ def _serialize_manga(manga: Manga, *, detailed: bool = False) -> dict[str, Any]:
 
 
 def _public_statement(model):
-    """Return a model query that excludes every stored adult classification."""
-    legacy_genre = func.unnest(model.legacy_genres).column_valued(
-        f"{model.__tablename__}_legacy_genre"
-    )
-    detailed_genre = func.unnest(model.genres_detailed).column_valued(
-        f"{model.__tablename__}_detailed_genre"
-    )
-    statement = (
+    """Return the indexed, ETL-maintained public catalogue query."""
+    return (
         select(model)
-        .where(
-            ~model.genre_entries.any(
-                func.lower(func.trim(Genre.name)).in_(ADULT_GENRE_NAMES)
-            ),
-            ~exists(
-                select(1).where(
-                    func.lower(func.trim(legacy_genre)).in_(
-                        ADULT_GENRE_NAMES
-                    )
-                )
-            ),
-            ~exists(
-                select(1).where(
-                    func.lower(func.trim(detailed_genre)).in_(
-                        ADULT_GENRE_NAMES
-                    )
-                )
-            ),
-        )
+        .where(model.is_adult.is_(False))
         .options(selectinload(model.genre_entries))
     )
-    return statement
 
 
 def _anime_statement():
@@ -533,11 +557,16 @@ def _list_catalogue(content_types: frozenset[str] | set[str]):
         total = 0
         items = []
     else:
-        total = (
-            db.session.scalar(
-                select(func.count()).select_from(catalogue_rows)
-            )
-            or 0
+        count_key = (
+            "catalogue-total",
+            tuple(sorted(content_types)),
+            _request_filter_signature(
+                exclude={"content_type", "page", "per_page"}
+            ),
+        )
+        total = _cached_scalar_count(
+            count_key,
+            select(func.count()).select_from(catalogue_rows),
         )
         rows = db.session.execute(
             _ordered_catalogue_rows(catalogue_rows)
@@ -604,7 +633,13 @@ def list_anime():
     page = _integer_argument("page", minimum=1) or 1
     per_page = _integer_argument("per_page", minimum=1, maximum=MAX_PAGE_SIZE) or 24
     statement = _filtered_anime_statement()
-    total = db.session.scalar(select(func.count()).select_from(statement.order_by(None).subquery()))
+    total = _cached_scalar_count(
+        (
+            "anime-total",
+            _request_filter_signature(exclude={"page", "per_page"}),
+        ),
+        select(func.count()).select_from(statement.order_by(None).subquery()),
+    )
     items = db.session.scalars(
         statement.order_by(Anime.score.desc(), Anime.title).offset((page - 1) * per_page).limit(per_page)
     ).all()
@@ -614,8 +649,8 @@ def list_anime():
             "pagination": {
                 "page": page,
                 "per_page": per_page,
-                "total": total or 0,
-                "pages": ((total or 0) + per_page - 1) // per_page,
+                "total": total,
+                "pages": (total + per_page - 1) // per_page,
             },
         }
     )
@@ -646,7 +681,10 @@ def popular_current_season():
         Anime.season == season,
     )
     public_season = _anime_statement().where(*filters).order_by(None).subquery()
-    total = db.session.scalar(select(func.count()).select_from(public_season))
+    total = _cached_scalar_count(
+        ("seasonal-total", year, season),
+        select(func.count()).select_from(public_season),
+    )
     anime = db.session.scalars(
         _anime_statement()
         .where(*filters)
@@ -662,8 +700,8 @@ def popular_current_season():
             "pagination": {
                 "page": page,
                 "per_page": limit,
-                "total": total or 0,
-                "pages": ((total or 0) + limit - 1) // limit,
+                "total": total,
+                "pages": (total + limit - 1) // limit,
             },
         }
     )
@@ -730,104 +768,65 @@ def manhwa_detail(mal_id: int):
     return _catalogue_detail_response("MANHWA", mal_id)
 
 
+def _load_genre_names(
+    content_types: frozenset[str],
+) -> tuple[str, ...]:
+    return tuple(
+        db.session.scalars(
+            select(CatalogueFacet.value)
+            .where(
+                CatalogueFacet.content_type.in_(sorted(content_types)),
+                CatalogueFacet.facet_type == "genre",
+            )
+            .distinct()
+            .order_by(CatalogueFacet.value)
+        ).all()
+    )
+
+
+def _load_detailed_tag_names(
+    content_types: frozenset[str],
+) -> tuple[str, ...]:
+    return tuple(
+        db.session.scalars(
+            select(CatalogueFacet.value)
+            .where(
+                CatalogueFacet.content_type.in_(sorted(content_types)),
+                CatalogueFacet.facet_type == "tag",
+            )
+            .distinct()
+            .order_by(CatalogueFacet.value)
+        ).all()
+    )
+
+
 @app.get(f"{API_PREFIX}/genres")
 def list_genres():
     scope = _content_type_argument(default="ANIME")
     content_types = CONTENT_TYPE_SCOPES[scope]
-    branches = []
-
-    if "ANIME" in content_types:
-        public_anime = (
-            _anime_statement().order_by(None).subquery("public_anime_genres")
-        )
-        branches.append(
-            select(Genre.name.label("name"))
-            .join(AnimeGenre, AnimeGenre.genre_id == Genre.id)
-            .join(
-                public_anime,
-                public_anime.c.anime_id == AnimeGenre.anime_id,
-            )
-        )
-
-    manga_content_types = content_types.intersection({"MANGA", "MANHWA"})
-    if manga_content_types:
-        public_manga = (
-            _manga_statement(manga_content_types)
-            .order_by(None)
-            .subquery("public_manga_genres")
-        )
-        branches.append(
-            select(Genre.name.label("name"))
-            .join(MangaGenre, MangaGenre.genre_id == Genre.id)
-            .join(
-                public_manga,
-                public_manga.c.manga_id == MangaGenre.manga_id,
-            )
-        )
-
-    names = branches[0] if len(branches) == 1 else union_all(*branches)
-    available_genres = names.subquery("available_genres")
-    normalized_name = func.lower(func.trim(available_genres.c.name))
-    genres = db.session.scalars(
-        select(available_genres.c.name)
-        .where(~normalized_name.in_(ADULT_GENRE_NAMES))
-        .distinct()
-        .order_by(available_genres.c.name)
-    ).all()
+    genres = response_cache.get_or_create(
+        ("genres", tuple(sorted(content_types))),
+        lambda: _load_genre_names(content_types),
+    )
     return jsonify({"items": genres})
 
 
 @app.get(f"{API_PREFIX}/tags")
 def list_detailed_tags():
-    """Search detailed genre tags without sending thousands of options to the UI."""
+    """Search one cached detailed-tag catalogue for the selected content."""
     scope = _content_type_argument(default="ANIME")
     content_types = CONTENT_TYPE_SCOPES[scope]
-    query = request.args.get("q", "").strip()
+    query = request.args.get("q", "").strip().casefold()
     limit = _integer_argument("limit", minimum=1, maximum=MAX_TAG_OPTIONS) or 50
-    branches = []
-
-    if "ANIME" in content_types:
-        public_anime = (
-            _anime_statement().order_by(None).subquery("public_anime_tags")
-        )
-        branches.append(
-            select(
-                func.unnest(public_anime.c.genres_detailed).label("tag")
-            )
-        )
-
-    manga_content_types = content_types.intersection({"MANGA", "MANHWA"})
-    if manga_content_types:
-        public_manga = (
-            _manga_statement(manga_content_types)
-            .order_by(None)
-            .subquery("public_manga_tags")
-        )
-        branches.append(
-            select(
-                func.unnest(public_manga.c.genres_detailed).label("tag")
-            )
-        )
-
-    tag_names = branches[0] if len(branches) == 1 else union_all(*branches)
-    detailed_tags = tag_names.subquery("detailed_tags")
-    statement = select(detailed_tags.c.tag).where(detailed_tags.c.tag.is_not(None))
-    statement = statement.where(
-        ~func.lower(func.trim(detailed_tags.c.tag)).in_(ADULT_GENRE_NAMES)
+    all_tags = response_cache.get_or_create(
+        ("tags", tuple(sorted(content_types))),
+        lambda: _load_detailed_tag_names(content_types),
     )
     if query:
-        statement = statement.where(
-            detailed_tags.c.tag.ilike(
-                _escaped_search_pattern(query), escape="\\"
-            )
+        all_tags = tuple(
+            tag for tag in all_tags if query in tag.casefold()
         )
-    tags = db.session.scalars(
-        statement
-        .distinct()
-        .order_by(detailed_tags.c.tag)
-        .limit(limit)
-    ).all()
-    return jsonify({"items": tags})
+    return jsonify({"items": all_tags[:limit]})
 
 
 @app.get("/")

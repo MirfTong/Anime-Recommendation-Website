@@ -28,7 +28,7 @@ from backend.jobs.manga_etl import (
     sync_manga_catalogue,
 )
 from backend.models import Anime, AnimeGenre, Genre, JikanSyncState, db
-from backend.schema import ensure_anime_schema
+from backend.schema import ensure_anime_schema, refresh_catalogue_facets
 from backend.services.jikan_client import (
     JikanAnimePage,
     JikanSeasonPage,
@@ -299,6 +299,7 @@ def _jpg_images(data: dict[str, Any]) -> dict[str, Any]:
 
 def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) -> None:
     """Map one Jikan anime object onto an existing catalogue row."""
+    anime.is_adult = _is_hentai(data)
     anime.title = data.get("title") or anime.title
     anime.alternative_title = (
         data.get("title_english")
@@ -378,6 +379,7 @@ def _new_anime(data: dict[str, Any]) -> Anime:
         season=season,
         year=data.get("year"),
         score=_valid_score(data.get("score")),
+        is_adult=_is_hentai(data),
         episodes=data.get("episodes"),
         mal_url=data.get("url") or f"https://myanimelist.net/anime/{mal_id}",
         sequel=False,
@@ -399,7 +401,7 @@ def remove_hentai_anime() -> int:
             db.session.scalars(
                 text(
                     "SELECT DISTINCT anime.anime_id FROM anime "
-                    "WHERE EXISTS ("
+                    "WHERE anime.is_adult = TRUE OR EXISTS ("
                     "SELECT 1 FROM anime_genre "
                     "JOIN genre ON genre.id = anime_genre.genre_id "
                     "WHERE anime_genre.anime_id = anime.anime_id "
@@ -1194,6 +1196,14 @@ def get_season_coverage() -> SeasonCoverage:
     )
 
 
+def _report_catalogue_facets(total: int) -> None:
+    print(f"Catalogue facets: precomputed={total}.")
+    _append_step_summary(
+        "Catalogue facet cache",
+        [("Precomputed genre/tag options", total)],
+    )
+
+
 def _report_season_coverage(coverage: SeasonCoverage) -> None:
     print(
         "TV season coverage: "
@@ -1263,6 +1273,10 @@ def run_scheduled_sync(
         + catalogue_result.removed_hentai
     )
     _report_hentai_cleanup(removed_hentai)
+
+    with app.app_context():
+        facet_count = refresh_catalogue_facets()
+    _report_catalogue_facets(facet_count)
 
     coverage = get_season_coverage()
     _report_season_coverage(coverage)

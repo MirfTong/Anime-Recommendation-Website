@@ -206,6 +206,7 @@ def _update_manga(
     *,
     expected_content_type: str,
 ) -> None:
+    manga.is_adult = is_adult_content(data)
     resolved_content_type = _content_type(
         data.get("type"), fallback=expected_content_type
     )
@@ -283,6 +284,7 @@ def _new_manga(
         publication_year=None,
         status=None,
         score=None,
+        is_adult=is_adult_content(data),
         chapters=None,
         volumes=None,
         mal_url=data.get("url") or f"https://myanimelist.net/manga/{mal_id}",
@@ -620,7 +622,7 @@ def remove_adult_manga() -> int:
             db.session.scalars(
                 text(
                     "SELECT DISTINCT manga.manga_id FROM manga "
-                    "WHERE EXISTS ("
+                    "WHERE manga.is_adult = TRUE OR EXISTS ("
                     "SELECT 1 FROM manga_genre "
                     "JOIN genre ON genre.id = manga_genre.genre_id "
                     "WHERE manga_genre.manga_id = manga.manga_id "

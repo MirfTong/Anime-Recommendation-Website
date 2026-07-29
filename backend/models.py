@@ -18,6 +18,7 @@ class Anime(db.Model):
     __tablename__ = "anime"
     __table_args__ = (
         Index("ix_anime_score_year", "score", "year"),
+        Index("ix_anime_public_score", "is_adult", "score"),
         Index("ix_anime_type_score", "type", "score"),
         Index("ix_anime_season_score", "season", "score"),
         Index(
@@ -52,6 +53,9 @@ class Anime(db.Model):
     # Airing and unreleased anime may not have these values yet.
     year: Mapped[int | None] = mapped_column(index=True)
     score: Mapped[float | None] = mapped_column(index=True)
+    is_adult: Mapped[bool] = mapped_column(
+        default=False, server_default="false", index=True
+    )
     episodes: Mapped[int | None] = mapped_column(index=True)
     last_jikan_sync: Mapped[datetime | None] = mapped_column(index=True)
     last_season_attempt: Mapped[datetime | None] = mapped_column(index=True)
@@ -124,6 +128,12 @@ class Manga(db.Model):
             name="ck_manga_content_type",
         ),
         Index("ix_manga_content_score", "content_type", "score"),
+        Index(
+            "ix_manga_content_public_score",
+            "content_type",
+            "is_adult",
+            "score",
+        ),
         Index("ix_manga_content_year", "content_type", "publication_year"),
         Index("ix_manga_content_chapters", "content_type", "chapters"),
         Index("ix_manga_content_volumes", "content_type", "volumes"),
@@ -157,6 +167,9 @@ class Manga(db.Model):
     publication_year: Mapped[int | None] = mapped_column(index=True)
     status: Mapped[str | None] = mapped_column(String(50), index=True)
     score: Mapped[float | None] = mapped_column(index=True)
+    is_adult: Mapped[bool] = mapped_column(
+        default=False, server_default="false", index=True
+    )
     chapters: Mapped[int | None] = mapped_column(index=True)
     volumes: Mapped[int | None] = mapped_column(index=True)
     mal_url: Mapped[str]
@@ -203,6 +216,26 @@ class MangaGenre(db.Model):
 
     manga: Mapped[Manga] = relationship(back_populates="genre_links")
     genre: Mapped[Genre] = relationship(back_populates="manga_links")
+
+
+class CatalogueFacet(db.Model):
+    """Precomputed genre and tag options for one public content type."""
+
+    __tablename__ = "catalogue_facet"
+    __table_args__ = (
+        CheckConstraint(
+            "content_type IN ('ANIME', 'MANGA', 'MANHWA')",
+            name="ck_catalogue_facet_content_type",
+        ),
+        CheckConstraint(
+            "facet_type IN ('genre', 'tag')",
+            name="ck_catalogue_facet_type",
+        ),
+    )
+
+    content_type: Mapped[str] = mapped_column(String(10), primary_key=True)
+    facet_type: Mapped[str] = mapped_column(String(10), primary_key=True)
+    value: Mapped[str] = mapped_column(String(255), primary_key=True)
 
 
 class JikanSyncState(db.Model):

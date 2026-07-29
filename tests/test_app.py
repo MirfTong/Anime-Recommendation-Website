@@ -11,14 +11,17 @@ from backend.app import (
     _normalized_content_type,
     _normalized_status,
     _normalized_type,
+    _request_filter_signature,
     _serialize_manga,
     app,
+    response_cache,
 )
 from backend.models import Anime, Manga, db
 
 
 class AppTests(unittest.TestCase):
     def setUp(self):
+        response_cache.clear()
         self.client = app.test_client()
 
     def test_anime_list_returns_paginated_json(self):
@@ -79,15 +82,14 @@ class AppTests(unittest.TestCase):
             )
         )
 
-    def test_public_query_checks_every_stored_genre_representation(self):
+    def test_public_anime_query_uses_the_indexed_adult_flag(self):
         sql = str(_anime_statement()).lower()
 
-        self.assertIn("genre.name", sql)
-        self.assertIn("unnest(anime.genres)", sql)
-        self.assertIn("unnest(anime.genres_detailed)", sql)
-        self.assertGreaterEqual(sql.count("lower(trim("), 3)
+        self.assertIn("anime.is_adult is false", sql)
+        self.assertNotIn("unnest(", sql)
+        self.assertNotIn("genre.name", sql)
 
-    def test_manga_public_query_excludes_every_adult_representation(self):
+    def test_manga_public_query_uses_the_indexed_adult_flag(self):
         sql = str(
             _manga_statement({"MANGA", "MANHWA"}).compile(
                 dialect=postgresql.dialect(),
@@ -95,12 +97,43 @@ class AppTests(unittest.TestCase):
             )
         ).lower()
 
-        self.assertIn("genre.name", sql)
-        self.assertIn("unnest(manga.genres)", sql)
-        self.assertIn("unnest(manga.genres_detailed)", sql)
-        self.assertIn("erotica", sql)
-        self.assertIn("hentai", sql)
-        self.assertGreaterEqual(sql.count("lower(trim("), 3)
+        self.assertIn("manga.is_adult is false", sql)
+        self.assertNotIn("unnest(", sql)
+        self.assertNotIn("genre.name", sql)
+
+    def test_pagination_pages_share_one_total_count_cache_key(self):
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ANIME&page=1&per_page=24"
+            "&genre=Action"
+        ):
+            first_page = _request_filter_signature(
+                exclude={"content_type", "page", "per_page"}
+            )
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ANIME&page=7&per_page=48"
+            "&genre=Action"
+        ):
+            later_page = _request_filter_signature(
+                exclude={"content_type", "page", "per_page"}
+            )
+
+        self.assertEqual(first_page, later_page)
+
+    def test_tag_searches_reuse_one_precomputed_scope(self):
+        with patch(
+            "backend.app._load_detailed_tag_names",
+            return_value=("action", "school", "space"),
+        ) as load_tags:
+            action = self.client.get(
+                "/api/v1/tags?q=act&content_type=ANIME"
+            )
+            school = self.client.get(
+                "/api/v1/tags?q=school&content_type=ANIME"
+            )
+
+        self.assertEqual(action.get_json()["items"], ["action"])
+        self.assertEqual(school.get_json()["items"], ["school"])
+        load_tags.assert_called_once()
 
     def test_manga_serializer_exposes_print_metadata(self):
         manga = Manga(

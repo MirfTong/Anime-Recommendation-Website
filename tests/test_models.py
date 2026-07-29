@@ -3,7 +3,7 @@ from pathlib import Path
 
 from sqlalchemy import CheckConstraint
 
-from backend.models import Genre, Manga, MangaGenre
+from backend.models import Anime, CatalogueFacet, Genre, Manga, MangaGenre
 
 
 SCHEMA_SOURCE = (
@@ -27,6 +27,7 @@ class MangaSchemaTests(unittest.TestCase):
                 "publication_year",
                 "status",
                 "score",
+                "is_adult",
                 "chapters",
                 "volumes",
                 "mal_url",
@@ -74,6 +75,7 @@ class MangaSchemaTests(unittest.TestCase):
         self.assertTrue(
             {
                 "ix_manga_content_score",
+                "ix_manga_content_public_score",
                 "ix_manga_content_year",
                 "ix_manga_content_chapters",
                 "ix_manga_content_volumes",
@@ -84,8 +86,34 @@ class MangaSchemaTests(unittest.TestCase):
             }.issubset(index_names)
         )
         schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("CREATE INDEX IF NOT EXISTS ix_anime_is_adult", schema_source)
+        self.assertIn("CREATE INDEX IF NOT EXISTS ix_manga_is_adult", schema_source)
         self.assertIn("ix_manga_content_status_normalized_score", schema_source)
         self.assertIn("CREATE EXTENSION IF NOT EXISTS pg_trgm", schema_source)
+
+    def test_public_catalogue_flags_are_indexed_for_both_media_tables(self):
+        self.assertFalse(Anime.__table__.c.is_adult.nullable)
+        self.assertFalse(Manga.__table__.c.is_adult.nullable)
+        self.assertIn(
+            "ix_anime_public_score",
+            {index.name for index in Anime.__table__.indexes},
+        )
+        self.assertIn(
+            "ix_manga_content_public_score",
+            {index.name for index in Manga.__table__.indexes},
+        )
+
+    def test_catalogue_facets_have_a_composite_lookup_key(self):
+        self.assertEqual(
+            {
+                column.name
+                for column in CatalogueFacet.__table__.primary_key.columns
+            },
+            {"content_type", "facet_type", "value"},
+        )
+        schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("refresh_catalogue_facets", schema_source)
+        self.assertIn("INSERT INTO catalogue_facet", schema_source)
 
 
 if __name__ == "__main__":
