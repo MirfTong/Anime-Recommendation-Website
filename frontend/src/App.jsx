@@ -8,6 +8,7 @@ import {
   itemContentType,
   itemMetadata,
   queryString,
+  usesTopRatedAnimeHomepage,
   visiblePageNumbers,
 } from "./catalogue.js";
 
@@ -152,6 +153,7 @@ export default function App() {
   const [contentType, setContentType] = useState("ANIME");
   const [filters, setFilters] = useState(() => filtersFor("ANIME"));
   const [appliedFilters, setAppliedFilters] = useState(TOP_RATED_FILTERS);
+  const [allTypesExplicitlySelected, setAllTypesExplicitlySelected] = useState(false);
   const [genres, setGenres] = useState([]);
   const [tagOptions, setTagOptions] = useState([]);
   const [tagQuery, setTagQuery] = useState("");
@@ -305,7 +307,11 @@ export default function App() {
       genre: [...filters.genre],
       tag: [...filters.tag],
     };
-    const returnsHome = contentType === "ANIME" && !hasSelections;
+    const returnsHome = usesTopRatedAnimeHomepage(
+      contentType,
+      filters,
+      allTypesExplicitlySelected,
+    );
     const requestFilters = returnsHome ? TOP_RATED_FILTERS : submittedFilters;
     setAppliedFilters(requestFilters);
     setViewMode(returnsHome ? "home" : "results");
@@ -319,6 +325,7 @@ export default function App() {
     ++detailRequestRef.current;
     setContentType(nextContentType);
     setFilters(nextFilters);
+    setAllTypesExplicitlySelected(false);
     const nextAppliedFilters = nextContentType === "ANIME"
       ? TOP_RATED_FILTERS
       : nextFilters;
@@ -397,6 +404,7 @@ export default function App() {
   };
 
   const changeFilter = (event) => {
+    if (event.target.name === "type") setAllTypesExplicitlySelected(true);
     setFilters((current) => ({ ...current, [event.target.name]: event.target.value }));
   };
 
@@ -425,6 +433,7 @@ export default function App() {
       : clearedFilters;
     setFilters(clearedFilters);
     setAppliedFilters(clearedAppliedFilters);
+    setAllTypesExplicitlySelected(false);
     setViewMode(defaultViewMode);
     loadCatalogue(1, clearedAppliedFilters, contentType);
   };
@@ -570,6 +579,7 @@ export default function App() {
               name="type"
               value={filters.type}
               onChange={changeFilter}
+              onFocus={() => setAllTypesExplicitlySelected(true)}
               style={{ colorScheme: "dark" }}
             >
               <option className="bg-slate-950" value="">All types</option>
