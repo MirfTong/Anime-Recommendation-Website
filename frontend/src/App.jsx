@@ -519,7 +519,7 @@ export default function App() {
                 <span>
                   {filters.genre.length + filters.tag.length
                     ? `${filters.genre.length + filters.tag.length} selected`
-                    : "All genres + tags"}
+                    : "All genres & tags"}
                 </span>
               )}
               <span className="text-violet-300 transition group-open:rotate-180">⌄</span>
