@@ -40,6 +40,12 @@ export function filtersMatch(left, right) {
   });
 }
 
+export function scoreLabel(value) {
+  if (value === null || value === undefined || value === "") return "N/A";
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue.toFixed(2) : "N/A";
+}
+
 export function usesTopRatedAnimeHomepage(
   contentType,
   filters,

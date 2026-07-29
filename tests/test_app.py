@@ -6,6 +6,7 @@ from sqlalchemy.dialects import postgresql
 
 from backend.app import (
     _anime_statement,
+    _filtered_anime_statement,
     _filtered_manga_statement,
     _manga_statement,
     _normalized_content_type,
@@ -100,6 +101,15 @@ class AppTests(unittest.TestCase):
         self.assertIn("manga.is_adult is false", sql)
         self.assertNotIn("unnest(", sql)
         self.assertNotIn("genre.name", sql)
+
+    def test_catalogue_filters_include_unrated_public_titles(self):
+        with app.test_request_context("/api/v1/catalogue?content_type=ANIME"):
+            anime_sql = str(_filtered_anime_statement()).lower()
+        with app.test_request_context("/api/v1/catalogue?content_type=MANGA"):
+            manga_sql = str(_filtered_manga_statement({"MANGA"})).lower()
+
+        self.assertNotIn("anime.score is not null", anime_sql)
+        self.assertNotIn("manga.score is not null", manga_sql)
 
     def test_pagination_pages_share_one_total_count_cache_key(self):
         with app.test_request_context(

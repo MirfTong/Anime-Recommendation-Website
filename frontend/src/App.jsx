@@ -8,18 +8,15 @@ import {
   itemContentType,
   itemMetadata,
   queryString,
+  scoreLabel,
   usesTopRatedAnimeHomepage,
   visiblePageNumbers,
 } from "./catalogue.js";
 
 function Score({ value }) {
-  const numericValue = value === null || value === undefined || value === ""
-    ? Number.NaN
-    : Number(value);
-  const label = Number.isFinite(numericValue) ? numericValue.toFixed(2) : "—";
   return (
     <span className="rounded-full bg-amber-300/15 px-2.5 py-1 text-sm font-bold text-amber-300">
-      ★ {label}
+      ★ {scoreLabel(value)}
     </span>
   );
 }

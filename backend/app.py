@@ -355,7 +355,6 @@ def _apply_common_filters(
     year_column,
     filters: CommonFilters,
 ):
-    statement = statement.where(model.score.is_not(None))
     if filters.query:
         pattern = _escaped_search_pattern(filters.query)
         statement = statement.where(
@@ -497,7 +496,7 @@ def _ordered_catalogue_rows(catalogue_rows):
         catalogue_rows.c.score,
         catalogue_rows.c.title,
     ).order_by(
-        catalogue_rows.c.score.desc(),
+        catalogue_rows.c.score.desc().nullslast(),
         func.lower(catalogue_rows.c.title),
         catalogue_rows.c.title,
         catalogue_rows.c.content_type,
@@ -641,7 +640,7 @@ def list_anime():
         select(func.count()).select_from(statement.order_by(None).subquery()),
     )
     items = db.session.scalars(
-        statement.order_by(Anime.score.desc(), Anime.title).offset((page - 1) * per_page).limit(per_page)
+        statement.order_by(Anime.score.desc().nullslast(), Anime.title).offset((page - 1) * per_page).limit(per_page)
     ).all()
     return jsonify(
         {
@@ -658,11 +657,10 @@ def list_anime():
 
 @app.get(f"{API_PREFIX}/anime/random")
 def random_anime():
-    """Return a small random selection of rated anime."""
+    """Return a small random selection of public anime."""
     limit = _integer_argument("limit", minimum=1, maximum=12) or 6
     anime = db.session.scalars(
         _anime_statement()
-        .where(Anime.score.is_not(None))
         .order_by(func.random())
         .limit(limit)
     ).all()
