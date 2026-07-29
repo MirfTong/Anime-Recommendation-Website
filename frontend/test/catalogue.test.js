@@ -8,6 +8,7 @@ import {
   itemContentType,
   itemMetadata,
   queryString,
+  scoreLabel,
   usesTopRatedAnimeHomepage,
   visiblePageNumbers,
 } from "../src/catalogue.js";
@@ -28,6 +29,13 @@ test("explicitly choosing all anime types leaves the TV-only homepage", () => {
 
   assert.equal(usesTopRatedAnimeHomepage("ANIME", cleared), true);
   assert.equal(usesTopRatedAnimeHomepage("ANIME", cleared, true), false);
+});
+
+test("unrated catalogue cards display N/A beside their star", () => {
+  assert.equal(scoreLabel(null), "N/A");
+  assert.equal(scoreLabel(undefined), "N/A");
+  assert.equal(scoreLabel(""), "N/A");
+  assert.equal(scoreLabel(8.125), "8.13");
 });
 
 test("anime queries send anime filters and omit readable-title filters", () => {
