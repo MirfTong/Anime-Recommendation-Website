@@ -555,11 +555,17 @@ export function validatedPage(value, totalPages) {
     : null;
 }
 
-export function responsiveFilterPanelClasses(mobileOpen, moreOpen) {
+export function responsiveFilterPanelClasses(
+  mobileOpen,
+  moreOpen,
+  desktopColumnSpan = "lg:col-span-6",
+) {
   return [
     mobileOpen ? "grid" : "hidden",
     moreOpen ? "sm:grid" : "sm:hidden",
-    "gap-3 sm:col-span-2 sm:grid-cols-2 lg:col-span-6 lg:grid-cols-6",
+    "gap-3 sm:col-span-2 sm:grid-cols-2",
+    desktopColumnSpan,
+    "lg:grid-cols-6",
   ].join(" ");
 }
 
