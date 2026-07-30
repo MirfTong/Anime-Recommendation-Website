@@ -354,7 +354,7 @@ function GenreTagPicker({
           ) : (
             <span>
               {filters.genre.length + filters.tag.length
-                ? `${filters.genre.length + filters.tag.length} selected`
+                ? `Genres & Tags (${filters.genre.length + filters.tag.length})`
                 : "Genres & Tags"}
             </span>
           )}
