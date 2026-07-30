@@ -559,13 +559,14 @@ export function responsiveFilterPanelClasses(
   mobileOpen,
   moreOpen,
   desktopColumnSpan = "lg:col-span-6",
+  desktopGridColumns = "lg:grid-cols-6",
 ) {
   return [
     mobileOpen ? "grid" : "hidden",
     moreOpen ? "sm:grid" : "sm:hidden",
     "gap-3 sm:col-span-2 sm:grid-cols-2",
     desktopColumnSpan,
-    "lg:grid-cols-6",
+    desktopGridColumns,
   ].join(" ");
 }
 
