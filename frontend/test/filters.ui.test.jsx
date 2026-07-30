@@ -304,7 +304,6 @@ describe("catalogue filter integration", () => {
     window.history.replaceState({}, "", "/?content_type=MANGA");
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "More filters" }));
     await user.click(await screen.findByRole("button", { name: "Author" }));
     const search = screen.getByRole("combobox", { name: "Search author" });
     await user.type(search, "Hiromu");
