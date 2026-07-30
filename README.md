@@ -92,9 +92,8 @@ values remain eligible. Applying a range excludes unknown values because they
 cannot be confirmed to satisfy it. Adaptive slider scales keep common episode,
 chapter, and volume values precise while retaining the catalogue's full
 extrema. The `ALL` view intentionally shows only filters that apply across the
-whole catalogue: search, genres/tags, score, and year, plus authors when the
-user intentionally wants only Manga and Manhwa matches. Other media-specific
-filters remain available in the Anime, Manga, and Manhwa views.
+whole catalogue: search, genres/tags, score, and year. Media-specific filters
+remain available in the Anime, Manga, and Manhwa views.
 
 Multiple Studio or Streaming Service selections use match-any semantics.
 Multiple Author selections also use match-any semantics.

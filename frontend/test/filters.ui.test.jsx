@@ -273,7 +273,7 @@ describe("catalogue filter integration", () => {
     })).toBe(true));
   });
 
-  test("All content exposes shared filters and print authors", async () => {
+  test("All content exposes only cross-catalogue filters", async () => {
     const user = userEvent.setup();
     window.history.replaceState({}, "", "/?content_type=ALL");
     render(<App />);
@@ -286,7 +286,7 @@ describe("catalogue filter integration", () => {
     expect(screen.queryByRole("slider", { name: "Minimum volumes" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Studio" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Streaming Service" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Author" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Author" })).toBeNull();
   });
 
   test("Manga authors support searching, selection, chips, and URL state", async () => {

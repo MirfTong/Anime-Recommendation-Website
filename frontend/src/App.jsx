@@ -1211,7 +1211,12 @@ export default function App() {
       setStudiosLoading(false);
       setStreamingServicesLoading(false);
       setAuthors([]);
-      loadAuthors("", contentType);
+      if (contentType === "MANGA" || contentType === "MANHWA") {
+        loadAuthors("", contentType);
+      } else {
+        ++authorRequestRef.current;
+        setAuthorsLoading(false);
+      }
     }
   }, [
     contentType,
@@ -1820,7 +1825,7 @@ export default function App() {
                 : contentType === "ALL"
                   ? ""
                   : " print-status-filter"
-            }${contentType !== "ANIME" ? " author-filter" : ""} mobile-more-filters`}
+            }${contentType === "MANGA" || contentType === "MANHWA" ? " author-filter" : ""} mobile-more-filters`}
             aria-expanded={mobileFiltersOpen}
             onClick={() => setMobileFiltersOpen((open) => !open)}
           >
@@ -1898,7 +1903,7 @@ export default function App() {
             </div>
           )}
 
-          {contentType !== "ANIME" && (
+          {(contentType === "MANGA" || contentType === "MANHWA") && (
             <div id="author-filter" className="sm:col-span-1 lg:col-span-1">
               <SearchableMultiSelect
                 label="Author"

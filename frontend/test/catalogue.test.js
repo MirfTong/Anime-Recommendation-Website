@@ -124,7 +124,7 @@ test("manga and manhwa queries send print filters and omit anime filters", () =>
   }
 });
 
-test("all-content queries omit length filters but allow print authors", () => {
+test("all-content queries include only shared filters", () => {
   const filters = {
     ...filtersFor(),
     q: "hero",
@@ -157,7 +157,7 @@ test("all-content queries omit length filters but allow print authors", () => {
   assert.equal(params.has("max_volumes"), false);
   assert.equal(params.has("studio"), false);
   assert.equal(params.has("streaming_service"), false);
-  assert.equal(params.get("author"), "SIU");
+  assert.equal(params.has("author"), false);
   assert.equal(params.has("type"), false);
   assert.equal(params.has("status"), false);
 });
@@ -350,7 +350,7 @@ test("all-content URL state ignores media-specific filters", () => {
   assert.equal(restored.filters.max_volumes, "");
   assert.deepEqual(restored.filters.studio, []);
   assert.deepEqual(restored.filters.streaming_service, []);
-  assert.deepEqual(restored.filters.author, ["SIU", "Hiromu Arakawa"]);
+  assert.deepEqual(restored.filters.author, []);
 });
 
 test("presets create clean, media-relevant filter state", () => {

@@ -55,7 +55,7 @@ const PRINT_FILTER_KEYS = [
   "status",
   "author",
 ];
-const ALL_FILTER_KEYS = [...COMMON_FILTER_KEYS, "author"];
+const ALL_FILTER_KEYS = [...COMMON_FILTER_KEYS];
 const PAGE_WINDOW_SIZE = 8;
 
 export function filtersFor() {
