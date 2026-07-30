@@ -130,7 +130,6 @@ function ContentBadge({ contentType }) {
 function CatalogueCard({ item, onSelect, showContentBadge = false }) {
   const metadata = itemMetadata(item).join(" · ");
   const cardContentType = itemContentType(item);
-  const studios = cardContentType === "ANIME" ? namedValues(item.studios) : [];
 
   return (
     <button
@@ -162,14 +161,6 @@ function CatalogueCard({ item, onSelect, showContentBadge = false }) {
         >
           {metadata}
         </p>
-        {studios.length > 0 && (
-          <p
-            className="overflow-hidden text-ellipsis whitespace-nowrap text-xs text-violet-200"
-            title={studios.join(", ")}
-          >
-            {studios.join(", ")}
-          </p>
-        )}
         <div className="mt-auto flex min-h-7 flex-wrap gap-1.5">
           {(item.genres ?? []).slice(0, 3).map((genre) => (
             <span
