@@ -1132,14 +1132,18 @@ def _searched_facet_response(
     scope = _content_type_argument(default=default_scope)
     content_types = CONTENT_TYPE_SCOPES[scope]
     query = request.args.get("q", "").strip().casefold()
-    limit = _integer_argument("limit", minimum=1, maximum=MAX_TAG_OPTIONS) or 50
+    limit = (
+        _integer_argument("limit", minimum=1, maximum=MAX_TAG_OPTIONS)
+        if "limit" in request.args
+        else None
+    )
     values = response_cache.get_or_create(
         (facet_type, tuple(sorted(content_types))),
         lambda: _load_facet_names(content_types, facet_type),
     )
     if query:
         values = tuple(value for value in values if query in value.casefold())
-    return jsonify({"items": values[:limit]})
+    return jsonify({"items": values if limit is None else values[:limit]})
 
 
 def _combined_numeric_bounds(
@@ -1234,7 +1238,11 @@ def list_detailed_tags():
     scope = _content_type_argument(default="ANIME")
     content_types = CONTENT_TYPE_SCOPES[scope]
     query = request.args.get("q", "").strip().casefold()
-    limit = _integer_argument("limit", minimum=1, maximum=MAX_TAG_OPTIONS) or 50
+    limit = (
+        _integer_argument("limit", minimum=1, maximum=MAX_TAG_OPTIONS)
+        if "limit" in request.args
+        else None
+    )
     all_tags = response_cache.get_or_create(
         ("tags", tuple(sorted(content_types))),
         lambda: _load_detailed_tag_names(content_types),
@@ -1243,7 +1251,7 @@ def list_detailed_tags():
         all_tags = tuple(
             tag for tag in all_tags if query in tag.casefold()
         )
-    return jsonify({"items": all_tags[:limit]})
+    return jsonify({"items": all_tags if limit is None else all_tags[:limit]})
 
 
 @app.get(f"{API_PREFIX}/studios")

@@ -399,11 +399,6 @@ function GenreTagPicker({
               {tag}
             </button>
           ))}
-          {!tagsLoading && tagOptions.length === 50 && (
-            <p className="px-3 py-2 text-xs text-slate-400">
-              Showing the first 50 matching tags. Keep typing to narrow the list.
-            </p>
-          )}
         </div>
       </details>
     </div>
@@ -1003,7 +998,6 @@ export default function App() {
     try {
       const params = new URLSearchParams({
         content_type: activeContentType,
-        limit: "50",
       });
       if (query) params.set("q", query);
       const response = await fetch(`/api/v1/tags?${params}`);
