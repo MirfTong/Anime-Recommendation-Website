@@ -5,14 +5,16 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import unicodedata
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
+from urllib.parse import urlparse
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, inspect as sa_inspect, select, text
 from sqlalchemy.orm import selectinload
 
 from backend.app import app
@@ -27,7 +29,17 @@ from backend.jobs.manga_etl import (
     report_manga_refresh,
     sync_manga_catalogue,
 )
-from backend.models import Anime, AnimeGenre, Genre, JikanSyncState, db
+from backend.models import (
+    Anime,
+    AnimeGenre,
+    AnimeStreamingService,
+    AnimeStudio,
+    Genre,
+    JikanSyncState,
+    StreamingService,
+    Studio,
+    db,
+)
 from backend.schema import ensure_anime_schema, refresh_catalogue_facets
 from backend.services.jikan_client import (
     JikanAnimePage,
@@ -54,7 +66,7 @@ ANIME_STATUS_ALIASES = {
     "NOT_YET_AIRED": "NOT_YET_AIRED",
     "NOT_YET_AIRING": "NOT_YET_AIRED",
 }
-SUPPLEMENTAL_PROVIDER_TYPES = ("ova", "ona", "special", "tv_special")
+SUPPLEMENTAL_PROVIDER_TYPES = ("movie", "ova", "ona", "special", "tv_special")
 SUPPLEMENTAL_STATE_KEYS = {
     anime_type: f"bulk:catalogue:{anime_type}:v1"
     for anime_type in SUPPLEMENTAL_PROVIDER_TYPES
@@ -65,12 +77,46 @@ BULK_SEASON_MAX_PAGES_PER_RUN = 40
 BULK_SEASON_MAX_CONSECUTIVE_FAILURES = 3
 BULK_SEASON_STATE_KEY = "bulk:tv-catalogue-seasons:v2"
 DEGRADED_SUCCESS_RATE = 0.25
+ENTITY_NAME_MAX_LENGTH = 150
 
 
 @dataclass(frozen=True)
 class AnimeFetchResult:
     data: dict[str, Any] | None
     failure: str | None = None
+
+
+@dataclass
+class AnimeAssociationStats:
+    """Relationship changes collected across one resumable ETL phase."""
+
+    studio_payloads_processed: int = 0
+    anime_with_studios_updated: int = 0
+    studio_links_created: int = 0
+    studio_links_removed: int = 0
+    malformed_studio_entries: int = 0
+    streaming_payloads_processed: int = 0
+    anime_with_streaming_updated: int = 0
+    streaming_links_created: int = 0
+    streaming_links_removed: int = 0
+    streaming_urls_updated: int = 0
+    malformed_streaming_entries: int = 0
+    reconciliation_failures: int = 0
+
+    def add(self, other: "AnimeAssociationStats") -> None:
+        for attribute in self.__dataclass_fields__:
+            setattr(
+                self,
+                attribute,
+                getattr(self, attribute) + getattr(other, attribute),
+            )
+
+
+@dataclass
+class AnimeAssociationCaches:
+    studios_by_name: dict[str, Studio]
+    studios_by_mal_id: dict[int, Studio]
+    streaming_services_by_name: dict[str, StreamingService]
 
 
 @dataclass
@@ -82,6 +128,9 @@ class CatalogueRefreshResult:
     not_found: int = 0
     temporary_errors: int = 0
     invalid_payloads: int = 0
+    associations: AnimeAssociationStats = field(
+        default_factory=AnimeAssociationStats
+    )
 
     @property
     def skipped(self) -> int:
@@ -105,6 +154,9 @@ class SeasonPageApplyResult:
     removed_hentai: int = 0
     skipped: int = 0
     seasons_assigned: int = 0
+    associations: AnimeAssociationStats = field(
+        default_factory=AnimeAssociationStats
+    )
 
 
 @dataclass
@@ -118,6 +170,9 @@ class CurrentSeasonSyncResult:
     pages_failed: int = 0
     complete: bool = False
     next_page: int = 1
+    associations: AnimeAssociationStats = field(
+        default_factory=AnimeAssociationStats
+    )
 
 
 @dataclass
@@ -130,6 +185,9 @@ class SeasonBackfillResult:
     not_found: int = 0
     temporary_errors: int = 0
     invalid_payloads: int = 0
+    associations: AnimeAssociationStats = field(
+        default_factory=AnimeAssociationStats
+    )
 
     @property
     def success_rate(self) -> float:
@@ -148,6 +206,9 @@ class BulkSeasonSyncResult:
     seasons_assigned: int = 0
     complete: bool = False
     next_page: int = 1
+    associations: AnimeAssociationStats = field(
+        default_factory=AnimeAssociationStats
+    )
 
 
 @dataclass(frozen=True)
@@ -173,6 +234,13 @@ class SupplementalCatalogueSyncResult:
     @property
     def removed_hentai(self) -> int:
         return sum(scan.removed_hentai for scan in self.scans.values())
+
+    @property
+    def associations(self) -> AnimeAssociationStats:
+        combined = AnimeAssociationStats()
+        for scan in self.scans.values():
+            combined.add(scan.associations)
+        return combined
 
 
 @dataclass(frozen=True)
@@ -211,6 +279,378 @@ def _names(entries: Any) -> list[str]:
         if isinstance(name, str) and name.strip():
             names.append(name.strip())
     return list(dict.fromkeys(names))
+
+
+def _normalized_entity_name(value: Any) -> str | None:
+    """Return a stable Unicode key for studios and streaming services."""
+    if not isinstance(value, str):
+        return None
+    display_name = " ".join(unicodedata.normalize("NFKC", value).split())
+    normalized_name = display_name.casefold()
+    if (
+        not normalized_name
+        or len(display_name) > ENTITY_NAME_MAX_LENGTH
+        or len(normalized_name) > ENTITY_NAME_MAX_LENGTH
+    ):
+        return None
+    return normalized_name
+
+
+def _display_entity_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    display_name = " ".join(unicodedata.normalize("NFKC", value).split())
+    if not display_name or len(display_name) > ENTITY_NAME_MAX_LENGTH:
+        return None
+    return display_name
+
+
+def _safe_streaming_url(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return normalized
+
+
+def _studio_values(
+    value: Any,
+) -> tuple[list[tuple[int | None, str, str]], int, bool] | None:
+    """Parse a studio field; None means preserve existing relationships."""
+    if not isinstance(value, list):
+        return None
+    parsed: dict[str, tuple[int | None, str, str]] = {}
+    malformed = 0
+    for entry in value:
+        if not isinstance(entry, dict):
+            malformed += 1
+            continue
+        name = _display_entity_name(entry.get("name"))
+        normalized_name = _normalized_entity_name(name)
+        if name is None or normalized_name is None:
+            malformed += 1
+            continue
+        provider_id = entry.get("mal_id")
+        if provider_id is not None and (
+            isinstance(provider_id, bool)
+            or not isinstance(provider_id, int)
+            or provider_id <= 0
+        ):
+            provider_id = None
+            malformed += 1
+        parsed.setdefault(
+            normalized_name,
+            (provider_id, name, normalized_name),
+        )
+    return list(parsed.values()), malformed, malformed == 0
+
+
+def _streaming_values(
+    value: Any,
+) -> tuple[list[tuple[str, str, str]], int, bool] | None:
+    """Parse provider links without allowing unsafe external URLs."""
+    if not isinstance(value, list):
+        return None
+    parsed: dict[str, tuple[str, str, str]] = {}
+    malformed = 0
+    for entry in value:
+        if not isinstance(entry, dict):
+            malformed += 1
+            continue
+        name = _display_entity_name(entry.get("name"))
+        normalized_name = _normalized_entity_name(name)
+        url = _safe_streaming_url(entry.get("url"))
+        if name is None or normalized_name is None or url is None:
+            malformed += 1
+            continue
+        parsed.setdefault(normalized_name, (name, normalized_name, url))
+    return list(parsed.values()), malformed, malformed == 0
+
+
+def _association_caches() -> AnimeAssociationCaches:
+    studios = list(db.session.scalars(select(Studio)))
+    streaming_services = list(db.session.scalars(select(StreamingService)))
+    return AnimeAssociationCaches(
+        studios_by_name={
+            studio.normalized_name: studio for studio in studios
+        },
+        studios_by_mal_id={
+            studio.mal_id: studio
+            for studio in studios
+            if studio.mal_id is not None
+        },
+        streaming_services_by_name={
+            service.normalized_name: service
+            for service in streaming_services
+        },
+    )
+
+
+def _anime_etl_load_options():
+    """Eager-load normalized links used while reconciling one ETL batch."""
+    return (
+        selectinload(Anime.genre_links).selectinload(AnimeGenre.genre),
+        selectinload(Anime.studio_links).selectinload(AnimeStudio.studio),
+        selectinload(Anime.streaming_links).selectinload(
+            AnimeStreamingService.streaming_service
+        ),
+    )
+
+
+def _association_caches_for_data(
+    caches: AnimeAssociationCaches | None,
+    data: dict[str, Any],
+) -> AnimeAssociationCaches | None:
+    if caches is None and ("studios" in data or "streaming" in data):
+        return _association_caches()
+    return caches
+
+
+def _update_anime_with_associations(
+    anime: Anime,
+    data: dict[str, Any],
+    genres: dict[str, Genre],
+    caches: AnimeAssociationCaches | None,
+    stats: AnimeAssociationStats,
+) -> AnimeAssociationCaches | None:
+    """Preserve the legacy mapper call shape for sparse listing payloads."""
+    caches = _association_caches_for_data(caches, data)
+    if "studios" in data or "streaming" in data:
+        _update_anime(anime, data, genres, caches, stats)
+    else:
+        _update_anime(anime, data, genres)
+    return caches
+
+
+def _studio_link_anime_key(link: AnimeStudio) -> tuple[str, int]:
+    if link.anime_id is not None:
+        return ("database", link.anime_id)
+    return ("object", id(link.anime))
+
+
+def _remove_studio_cache_entries(
+    studio: Studio,
+    caches: AnimeAssociationCaches,
+) -> None:
+    for normalized_name, cached in list(caches.studios_by_name.items()):
+        if cached is studio:
+            caches.studios_by_name.pop(normalized_name, None)
+    for provider_id, cached in list(caches.studios_by_mal_id.items()):
+        if cached is studio:
+            caches.studios_by_mal_id.pop(provider_id, None)
+
+
+def _remove_studio_link(link: AnimeStudio) -> None:
+    anime = link.anime
+    if anime is not None and link in anime.studio_links:
+        anime.studio_links.remove(link)
+    else:
+        db.session.delete(link)
+
+
+def _merge_studios(
+    preferred: Studio,
+    duplicate: Studio,
+    caches: AnimeAssociationCaches,
+) -> Studio:
+    """Merge duplicate studio rows while retaining every distinct anime link."""
+    if preferred is duplicate:
+        return preferred
+
+    preferred_anime_keys = {
+        _studio_link_anime_key(link) for link in preferred.anime_links
+    }
+    for link in list(duplicate.anime_links):
+        anime_key = _studio_link_anime_key(link)
+        if anime_key in preferred_anime_keys:
+            _remove_studio_link(link)
+            continue
+        link.studio = preferred
+        preferred_anime_keys.add(anime_key)
+
+    duplicate_provider_id = duplicate.mal_id
+    _remove_studio_cache_entries(duplicate, caches)
+    duplicate_state = sa_inspect(duplicate)
+    if duplicate_state.pending:
+        db.session.expunge(duplicate)
+    elif duplicate_state.persistent:
+        db.session.delete(duplicate)
+        # The duplicate normalized name must be released before the preferred
+        # row can adopt it without tripping the unique index.
+        db.session.flush()
+
+    if duplicate_provider_id is not None:
+        caches.studios_by_mal_id[duplicate_provider_id] = preferred
+    return preferred
+
+
+def _studio_for_value(
+    provider_id: int | None,
+    name: str,
+    normalized_name: str,
+    caches: AnimeAssociationCaches,
+) -> tuple[Studio, bool]:
+    studio_by_name = caches.studios_by_name.get(normalized_name)
+    studio_by_provider = (
+        caches.studios_by_mal_id.get(provider_id)
+        if provider_id is not None
+        else None
+    )
+    metadata_changed = False
+    if (
+        studio_by_name is not None
+        and studio_by_provider is not None
+        and studio_by_name is not studio_by_provider
+    ):
+        # A provider ID is the stable identity. Merge a colliding name row into
+        # it before changing unique fields so no anime relationship is lost.
+        studio = _merge_studios(
+            studio_by_provider,
+            studio_by_name,
+            caches,
+        )
+        metadata_changed = True
+    else:
+        studio = studio_by_provider or studio_by_name
+
+    if studio is None:
+        studio = Studio(
+            mal_id=provider_id,
+            name=name,
+            normalized_name=normalized_name,
+        )
+        db.session.add(studio)
+        metadata_changed = True
+    else:
+        if studio.normalized_name != normalized_name:
+            caches.studios_by_name.pop(studio.normalized_name, None)
+            studio.normalized_name = normalized_name
+            metadata_changed = True
+        if studio.name != name:
+            studio.name = name
+            metadata_changed = True
+        if studio.mal_id is None and provider_id is not None:
+            studio.mal_id = provider_id
+            metadata_changed = True
+
+    caches.studios_by_name[studio.normalized_name] = studio
+    if studio.mal_id is not None:
+        caches.studios_by_mal_id[studio.mal_id] = studio
+    if provider_id is not None:
+        caches.studios_by_mal_id[provider_id] = studio
+    return studio, metadata_changed
+
+
+def _streaming_service_for_value(
+    name: str,
+    normalized_name: str,
+    caches: AnimeAssociationCaches,
+) -> StreamingService:
+    service = caches.streaming_services_by_name.get(normalized_name)
+    if service is None:
+        service = StreamingService(name=name, normalized_name=normalized_name)
+        db.session.add(service)
+        caches.streaming_services_by_name[normalized_name] = service
+    else:
+        service.name = name
+    return service
+
+
+def _reconcile_studios(
+    anime: Anime,
+    value: Any,
+    caches: AnimeAssociationCaches,
+    stats: AnimeAssociationStats,
+) -> None:
+    stats.studio_payloads_processed += 1
+    parsed = _studio_values(value)
+    if parsed is None:
+        stats.malformed_studio_entries += 1
+        stats.reconciliation_failures += 1
+        return
+    values, malformed, complete = parsed
+    stats.malformed_studio_entries += malformed
+    if malformed:
+        stats.reconciliation_failures += 1
+    links_by_name = {
+        link.studio.normalized_name: link for link in anime.studio_links
+    }
+    desired_studios: set[int] = set()
+    changed = False
+    for provider_id, name, normalized_name in values:
+        studio, metadata_changed = _studio_for_value(
+            provider_id, name, normalized_name, caches
+        )
+        if metadata_changed:
+            changed = True
+        desired_studios.add(id(studio))
+        if normalized_name in links_by_name or any(
+            link.studio is studio for link in anime.studio_links
+        ):
+            continue
+        anime.studio_links.append(AnimeStudio(studio=studio))
+        stats.studio_links_created += 1
+        changed = True
+    if complete:
+        for link in list(anime.studio_links):
+            if id(link.studio) not in desired_studios:
+                db.session.delete(link)
+                stats.studio_links_removed += 1
+                changed = True
+    if changed:
+        stats.anime_with_studios_updated += 1
+
+
+def _reconcile_streaming_services(
+    anime: Anime,
+    value: Any,
+    caches: AnimeAssociationCaches,
+    stats: AnimeAssociationStats,
+) -> None:
+    stats.streaming_payloads_processed += 1
+    parsed = _streaming_values(value)
+    if parsed is None:
+        stats.malformed_streaming_entries += 1
+        stats.reconciliation_failures += 1
+        return
+    values, malformed, complete = parsed
+    stats.malformed_streaming_entries += malformed
+    if malformed:
+        stats.reconciliation_failures += 1
+    links_by_name = {
+        link.streaming_service.normalized_name: link
+        for link in anime.streaming_links
+    }
+    desired_names = {normalized_name for _, normalized_name, _ in values}
+    changed = False
+    for name, normalized_name, url in values:
+        link = links_by_name.get(normalized_name)
+        if link is None:
+            service = _streaming_service_for_value(
+                name, normalized_name, caches
+            )
+            anime.streaming_links.append(
+                AnimeStreamingService(
+                    streaming_service=service,
+                    url=url,
+                )
+            )
+            stats.streaming_links_created += 1
+            changed = True
+        elif link.url != url:
+            link.url = url
+            stats.streaming_urls_updated += 1
+            changed = True
+    if complete:
+        for normalized_name, link in links_by_name.items():
+            if normalized_name not in desired_names:
+                db.session.delete(link)
+                stats.streaming_links_removed += 1
+                changed = True
+    if changed:
+        stats.anime_with_streaming_updated += 1
 
 
 def _detailed_genres(data: dict[str, Any], current: list[str]) -> list[str]:
@@ -313,7 +753,13 @@ def _jpg_images(data: dict[str, Any]) -> dict[str, Any]:
     return jpg_images if isinstance(jpg_images, dict) else {}
 
 
-def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) -> None:
+def _update_anime(
+    anime: Anime,
+    data: dict[str, Any],
+    genres: dict[str, Genre],
+    association_caches: AnimeAssociationCaches | None = None,
+    association_stats: AnimeAssociationStats | None = None,
+) -> None:
     """Map one Jikan anime object onto an existing catalogue row."""
     anime.is_adult = _is_hentai(data)
     anime.title = data.get("title") or anime.title
@@ -378,6 +824,23 @@ def _update_anime(anime: Anime, data: dict[str, Any], genres: dict[str, Genre]) 
                 db.session.delete(link)
 
     anime.genres_detailed = _detailed_genres(data, anime.genres_detailed or [])
+    if "studios" in data or "streaming" in data:
+        association_caches = association_caches or _association_caches()
+        association_stats = association_stats or AnimeAssociationStats()
+        if "studios" in data:
+            _reconcile_studios(
+                anime,
+                data.get("studios"),
+                association_caches,
+                association_stats,
+            )
+        if "streaming" in data:
+            _reconcile_streaming_services(
+                anime,
+                data.get("streaming"),
+                association_caches,
+                association_stats,
+            )
     anime.last_jikan_sync = datetime.now(timezone.utc)
 
 
@@ -500,9 +963,7 @@ def refresh_catalogue(
 
     with app.app_context():
         _ensure_schema()
-        statement = select(Anime).options(
-            selectinload(Anime.genre_links).selectinload(AnimeGenre.genre)
-        )
+        statement = select(Anime).options(*_anime_etl_load_options())
         if anime_ids is not None:
             statement = statement.where(Anime.mal_id.in_(list(anime_ids)))
         if anime_ids is None:
@@ -515,6 +976,7 @@ def refresh_catalogue(
             statement = statement.limit(limit)
         anime_rows = list(db.session.scalars(statement))
         genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
+        association_caches = None
         result = CatalogueRefreshResult(selected=len(anime_rows))
 
         for attempted, anime in enumerate(anime_rows, start=1):
@@ -528,7 +990,13 @@ def refresh_catalogue(
                         db.session.delete(anime)
                         result.removed_hentai += 1
                     else:
-                        _update_anime(anime, fetched.data, genres)
+                        association_caches = _update_anime_with_associations(
+                            anime,
+                            fetched.data,
+                            genres,
+                            association_caches,
+                            result.associations,
+                        )
                         result.updated += 1
                 elif fetched.failure == "not_found":
                     result.not_found += 1
@@ -602,10 +1070,12 @@ def sync_season(
             for anime in db.session.scalars(
                 select(Anime)
                 .where(Anime.mal_id.in_(queried_ids))
-                .options(selectinload(Anime.genre_links).selectinload(AnimeGenre.genre))
+                .options(*_anime_etl_load_options())
             )
         }
         genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
+        association_caches = None
+        association_stats = AnimeAssociationStats()
         for mal_id in hentai_ids:
             anime = existing.pop(mal_id, None)
             if anime is not None:
@@ -619,7 +1089,13 @@ def sync_season(
                 anime = _new_anime(data)
                 db.session.add(anime)
                 existing[mal_id] = anime
-            _update_anime(anime, data, genres)
+            association_caches = _update_anime_with_associations(
+                anime,
+                data,
+                genres,
+                association_caches,
+                association_stats,
+            )
             saved += 1
             _commit_completed_batch(saved, batch_size)
         db.session.commit()
@@ -691,11 +1167,10 @@ def _apply_season_page(
     ids = list(dict.fromkeys([*data_by_mal_id, *hentai_ids]))
     with app.app_context():
         statement = select(Anime).where(Anime.mal_id.in_(ids))
-        statement = statement.options(
-            selectinload(Anime.genre_links).selectinload(AnimeGenre.genre)
-        )
+        statement = statement.options(*_anime_etl_load_options())
         existing = {anime.mal_id: anime for anime in db.session.scalars(statement)}
         genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
+        association_caches = None
         result = SeasonPageApplyResult(
             skipped=len(page_result.entries) - len(data_by_mal_id)
         )
@@ -718,7 +1193,13 @@ def _apply_season_page(
                 result.inserted += 1
             if tv_only and season is not None:
                 data = {**data, "season": season}
-            _update_anime(anime, data, genres)
+            association_caches = _update_anime_with_associations(
+                anime,
+                data,
+                genres,
+                association_caches,
+                result.associations,
+            )
             result.saved += 1
             if previous_season is None and anime.season is not None:
                 result.seasons_assigned += 1
@@ -787,6 +1268,7 @@ def sync_current_season(
         result.removed_hentai += applied.removed_hentai
         result.skipped += applied.skipped
         result.seasons_assigned += applied.seasons_assigned
+        result.associations.add(applied.associations)
         result.pages_completed += 1
         if not fetched.has_next_page:
             result.complete = True
@@ -875,6 +1357,7 @@ def _sync_bulk_anime_type(
         result.inserted += applied.inserted
         result.removed_hentai += applied.removed_hentai
         result.seasons_assigned += applied.seasons_assigned
+        result.associations.add(applied.associations)
         if not fetched.has_next_page:
             result.complete = True
             result.next_page = 1
@@ -956,12 +1439,13 @@ def backfill_missing_seasons(
                 Anime.mal_id > 0,
                 func.upper(Anime.type) == "TV",
             )
-            .options(selectinload(Anime.genre_links).selectinload(AnimeGenre.genre))
+            .options(*_anime_etl_load_options())
             .order_by(Anime.last_season_attempt.asc().nulls_first(), Anime.animeID)
             .limit(limit)
         )
         anime_rows = list(db.session.scalars(statement))
         genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
+        association_caches = None
         result = SeasonBackfillResult(selected=len(anime_rows))
 
         for attempted, anime in enumerate(anime_rows, start=1):
@@ -976,7 +1460,13 @@ def backfill_missing_seasons(
                     db.session.delete(anime)
                     result.removed_hentai += 1
                 else:
-                    _update_anime(anime, fetched.data, genres)
+                    association_caches = _update_anime_with_associations(
+                        anime,
+                        fetched.data,
+                        genres,
+                        association_caches,
+                        result.associations,
+                    )
                     result.updated += 1
                     if anime.season is None:
                         result.still_missing += 1
@@ -1075,6 +1565,7 @@ def _report_supplemental_catalogue(
     result: SupplementalCatalogueSyncResult,
 ) -> None:
     labels = {
+        "movie": "Movie",
         "ova": "OVA",
         "ona": "ONA",
         "special": "Special",
@@ -1097,7 +1588,7 @@ def _report_supplemental_catalogue(
         + "; ".join(details)
     )
     _append_step_summary(
-        "OVA, ONA, and Special catalogue sync",
+        "Movie, OVA, ONA, and Special catalogue sync",
         [
             ("Pages completed", result.pages_completed),
             ("Pages failed", result.pages_failed),
@@ -1122,7 +1613,7 @@ def _report_supplemental_catalogue(
         _workflow_warning(
             "Supplemental catalogue sync degraded",
             (
-                f"{result.pages_failed} OVA/ONA/Special pages failed; "
+                f"{result.pages_failed} Movie/OVA/ONA/Special pages failed; "
                 "their independent cursors will retry those pages next run."
             ),
         )
@@ -1201,6 +1692,66 @@ def _report_hentai_cleanup(removed: int) -> None:
     )
 
 
+def _report_anime_associations(stats: AnimeAssociationStats) -> None:
+    malformed = (
+        stats.malformed_studio_entries
+        + stats.malformed_streaming_entries
+    )
+    print(
+        "Anime relationship metadata: "
+        f"studio_payloads_processed={stats.studio_payloads_processed}, "
+        f"studio_anime_updated={stats.anime_with_studios_updated}, "
+        f"studio_links_created={stats.studio_links_created}, "
+        f"studio_links_removed={stats.studio_links_removed}, "
+        f"streaming_payloads_processed={stats.streaming_payloads_processed}, "
+        f"streaming_anime_updated={stats.anime_with_streaming_updated}, "
+        f"streaming_links_created={stats.streaming_links_created}, "
+        f"streaming_links_removed={stats.streaming_links_removed}, "
+        f"streaming_urls_updated={stats.streaming_urls_updated}, "
+        f"malformed_entries={malformed}, "
+        f"reconciliation_failures={stats.reconciliation_failures}."
+    )
+    _append_step_summary(
+        "Anime studios and streaming services",
+        [
+            ("Studio payloads processed", stats.studio_payloads_processed),
+            ("Anime with studios updated", stats.anime_with_studios_updated),
+            ("Studio relationships created", stats.studio_links_created),
+            ("Studio relationships removed", stats.studio_links_removed),
+            ("Malformed studio entries skipped", stats.malformed_studio_entries),
+            (
+                "Streaming payloads processed",
+                stats.streaming_payloads_processed,
+            ),
+            (
+                "Anime with streaming services updated",
+                stats.anime_with_streaming_updated,
+            ),
+            (
+                "Streaming relationships created",
+                stats.streaming_links_created,
+            ),
+            (
+                "Streaming relationships removed",
+                stats.streaming_links_removed,
+            ),
+            ("Streaming URLs updated", stats.streaming_urls_updated),
+            (
+                "Malformed streaming entries skipped",
+                stats.malformed_streaming_entries,
+            ),
+            (
+                "Provider/reconciliation failures",
+                stats.reconciliation_failures,
+            ),
+            # Retain the established summary row for workflow consumers while
+            # the explicit counter above distinguishes unusable payloads from
+            # individually malformed entries.
+            ("Relationship metadata failures", malformed),
+        ],
+    )
+
+
 def get_season_coverage() -> SeasonCoverage:
     """Return production-facing TV season coverage for workflow reporting."""
     with app.app_context():
@@ -1221,7 +1772,7 @@ def _report_catalogue_facets(total: int) -> None:
     print(f"Catalogue facets: precomputed={total}.")
     _append_step_summary(
         "Catalogue facet cache",
-        [("Precomputed genre/tag options", total)],
+        [("Precomputed genre/tag/studio/streaming options", total)],
     )
 
 
@@ -1294,6 +1845,17 @@ def run_scheduled_sync(
         + catalogue_result.removed_hentai
     )
     _report_hentai_cleanup(removed_hentai)
+
+    association_stats = AnimeAssociationStats()
+    for phase_stats in (
+        current_result.associations,
+        bulk_result.associations,
+        supplemental_result.associations,
+        backfill_result.associations,
+        catalogue_result.associations,
+    ):
+        association_stats.add(phase_stats)
+    _report_anime_associations(association_stats)
 
     with app.app_context():
         facet_count = refresh_catalogue_facets()

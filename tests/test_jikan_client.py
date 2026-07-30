@@ -547,11 +547,31 @@ class JikanClientTests(unittest.TestCase):
             ],
         )
 
+    def test_bulk_catalogue_supports_movies_with_the_same_safe_pagination(self):
+        requested_urls = []
+
+        def opener(request, *, timeout):
+            requested_urls.append(request.full_url)
+            return Response(
+                b'{"data": [], "pagination": {"has_next_page": false}}'
+            )
+
+        client = JikanClient(opener=opener)
+
+        client.get_anime_catalogue_page(anime_type=" Movie ", page=2)
+
+        self.assertEqual(
+            requested_urls,
+            [
+                "https://api.tenrai.org/v1/anime?type=movie&limit=50&order_by=mal_id&sort=asc&page=2"
+            ],
+        )
+
     def test_bulk_catalogue_rejects_unsupported_anime_types(self):
         client = JikanClient(opener=lambda *args, **kwargs: None)
 
         with self.assertRaises(ValueError):
-            client.get_anime_catalogue_page(anime_type="movie")
+            client.get_anime_catalogue_page(anime_type="music")
 
     def test_bulk_catalogue_pages_are_pinned_to_the_primary_provider(self):
         requested_urls = []

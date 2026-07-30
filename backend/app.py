@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,7 +16,16 @@ from flask import Flask, jsonify, request, send_from_directory
 from sqlalchemy import func, literal, or_, select, union_all
 from sqlalchemy.orm import selectinload
 
-from backend.models import Anime, CatalogueFacet, Genre, Manga, db
+from backend.models import (
+    Anime,
+    AnimeStreamingService,
+    CatalogueFacet,
+    Genre,
+    Manga,
+    StreamingService,
+    Studio,
+    db,
+)
 from backend.schema import ensure_anime_schema
 
 
@@ -100,6 +110,8 @@ class AnimeFilters:
     anime_types: tuple[str, ...]
     seasons: tuple[str, ...]
     statuses: tuple[str, ...]
+    studios: tuple[str, ...]
+    streaming_services: tuple[str, ...]
 
     @property
     def active(self) -> bool:
@@ -109,6 +121,8 @@ class AnimeFilters:
             or self.anime_types
             or self.seasons
             or self.statuses
+            or self.studios
+            or self.streaming_services
         )
 
 
@@ -116,11 +130,19 @@ class AnimeFilters:
 class MangaFilters:
     statuses: tuple[str, ...]
     min_chapters: int | None
+    max_chapters: int | None
     min_volumes: int | None
+    max_volumes: int | None
 
     @property
     def active(self) -> bool:
-        return bool(self.statuses or self.min_chapters or self.min_volumes)
+        return bool(
+            self.statuses
+            or self.min_chapters
+            or self.max_chapters
+            or self.min_volumes
+            or self.max_volumes
+        )
 
 
 def _current_season_identity(now: datetime | None = None) -> tuple[int, str]:
@@ -265,6 +287,16 @@ def _normalized_anime_status(value: str) -> str:
     return status
 
 
+def _normalized_entity_name(value: str) -> str:
+    """Normalize relationship filter values exactly as the ETL does."""
+    normalized = " ".join(
+        unicodedata.normalize("NFKC", value).split()
+    ).casefold()
+    if not normalized:
+        raise ApiError("filter names cannot be blank")
+    return normalized
+
+
 def _escaped_search_pattern(query: str) -> str:
     escaped = (
         query.replace("\\", "\\\\")
@@ -321,10 +353,42 @@ def _anime_filter_values(*, include_status: bool = True) -> AnimeFilters:
             if include_status
             else ()
         ),
+        studios=tuple(
+            _normalized_entity_name(value)
+            for value in _list_argument("studio")
+        ),
+        streaming_services=tuple(
+            _normalized_entity_name(value)
+            for value in _list_argument("streaming_service")
+        ),
     )
 
 
 def _manga_filter_values(*, include_status: bool = True) -> MangaFilters:
+    min_chapters = _integer_argument(
+        "min_chapters", minimum=1, maximum=1_000_000
+    )
+    max_chapters = _integer_argument(
+        "max_chapters", minimum=1, maximum=1_000_000
+    )
+    min_volumes = _integer_argument(
+        "min_volumes", minimum=1, maximum=100_000
+    )
+    max_volumes = _integer_argument(
+        "max_volumes", minimum=1, maximum=100_000
+    )
+    if (
+        min_chapters is not None
+        and max_chapters is not None
+        and min_chapters > max_chapters
+    ):
+        raise ApiError("min_chapters cannot be greater than max_chapters")
+    if (
+        min_volumes is not None
+        and max_volumes is not None
+        and min_volumes > max_volumes
+    ):
+        raise ApiError("min_volumes cannot be greater than max_volumes")
     return MangaFilters(
         statuses=(
             tuple(
@@ -334,12 +398,10 @@ def _manga_filter_values(*, include_status: bool = True) -> MangaFilters:
             if include_status
             else ()
         ),
-        min_chapters=_integer_argument(
-            "min_chapters", minimum=1, maximum=1_000_000
-        ),
-        min_volumes=_integer_argument(
-            "min_volumes", minimum=1, maximum=100_000
-        ),
+        min_chapters=min_chapters,
+        max_chapters=max_chapters,
+        min_volumes=min_volumes,
+        max_volumes=max_volumes,
     )
 
 
@@ -360,6 +422,23 @@ def _serialize_anime(anime: Anime, *, detailed: bool = False) -> dict[str, Any]:
         "mal_url": anime.mal_url,
         "sequel": anime.sequel,
         "genres": [genre.name for genre in anime.genre_entries],
+        "studios": [
+            {"mal_id": studio.mal_id, "name": studio.name}
+            for studio in sorted(
+                anime.studio_entries,
+                key=lambda entry: entry.name.casefold(),
+            )
+        ],
+        "streaming_services": [
+            {
+                "name": link.streaming_service.name,
+                "url": link.url,
+            }
+            for link in sorted(
+                anime.streaming_links,
+                key=lambda entry: entry.streaming_service.name.casefold(),
+            )
+        ],
     }
     if detailed:
         payload["synopsis"] = anime.synopsis
@@ -400,11 +479,19 @@ def _serialize_manga(manga: Manga, *, detailed: bool = False) -> dict[str, Any]:
 
 def _public_statement(model):
     """Return the indexed, ETL-maintained public catalogue query."""
-    return (
+    statement = (
         select(model)
         .where(model.is_adult.is_(False))
         .options(selectinload(model.genre_entries))
     )
+    if model is Anime:
+        statement = statement.options(
+            selectinload(Anime.studio_entries),
+            selectinload(Anime.streaming_links).selectinload(
+                AnimeStreamingService.streaming_service
+            ),
+        )
+    return statement
 
 
 def _anime_statement():
@@ -478,6 +565,22 @@ def _filtered_anime_statement(
         statement = statement.where(Anime.season.in_(anime_filters.seasons))
     if anime_filters.statuses:
         statement = statement.where(Anime.status.in_(anime_filters.statuses))
+    if anime_filters.studios:
+        statement = statement.where(
+            Anime.studio_entries.any(
+                Studio.normalized_name.in_(anime_filters.studios)
+            )
+        )
+    if anime_filters.streaming_services:
+        statement = statement.where(
+            Anime.streaming_links.any(
+                AnimeStreamingService.streaming_service.has(
+                    StreamingService.normalized_name.in_(
+                        anime_filters.streaming_services
+                    )
+                )
+            )
+        )
     return statement
 
 
@@ -504,9 +607,17 @@ def _filtered_manga_statement(
         statement = statement.where(
             Manga.chapters >= manga_filters.min_chapters
         )
+    if manga_filters.max_chapters is not None:
+        statement = statement.where(
+            Manga.chapters <= manga_filters.max_chapters
+        )
     if manga_filters.min_volumes is not None:
         statement = statement.where(
             Manga.volumes >= manga_filters.min_volumes
+        )
+    if manga_filters.max_volumes is not None:
+        statement = statement.where(
+            Manga.volumes <= manga_filters.max_volumes
         )
     return statement
 
@@ -858,7 +969,7 @@ def random_anime():
     """Return a small random selection of public anime."""
     limit = _integer_argument("limit", minimum=1, maximum=12) or 6
     anime = db.session.scalars(
-        _anime_statement()
+        _filtered_anime_statement()
         .order_by(func.random())
         .limit(limit)
     ).all()
@@ -996,6 +1107,116 @@ def _load_detailed_tag_names(
     )
 
 
+def _load_facet_names(
+    content_types: frozenset[str],
+    facet_type: str,
+) -> tuple[str, ...]:
+    return tuple(
+        db.session.scalars(
+            select(CatalogueFacet.value)
+            .where(
+                CatalogueFacet.content_type.in_(sorted(content_types)),
+                CatalogueFacet.facet_type == facet_type,
+            )
+            .distinct()
+            .order_by(CatalogueFacet.value)
+        ).all()
+    )
+
+
+def _searched_facet_response(
+    facet_type: str,
+    *,
+    default_scope: str = "ANIME",
+):
+    scope = _content_type_argument(default=default_scope)
+    content_types = CONTENT_TYPE_SCOPES[scope]
+    query = request.args.get("q", "").strip().casefold()
+    limit = _integer_argument("limit", minimum=1, maximum=MAX_TAG_OPTIONS) or 50
+    values = response_cache.get_or_create(
+        (facet_type, tuple(sorted(content_types))),
+        lambda: _load_facet_names(content_types, facet_type),
+    )
+    if query:
+        values = tuple(value for value in values if query in value.casefold())
+    return jsonify({"items": values[:limit]})
+
+
+def _combined_numeric_bounds(
+    *bounds: tuple[int | float | None, int | float | None],
+) -> dict[str, int | float] | None:
+    minimums = [minimum for minimum, _ in bounds if minimum is not None]
+    maximums = [maximum for _, maximum in bounds if maximum is not None]
+    if not minimums or not maximums:
+        return None
+    return {"min": min(minimums), "max": max(maximums)}
+
+
+def _load_filter_ranges(
+    content_types: frozenset[str],
+) -> dict[str, dict[str, int | float] | None]:
+    anime_ranges: dict[str, tuple[int | float | None, int | float | None]] = {}
+    print_ranges: dict[str, tuple[int | float | None, int | float | None]] = {}
+    if "ANIME" in content_types:
+        row = db.session.execute(
+            select(
+                func.min(Anime.year),
+                func.max(Anime.year),
+                func.min(Anime.score),
+                func.max(Anime.score),
+                func.min(Anime.episodes),
+                func.max(Anime.episodes),
+            ).where(Anime.is_adult.is_(False))
+        ).one()
+        anime_ranges = {
+            "year": (row[0], row[1]),
+            "score": (row[2], row[3]),
+            "episodes": (row[4], row[5]),
+        }
+    print_types = content_types.intersection({"MANGA", "MANHWA"})
+    if print_types:
+        row = db.session.execute(
+            select(
+                func.min(Manga.publication_year),
+                func.max(Manga.publication_year),
+                func.min(Manga.score),
+                func.max(Manga.score),
+                func.min(Manga.chapters),
+                func.max(Manga.chapters),
+                func.min(Manga.volumes),
+                func.max(Manga.volumes),
+            ).where(
+                Manga.is_adult.is_(False),
+                Manga.content_type.in_(sorted(print_types)),
+            )
+        ).one()
+        print_ranges = {
+            "year": (row[0], row[1]),
+            "score": (row[2], row[3]),
+            "chapters": (row[4], row[5]),
+            "volumes": (row[6], row[7]),
+        }
+    return {
+        "year": _combined_numeric_bounds(
+            anime_ranges.get("year", (None, None)),
+            print_ranges.get("year", (None, None)),
+        ),
+        "score": _combined_numeric_bounds(
+            anime_ranges.get("score", (None, None)),
+            print_ranges.get("score", (None, None)),
+        ),
+        "episodes": _combined_numeric_bounds(
+            anime_ranges.get("episodes", (None, None))
+        ),
+        "chapters": _combined_numeric_bounds(
+            print_ranges.get("chapters", (None, None))
+        ),
+        "volumes": _combined_numeric_bounds(
+            print_ranges.get("volumes", (None, None))
+        ),
+    }
+
+
 @app.get(f"{API_PREFIX}/genres")
 def list_genres():
     scope = _content_type_argument(default="ANIME")
@@ -1023,6 +1244,30 @@ def list_detailed_tags():
             tag for tag in all_tags if query in tag.casefold()
         )
     return jsonify({"items": all_tags[:limit]})
+
+
+@app.get(f"{API_PREFIX}/studios")
+def list_studios():
+    """Search precomputed animation-studio filter options."""
+    return _searched_facet_response("studio")
+
+
+@app.get(f"{API_PREFIX}/streaming-services")
+def list_streaming_services():
+    """Search precomputed anime streaming-service filter options."""
+    return _searched_facet_response("streaming_service")
+
+
+@app.get(f"{API_PREFIX}/filter-ranges")
+def list_filter_ranges():
+    """Return cached public numeric bounds for accessible range controls."""
+    scope = _content_type_argument(default="ANIME")
+    content_types = CONTENT_TYPE_SCOPES[scope]
+    ranges = response_cache.get_or_create(
+        ("filter-ranges", tuple(sorted(content_types))),
+        lambda: _load_filter_ranges(content_types),
+    )
+    return jsonify({"ranges": ranges})
 
 
 @app.get("/")

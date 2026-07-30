@@ -21,7 +21,14 @@ from backend.app import (
     app,
     response_cache,
 )
-from backend.models import Anime, Manga, db
+from backend.models import (
+    Anime,
+    AnimeStreamingService,
+    Manga,
+    StreamingService,
+    Studio,
+    db,
+)
 
 
 class AppTests(unittest.TestCase):
@@ -38,6 +45,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(body["pagination"]["per_page"], 2)
         self.assertGreaterEqual(body["items"][0]["year"], 2020)
         self.assertIn("status", body["items"][0])
+        self.assertIn("studios", body["items"][0])
+        self.assertIn("streaming_services", body["items"][0])
 
     def test_anime_detail_returns_detailed_tags(self):
         response = self.client.get("/api/v1/anime/52991")
@@ -195,6 +204,72 @@ class AppTests(unittest.TestCase):
 
         self.assertEqual(item["status"], "CURRENTLY_AIRING")
 
+    def test_anime_serializer_exposes_sorted_studios_and_streaming_links(self):
+        anime = Anime(
+            animeID=13,
+            mal_id=25,
+            title="Relationship Example",
+            alternative_title=None,
+            synopsis=None,
+            type="TV",
+            season="summer",
+            status="CURRENTLY_AIRING",
+            year=2026,
+            score=8.0,
+            episodes=12,
+            mal_url="https://myanimelist.net/anime/25",
+            sequel=False,
+            image_url="",
+            legacy_genres=[],
+            genres_detailed=[],
+        )
+        anime.studio_entries.extend(
+            [
+                Studio(mal_id=2, name="Zeta Studio", normalized_name="zeta studio"),
+                Studio(mal_id=1, name="Alpha Studio", normalized_name="alpha studio"),
+            ]
+        )
+        crunchyroll = StreamingService(
+            name="Crunchyroll",
+            normalized_name="crunchyroll",
+        )
+        netflix = StreamingService(name="Netflix", normalized_name="netflix")
+        anime.streaming_links.extend(
+            [
+                AnimeStreamingService(
+                    streaming_service=netflix,
+                    url="https://example.test/netflix",
+                ),
+                AnimeStreamingService(
+                    streaming_service=crunchyroll,
+                    url="https://example.test/crunchyroll",
+                ),
+            ]
+        )
+
+        item = _serialize_anime(anime)
+
+        self.assertEqual(
+            item["studios"],
+            [
+                {"mal_id": 1, "name": "Alpha Studio"},
+                {"mal_id": 2, "name": "Zeta Studio"},
+            ],
+        )
+        self.assertEqual(
+            item["streaming_services"],
+            [
+                {
+                    "name": "Crunchyroll",
+                    "url": "https://example.test/crunchyroll",
+                },
+                {
+                    "name": "Netflix",
+                    "url": "https://example.test/netflix",
+                },
+            ],
+        )
+
     def test_anime_status_filter_uses_canonical_indexed_predicate(self):
         with app.test_request_context(
             "/api/v1/catalogue?content_type=ANIME"
@@ -212,6 +287,91 @@ class AppTests(unittest.TestCase):
             "anime.status in ('currently_airing')",
             sql,
         )
+
+    def test_anime_studio_and_streaming_filters_use_any_match_exists_predicates(self):
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ANIME"
+            "&studio=Studio%20Pierrot&studio=MAPPA"
+            "&streaming_service=Crunchyroll"
+            "&streaming_service=Netflix"
+        ):
+            statement = _filtered_anime_statement()
+        sql = str(
+            statement.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).lower()
+
+        self.assertIn("exists", sql)
+        self.assertIn("studio.normalized_name in ('studio pierrot', 'mappa')", sql)
+        self.assertIn(
+            "streaming_service.normalized_name in ('crunchyroll', 'netflix')",
+            sql,
+        )
+        # One IN predicate gives match-any semantics. Repeating one EXISTS per
+        # selected value would accidentally require an anime to match all.
+        self.assertEqual(sql.count("studio.normalized_name in"), 1)
+        self.assertEqual(sql.count("streaming_service.normalized_name in"), 1)
+
+    def test_anime_only_relationship_filters_narrow_mixed_catalogue_results(self):
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ALL&studio=MAPPA"
+        ):
+            catalogue_rows = _catalogue_rows_subquery(
+                {"ANIME", "MANGA", "MANHWA"}
+            )
+        sql = str(
+            select(catalogue_rows).compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).lower()
+
+        self.assertIn("'anime' as content_type", sql)
+        self.assertNotIn("from manga", sql)
+
+    def test_streaming_filter_narrows_mixed_catalogue_results_to_anime(self):
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ALL"
+            "&streaming_service=Crunchyroll"
+        ):
+            catalogue_rows = _catalogue_rows_subquery(
+                {"ANIME", "MANGA", "MANHWA"}
+            )
+        sql = str(
+            select(catalogue_rows).compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).lower()
+
+        self.assertIn("'anime' as content_type", sql)
+        self.assertIn("streaming_service.normalized_name", sql)
+        self.assertNotIn("from manga", sql)
+
+    def test_print_length_filters_narrow_mixed_catalogue_results_to_print(self):
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ALL"
+            "&min_chapters=10&max_chapters=100"
+            "&min_volumes=2&max_volumes=12"
+        ):
+            catalogue_rows = _catalogue_rows_subquery(
+                {"ANIME", "MANGA", "MANHWA"}
+            )
+        sql = str(
+            select(catalogue_rows).compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).lower()
+
+        self.assertNotIn("from anime", sql)
+        self.assertIn("from manga", sql)
+        self.assertIn("manga.chapters >= 10", sql)
+        self.assertIn("manga.chapters <= 100", sql)
+        self.assertIn("manga.volumes >= 2", sql)
+        self.assertIn("manga.volumes <= 12", sql)
 
     def test_anime_and_print_status_semantics_are_kept_separate(self):
         invalid_anime = self.client.get(
@@ -293,6 +453,67 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("anime.score is not null", anime_sql)
         self.assertNotIn("manga.score is not null", manga_sql)
 
+    def test_range_predicates_only_exclude_unknown_values_when_active(self):
+        with app.test_request_context("/api/v1/catalogue?content_type=ANIME"):
+            unrestricted_anime_sql = str(
+                _filtered_anime_statement().compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            ).lower()
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ANIME"
+            "&min_year=2000&max_year=2026"
+            "&min_episodes=6&max_episodes=24&min_score=7"
+        ):
+            restricted_anime_sql = str(
+                _filtered_anime_statement().compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            ).lower()
+        with app.test_request_context("/api/v1/catalogue?content_type=MANGA"):
+            unrestricted_print_sql = str(
+                _filtered_manga_statement({"MANGA"}).compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            ).lower()
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=MANGA"
+            "&min_chapters=10&max_chapters=100"
+            "&min_volumes=2&max_volumes=12"
+        ):
+            restricted_print_sql = str(
+                _filtered_manga_statement({"MANGA"}).compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            ).lower()
+
+        # With no range predicate, NULL/unknown metadata remains eligible.
+        self.assertNotIn("anime.year >=", unrestricted_anime_sql)
+        self.assertNotIn("anime.year <=", unrestricted_anime_sql)
+        self.assertNotIn("anime.episodes >=", unrestricted_anime_sql)
+        self.assertNotIn("anime.episodes <=", unrestricted_anime_sql)
+        self.assertNotIn("anime.score >=", unrestricted_anime_sql)
+        self.assertNotIn("manga.chapters >=", unrestricted_print_sql)
+        self.assertNotIn("manga.chapters <=", unrestricted_print_sql)
+        self.assertNotIn("manga.volumes >=", unrestricted_print_sql)
+        self.assertNotIn("manga.volumes <=", unrestricted_print_sql)
+
+        # SQL comparisons evaluate to UNKNOWN for NULL, so an active range
+        # excludes records whose value cannot be confirmed to match.
+        self.assertIn("anime.year >= 2000", restricted_anime_sql)
+        self.assertIn("anime.year <= 2026", restricted_anime_sql)
+        self.assertIn("anime.episodes >= 6", restricted_anime_sql)
+        self.assertIn("anime.episodes <= 24", restricted_anime_sql)
+        self.assertIn("anime.score >= 7", restricted_anime_sql)
+        self.assertIn("manga.chapters >= 10", restricted_print_sql)
+        self.assertIn("manga.chapters <= 100", restricted_print_sql)
+        self.assertIn("manga.volumes >= 2", restricted_print_sql)
+        self.assertIn("manga.volumes <= 12", restricted_print_sql)
+
     def test_pagination_pages_share_one_total_count_cache_key(self):
         with app.test_request_context(
             "/api/v1/catalogue?content_type=ANIME&page=1&per_page=24"
@@ -326,6 +547,75 @@ class AppTests(unittest.TestCase):
         self.assertEqual(action.get_json()["items"], ["action"])
         self.assertEqual(school.get_json()["items"], ["school"])
         load_tags.assert_called_once()
+
+    def test_studio_and_streaming_searches_reuse_precomputed_facets(self):
+        def load_facets(_content_types, facet_type):
+            if facet_type == "studio":
+                return ("Bones", "MAPPA", "Studio Pierrot")
+            return ("Crunchyroll", "Netflix")
+
+        with patch(
+            "backend.app._load_facet_names",
+            side_effect=load_facets,
+        ) as load_options:
+            mappa = self.client.get("/api/v1/studios?q=map")
+            pierrot = self.client.get("/api/v1/studios?q=pier")
+            netflix = self.client.get("/api/v1/streaming-services?q=net")
+
+        self.assertEqual(mappa.get_json()["items"], ["MAPPA"])
+        self.assertEqual(pierrot.get_json()["items"], ["Studio Pierrot"])
+        self.assertEqual(netflix.get_json()["items"], ["Netflix"])
+        self.assertEqual(load_options.call_count, 2)
+
+    def test_filter_range_endpoint_returns_content_appropriate_bounds(self):
+        anime = self.client.get(
+            "/api/v1/filter-ranges",
+            query_string={"content_type": "ANIME"},
+        )
+        manga = self.client.get(
+            "/api/v1/filter-ranges",
+            query_string={"content_type": "MANGA"},
+        )
+        mixed = self.client.get(
+            "/api/v1/filter-ranges",
+            query_string={"content_type": "ALL"},
+        )
+
+        self.assertEqual(anime.status_code, 200)
+        self.assertIsNotNone(anime.get_json()["ranges"]["episodes"])
+        self.assertIsNone(anime.get_json()["ranges"]["chapters"])
+        self.assertEqual(manga.status_code, 200)
+        self.assertIsNotNone(manga.get_json()["ranges"]["chapters"])
+        self.assertIsNotNone(manga.get_json()["ranges"]["volumes"])
+        self.assertIsNone(manga.get_json()["ranges"]["episodes"])
+        self.assertEqual(mixed.status_code, 200)
+        self.assertIsNotNone(mixed.get_json()["ranges"]["year"])
+        self.assertIsNotNone(mixed.get_json()["ranges"]["score"])
+
+    def test_filter_range_endpoint_reuses_one_cached_scope(self):
+        ranges = {
+            "year": {"min": 2000, "max": 2026},
+            "score": {"min": 1.0, "max": 10.0},
+            "episodes": {"min": 1, "max": 1000},
+            "chapters": None,
+            "volumes": None,
+        }
+        with patch(
+            "backend.app._load_filter_ranges",
+            return_value=ranges,
+        ) as load_ranges:
+            first = self.client.get(
+                "/api/v1/filter-ranges",
+                query_string={"content_type": "ANIME"},
+            )
+            second = self.client.get(
+                "/api/v1/filter-ranges",
+                query_string={"content_type": "ANIME"},
+            )
+
+        self.assertEqual(first.get_json()["ranges"], ranges)
+        self.assertEqual(second.get_json()["ranges"], ranges)
+        load_ranges.assert_called_once()
 
     def test_manga_serializer_exposes_print_metadata(self):
         manga = Manga(
@@ -406,7 +696,8 @@ class AppTests(unittest.TestCase):
     def test_manhwa_filter_query_contains_every_requested_predicate(self):
         with app.test_request_context(
             "/api/v1/catalogue?content_type=MANHWA&status=PUBLISHING"
-            "&min_chapters=25&min_volumes=3&min_score=7&min_year=2000"
+            "&min_chapters=25&max_chapters=250"
+            "&min_volumes=3&max_volumes=30&min_score=7&min_year=2000"
             "&max_year=2030&genre=Action&tag=school"
         ):
             statement = _filtered_manga_statement({"MANHWA"})
@@ -420,12 +711,43 @@ class AppTests(unittest.TestCase):
         self.assertIn("manga.content_type in ('manhwa')", sql)
         self.assertIn("lower(trim(manga.status)) in ('publishing')", sql)
         self.assertIn("manga.chapters >= 25", sql)
+        self.assertIn("manga.chapters <= 250", sql)
         self.assertIn("manga.volumes >= 3", sql)
+        self.assertIn("manga.volumes <= 30", sql)
         self.assertIn("manga.score >= 7", sql)
         self.assertIn("manga.publication_year >= 2000", sql)
         self.assertIn("manga.publication_year <= 2030", sql)
         self.assertIn("genre.name = 'action'", sql)
         self.assertIn("manga.genres_detailed @> array['school']", sql)
+
+    def test_manga_range_filters_reject_reversed_bounds(self):
+        chapters = self.client.get(
+            "/api/v1/catalogue",
+            query_string={
+                "content_type": "MANGA",
+                "min_chapters": 100,
+                "max_chapters": 10,
+            },
+        )
+        volumes = self.client.get(
+            "/api/v1/catalogue",
+            query_string={
+                "content_type": "MANHWA",
+                "min_volumes": 20,
+                "max_volumes": 2,
+            },
+        )
+
+        self.assertEqual(chapters.status_code, 400)
+        self.assertIn(
+            "min_chapters cannot be greater than max_chapters",
+            chapters.get_json()["error"]["message"],
+        )
+        self.assertEqual(volumes.status_code, 400)
+        self.assertIn(
+            "min_volumes cannot be greater than max_volumes",
+            volumes.get_json()["error"]["message"],
+        )
 
     def test_content_scoped_facets_and_random_endpoint_are_available(self):
         genre_response = self.client.get(
@@ -444,6 +766,50 @@ class AppTests(unittest.TestCase):
         self.assertEqual(tag_response.status_code, 200)
         self.assertEqual(random_response.status_code, 200)
         self.assertLessEqual(len(random_response.get_json()["items"]), 2)
+
+    def test_anime_random_endpoint_applies_relationship_filters(self):
+        response = self.client.get(
+            "/api/v1/anime/random",
+            query_string={
+                "studio": "Studio That Cannot Exist 4d27dc9f",
+                "limit": 2,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["items"], [])
+
+    def test_anime_routes_expose_studio_and_streaming_fields(self):
+        routes = (
+            "/api/v1/anime?per_page=1",
+            "/api/v1/anime/random?limit=1",
+            "/api/v1/catalogue?content_type=ALL&max_episodes=10000&per_page=1",
+            "/api/v1/catalogue/random?content_type=ALL"
+            "&max_episodes=10000&limit=1",
+            "/api/v1/anime/52991",
+        )
+        for route in routes:
+            with self.subTest(route=route):
+                response = self.client.get(route)
+                body = response.get_json()
+                self.assertEqual(response.status_code, 200)
+                entries = body.get("items") or [body.get("item")]
+                self.assertTrue(entries)
+                self.assertIsNotNone(entries[0])
+                self.assertEqual(entries[0]["content_type"], "ANIME")
+                self.assertIn("studios", entries[0])
+                self.assertIn("streaming_services", entries[0])
+
+        with patch(
+            "backend.app._current_season_identity",
+            return_value=(2026, "summer"),
+        ):
+            seasonal = self.client.get("/api/v1/anime/seasonal?limit=1")
+        seasonal_body = seasonal.get_json()
+        self.assertEqual(seasonal.status_code, 200)
+        self.assertTrue(seasonal_body["items"])
+        self.assertIn("studios", seasonal_body["items"][0])
+        self.assertIn("streaming_services", seasonal_body["items"][0])
 
     def test_invalid_catalogue_content_type_returns_json_error(self):
         response = self.client.get(

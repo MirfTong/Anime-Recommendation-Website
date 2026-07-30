@@ -2,11 +2,15 @@ import unittest
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from email.message import Message
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 
 from backend.jobs.jikan_etl import (
+    AnimeAssociationCaches,
+    AnimeAssociationStats,
     BulkSeasonSyncResult,
     CatalogueRefreshResult,
     CurrentSeasonSyncResult,
@@ -25,9 +29,13 @@ from backend.jobs.jikan_etl import (
     _is_hentai,
     _names,
     _new_anime,
+    _normalized_entity_name,
     _prepared_season_entry,
+    _report_anime_associations,
+    _safe_streaming_url,
     _season,
     _season_from_air_date,
+    _studio_for_value,
     _update_anime,
     _valid_score,
     backfill_missing_seasons,
@@ -49,6 +57,12 @@ from backend.services.jikan_client import (
     JikanAnimePage,
     JikanSeasonPage,
     JikanTemporaryError,
+)
+from backend.models import (
+    AnimeStreamingService,
+    AnimeStudio,
+    StreamingService,
+    Studio,
 )
 
 
@@ -89,6 +103,330 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(
             _names([None, "Action", {"name": None}, {"name": " Drama "}]),
             ["Drama"],
+        )
+
+    def test_normalizes_relationship_names_and_rejects_unsafe_streaming_urls(self):
+        self.assertEqual(
+            _normalized_entity_name("  Studio\u3000PIERROT  "),
+            "studio pierrot",
+        )
+        self.assertIsNone(_normalized_entity_name("x" * 151))
+        self.assertEqual(
+            _safe_streaming_url(" https://example.test/watch/1 "),
+            "https://example.test/watch/1",
+        )
+        self.assertIsNone(_safe_streaming_url("javascript:alert(1)"))
+        self.assertIsNone(_safe_streaming_url("https:///missing-host"))
+
+    def test_studio_identity_collision_merges_links_without_unique_conflicts(self):
+        provider_studio = Studio(
+            mal_id=20,
+            name="Provider Studio",
+            normalized_name="provider studio",
+        )
+        name_studio = Studio(
+            mal_id=10,
+            name="Renamed Studio",
+            normalized_name="renamed studio",
+        )
+        first_anime = anime_record()
+        second_anime = anime_record()
+        second_anime.animeID = 2
+        second_anime.mal_id = 2
+        AnimeStudio(anime=first_anime, studio=provider_studio)
+        AnimeStudio(anime=second_anime, studio=name_studio)
+        caches = AnimeAssociationCaches(
+            studios_by_name={
+                provider_studio.normalized_name: provider_studio,
+                name_studio.normalized_name: name_studio,
+            },
+            studios_by_mal_id={
+                provider_studio.mal_id: provider_studio,
+                name_studio.mal_id: name_studio,
+            },
+            streaming_services_by_name={},
+        )
+
+        with patch("backend.jobs.jikan_etl.db"):
+            studio, changed = _studio_for_value(
+                20,
+                "Renamed Studio",
+                "renamed studio",
+                caches,
+            )
+
+        self.assertIs(studio, provider_studio)
+        self.assertTrue(changed)
+        self.assertEqual(studio.name, "Renamed Studio")
+        self.assertEqual(studio.normalized_name, "renamed studio")
+        self.assertEqual(
+            {link.anime for link in studio.anime_links},
+            {first_anime, second_anime},
+        )
+        self.assertNotIn(name_studio, caches.studios_by_name.values())
+        self.assertIs(caches.studios_by_mal_id[10], provider_studio)
+        self.assertIs(caches.studios_by_mal_id[20], provider_studio)
+
+    def test_sparse_or_malformed_relationship_fields_preserve_existing_links(self):
+        anime = anime_record()
+        studio = Studio(
+            mal_id=1,
+            name="Existing Studio",
+            normalized_name="existing studio",
+        )
+        service = StreamingService(
+            name="Existing Service",
+            normalized_name="existing service",
+        )
+        studio_link = AnimeStudio(studio=studio)
+        streaming_link = AnimeStreamingService(
+            streaming_service=service,
+            url="https://example.test/old",
+        )
+        anime.studio_links.append(studio_link)
+        anime.streaming_links.append(streaming_link)
+        caches = AnimeAssociationCaches(
+            studios_by_name={studio.normalized_name: studio},
+            studios_by_mal_id={studio.mal_id: studio},
+            streaming_services_by_name={service.normalized_name: service},
+        )
+        stats = AnimeAssociationStats()
+
+        with patch("backend.jobs.jikan_etl.db") as mock_db:
+            _update_anime(
+                anime,
+                {
+                    "genres": [],
+                    "studios": {"unexpected": "object"},
+                    "streaming": "unexpected string",
+                },
+                {},
+                caches,
+                stats,
+            )
+            _update_anime(anime, {"genres": []}, {}, caches, stats)
+
+        self.assertEqual(anime.studio_links, [studio_link])
+        self.assertEqual(anime.streaming_links, [streaming_link])
+        self.assertEqual(stats.malformed_studio_entries, 1)
+        self.assertEqual(stats.malformed_streaming_entries, 1)
+        mock_db.session.delete.assert_not_called()
+
+    def test_explicit_empty_relationship_arrays_remove_stale_links(self):
+        anime = anime_record()
+        studio = Studio(
+            mal_id=1,
+            name="Existing Studio",
+            normalized_name="existing studio",
+        )
+        service = StreamingService(
+            name="Existing Service",
+            normalized_name="existing service",
+        )
+        studio_link = AnimeStudio(studio=studio)
+        streaming_link = AnimeStreamingService(
+            streaming_service=service,
+            url="https://example.test/old",
+        )
+        anime.studio_links.append(studio_link)
+        anime.streaming_links.append(streaming_link)
+        caches = AnimeAssociationCaches(
+            studios_by_name={studio.normalized_name: studio},
+            studios_by_mal_id={studio.mal_id: studio},
+            streaming_services_by_name={service.normalized_name: service},
+        )
+        stats = AnimeAssociationStats()
+
+        with patch("backend.jobs.jikan_etl.db") as mock_db:
+            _update_anime(
+                anime,
+                {"genres": [], "studios": [], "streaming": []},
+                {},
+                caches,
+                stats,
+            )
+
+        self.assertEqual(mock_db.session.delete.call_count, 2)
+        self.assertEqual(stats.studio_links_removed, 1)
+        self.assertEqual(stats.streaming_links_removed, 1)
+        self.assertEqual(stats.anime_with_studios_updated, 1)
+        self.assertEqual(stats.anime_with_streaming_updated, 1)
+
+    def test_partially_malformed_relationship_arrays_are_additive_only(self):
+        anime = anime_record()
+        old_studio = Studio(
+            mal_id=1,
+            name="Old Studio",
+            normalized_name="old studio",
+        )
+        old_service = StreamingService(
+            name="Old Service",
+            normalized_name="old service",
+        )
+        anime.studio_links.append(AnimeStudio(studio=old_studio))
+        anime.streaming_links.append(
+            AnimeStreamingService(
+                streaming_service=old_service,
+                url="https://example.test/old",
+            )
+        )
+        caches = AnimeAssociationCaches(
+            studios_by_name={old_studio.normalized_name: old_studio},
+            studios_by_mal_id={old_studio.mal_id: old_studio},
+            streaming_services_by_name={old_service.normalized_name: old_service},
+        )
+        stats = AnimeAssociationStats()
+
+        with patch("backend.jobs.jikan_etl.db") as mock_db:
+            _update_anime(
+                anime,
+                {
+                    "genres": [],
+                    "studios": [
+                        {"mal_id": 2, "name": " New   Studio "},
+                        None,
+                    ],
+                    "streaming": [
+                        {
+                            "name": "New Service",
+                            "url": "https://example.test/new",
+                        },
+                        {
+                            "name": "Unsafe Service",
+                            "url": "javascript:alert(1)",
+                        },
+                    ],
+                },
+                {},
+                caches,
+                stats,
+            )
+
+        self.assertEqual(stats.studio_links_created, 1)
+        self.assertEqual(stats.streaming_links_created, 1)
+        self.assertEqual(stats.studio_links_removed, 0)
+        self.assertEqual(stats.streaming_links_removed, 0)
+        self.assertEqual(stats.malformed_studio_entries, 1)
+        self.assertEqual(stats.malformed_streaming_entries, 1)
+        self.assertEqual(len(anime.studio_links), 2)
+        self.assertEqual(len(anime.streaming_links), 2)
+        mock_db.session.delete.assert_not_called()
+
+    def test_streaming_url_changes_are_reconciled_and_counted(self):
+        anime = anime_record()
+        service = StreamingService(
+            name="Crunchyroll",
+            normalized_name="crunchyroll",
+        )
+        link = AnimeStreamingService(
+            streaming_service=service,
+            url="https://example.test/old",
+        )
+        anime.streaming_links.append(link)
+        caches = AnimeAssociationCaches(
+            studios_by_name={},
+            studios_by_mal_id={},
+            streaming_services_by_name={service.normalized_name: service},
+        )
+        stats = AnimeAssociationStats()
+
+        _update_anime(
+            anime,
+            {
+                "genres": [],
+                "streaming": [
+                    {
+                        "name": " Crunchyroll ",
+                        "url": "https://example.test/new",
+                    }
+                ],
+            },
+            {},
+            caches,
+            stats,
+        )
+
+        self.assertEqual(link.url, "https://example.test/new")
+        self.assertEqual(stats.streaming_urls_updated, 1)
+        self.assertEqual(stats.anime_with_streaming_updated, 1)
+
+    def test_named_season_listing_reconciles_studio_relationships(self):
+        anime = anime_record(season=None)
+        seasonal_data = {
+            "mal_id": 1,
+            "title": "Studio listing example",
+            "type": "TV",
+            "genres": [],
+            "studios": [
+                {
+                    "mal_id": 11,
+                    "name": "  Example   Studio  ",
+                }
+            ],
+        }
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            # Existing anime, genres, studios, and streaming services.
+            mock_db.session.scalars.side_effect = [[anime], [], [], []]
+            saved, skipped = sync_season(
+                2026,
+                "summer",
+                fetch_season=lambda _year, _season: [seasonal_data],
+            )
+
+        self.assertEqual((saved, skipped), (1, 0))
+        self.assertEqual(len(anime.studio_links), 1)
+        self.assertEqual(anime.studio_links[0].studio.mal_id, 11)
+        self.assertEqual(anime.studio_links[0].studio.name, "Example Studio")
+        self.assertEqual(
+            anime.studio_links[0].studio.normalized_name,
+            "example studio",
+        )
+        mock_db.session.commit.assert_called()
+
+    def test_full_detail_refresh_reconciles_streaming_relationships(self):
+        anime = anime_record()
+        payload = {
+            "data": {
+                "mal_id": anime.mal_id,
+                "title": anime.title,
+                "genres": [],
+                "streaming": [
+                    {
+                        "name": "Crunchyroll",
+                        "url": "https://www.crunchyroll.com/watch/example",
+                    }
+                ],
+            }
+        }
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            # Selected anime, genres, studios, and streaming services.
+            mock_db.session.scalars.side_effect = [[anime], [], [], []]
+            result = refresh_catalogue(
+                anime_ids=[anime.mal_id],
+                fetch_anime=lambda _mal_id: payload,
+            )
+
+        self.assertEqual(result.updated, 1)
+        self.assertEqual(result.associations.streaming_payloads_processed, 1)
+        self.assertEqual(result.associations.streaming_links_created, 1)
+        self.assertEqual(
+            result.associations.anime_with_streaming_updated,
+            1,
+        )
+        self.assertEqual(len(anime.streaming_links), 1)
+        self.assertEqual(
+            anime.streaming_links[0].streaming_service.name,
+            "Crunchyroll",
+        )
+        self.assertEqual(
+            anime.streaming_links[0].url,
+            "https://www.crunchyroll.com/watch/example",
         )
 
     def test_preserves_existing_detailed_tags_and_adds_jikan_categories(self):
@@ -321,6 +659,45 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(result.skipped, 957)
         self.assertAlmostEqual(result.success_rate, 0.043)
 
+    def test_relationship_stats_accumulate_and_render_in_the_action_summary(self):
+        combined = AnimeAssociationStats(
+            studio_payloads_processed=6,
+            anime_with_studios_updated=2,
+            studio_links_created=3,
+            malformed_studio_entries=1,
+        )
+        combined.add(
+            AnimeAssociationStats(
+                streaming_payloads_processed=7,
+                anime_with_streaming_updated=4,
+                streaming_links_created=5,
+                streaming_links_removed=2,
+                streaming_urls_updated=1,
+                malformed_streaming_entries=2,
+                reconciliation_failures=1,
+            )
+        )
+
+        with TemporaryDirectory() as temporary_directory:
+            summary_path = Path(temporary_directory) / "summary.md"
+            with patch.dict(
+                "os.environ",
+                {"GITHUB_STEP_SUMMARY": str(summary_path)},
+                clear=False,
+            ):
+                _report_anime_associations(combined)
+            summary = summary_path.read_text(encoding="utf-8")
+
+        self.assertIn("Anime studios and streaming services", summary)
+        self.assertIn("**Studio payloads processed:** 6", summary)
+        self.assertIn("**Anime with studios updated:** 2", summary)
+        self.assertIn("**Studio relationships created:** 3", summary)
+        self.assertIn("**Streaming payloads processed:** 7", summary)
+        self.assertIn("**Streaming relationships created:** 5", summary)
+        self.assertIn("**Streaming relationships removed:** 2", summary)
+        self.assertIn("**Provider/reconciliation failures:** 1", summary)
+        self.assertIn("**Relationship metadata failures:** 3", summary)
+
     def test_scheduled_sync_runs_every_phase_and_reports_coverage(self):
         current = CurrentSeasonSyncResult(removed_hentai=1)
         bulk = BulkSeasonSyncResult(removed_hentai=2)
@@ -401,6 +778,7 @@ class JikanEtlTests(unittest.TestCase):
                 "_report_supplemental_catalogue",
                 "_report_season_backfill",
                 "_report_catalogue",
+                "_report_anime_associations",
                 "report_manga_catalogue",
                 "report_manga_cleanup",
                 "report_manga_refresh",
@@ -664,6 +1042,45 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(result.next_page, 1)
         self.assertEqual(apply_page.call_count, 6)
 
+    def test_current_season_accumulates_studio_relationship_metrics(self):
+        season_page = JikanSeasonPage(
+            entries=[
+                {
+                    "mal_id": 1,
+                    "type": "TV",
+                    "studios": [{"mal_id": 7, "name": "Bones"}],
+                }
+            ],
+            page=1,
+            has_next_page=False,
+        )
+        associations = AnimeAssociationStats(
+            anime_with_studios_updated=1,
+            studio_links_created=1,
+        )
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl._next_page", return_value=1),
+            patch(
+                "backend.jobs.jikan_etl._apply_season_page",
+                return_value=SeasonPageApplyResult(
+                    saved=1,
+                    associations=associations,
+                ),
+            ) as apply_page,
+        ):
+            result = sync_current_season(
+                fetch_page=lambda _year, _season, *, page: season_page,
+                now=datetime(2026, 7, 22, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(result.associations.anime_with_studios_updated, 1)
+        self.assertEqual(result.associations.studio_links_created, 1)
+        self.assertEqual(
+            apply_page.call_args.args[0].entries[0]["studios"][0]["name"],
+            "Bones",
+        )
+
     def test_bulk_season_sync_commits_multiple_catalogue_pages(self):
         requested_pages = []
 
@@ -694,6 +1111,45 @@ class JikanEtlTests(unittest.TestCase):
         self.assertTrue(result.complete)
         self.assertEqual(result.next_page, 1)
         self.assertEqual(apply_page.call_count, 2)
+
+    def test_bulk_tv_sync_accumulates_studio_relationship_metrics(self):
+        catalogue_page = JikanAnimePage(
+            entries=[
+                {
+                    "mal_id": 1,
+                    "type": "TV",
+                    "studios": [{"mal_id": 7, "name": "Bones"}],
+                }
+            ],
+            page=1,
+            has_next_page=False,
+            last_visible_page=1,
+        )
+        associations = AnimeAssociationStats(
+            anime_with_studios_updated=1,
+            studio_links_created=1,
+        )
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl._next_page", return_value=1),
+            patch(
+                "backend.jobs.jikan_etl._apply_season_page",
+                return_value=SeasonPageApplyResult(
+                    saved=1,
+                    associations=associations,
+                ),
+            ) as apply_page,
+        ):
+            result = sync_bulk_anime_seasons(
+                fetch_page=lambda *, page: catalogue_page,
+            )
+
+        self.assertEqual(result.associations.anime_with_studios_updated, 1)
+        self.assertEqual(result.associations.studio_links_created, 1)
+        self.assertEqual(
+            apply_page.call_args.args[0].entries[0]["studios"][0]["name"],
+            "Bones",
+        )
 
     def test_bulk_season_sync_preserves_failed_page_and_stops_during_outage(self):
         def fetch_page(*, page):
@@ -855,8 +1311,21 @@ class JikanEtlTests(unittest.TestCase):
 
     def test_supplemental_sync_uses_independent_type_cursors(self):
         scan_results = [
-            BulkSeasonSyncResult(inserted=index)
-            for index in range(1, len(SUPPLEMENTAL_PROVIDER_TYPES) + 1)
+            BulkSeasonSyncResult(
+                inserted=index,
+                associations=AnimeAssociationStats(
+                    anime_with_studios_updated=(
+                        1 if anime_type == "movie" else 0
+                    ),
+                    studio_links_created=(
+                        2 if anime_type == "movie" else 0
+                    ),
+                ),
+            )
+            for index, anime_type in enumerate(
+                SUPPLEMENTAL_PROVIDER_TYPES,
+                start=1,
+            )
         ]
         with patch(
             "backend.jobs.jikan_etl._sync_bulk_anime_type",
@@ -864,6 +1333,7 @@ class JikanEtlTests(unittest.TestCase):
         ) as sync_type:
             result = sync_supplemental_anime_types(max_pages=7)
 
+        self.assertIn("movie", SUPPLEMENTAL_PROVIDER_TYPES)
         self.assertEqual(sync_type.call_count, len(SUPPLEMENTAL_PROVIDER_TYPES))
         for anime_type, sync_call in zip(
             SUPPLEMENTAL_PROVIDER_TYPES,
@@ -878,7 +1348,22 @@ class JikanEtlTests(unittest.TestCase):
             self.assertTrue(sync_call.kwargs["discover_missing"])
             self.assertEqual(sync_call.kwargs["max_pages"], 7)
             self.assertEqual(sync_call.kwargs["max_consecutive_failures"], 3)
-        self.assertEqual(result.inserted, sum(range(1, 5)))
+        self.assertEqual(
+            result.inserted,
+            sum(range(1, len(SUPPLEMENTAL_PROVIDER_TYPES) + 1)),
+        )
+        self.assertEqual(result.associations.anime_with_studios_updated, 1)
+        self.assertEqual(result.associations.studio_links_created, 2)
+        movie_call = next(
+            call
+            for call in sync_type.call_args_list
+            if call.kwargs["anime_type"] == "movie"
+        )
+        self.assertTrue(movie_call.kwargs["discover_missing"])
+        self.assertEqual(
+            movie_call.kwargs["state_key"],
+            SUPPLEMENTAL_STATE_KEYS["movie"],
+        )
 
     def test_cleanup_deletes_matching_adult_anime_but_keeps_shared_genres(self):
         with (

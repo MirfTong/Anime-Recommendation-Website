@@ -15,12 +15,16 @@ const EMPTY_FILTERS = {
   min_episodes: "",
   max_episodes: "",
   min_chapters: "",
+  max_chapters: "",
   min_volumes: "",
+  max_volumes: "",
   type: "",
   season: "",
   status: "",
   genre: [],
   tag: [],
+  studio: [],
+  streaming_service: [],
 };
 
 const COMMON_FILTER_KEYS = [
@@ -38,12 +42,27 @@ const ANIME_FILTER_KEYS = [
   "type",
   "season",
   "status",
+  "studio",
+  "streaming_service",
 ];
 const PRINT_FILTER_KEYS = [
   ...COMMON_FILTER_KEYS,
   "min_chapters",
+  "max_chapters",
   "min_volumes",
+  "max_volumes",
   "status",
+];
+const ALL_FILTER_KEYS = [
+  ...COMMON_FILTER_KEYS,
+  "min_episodes",
+  "max_episodes",
+  "min_chapters",
+  "max_chapters",
+  "min_volumes",
+  "max_volumes",
+  "studio",
+  "streaming_service",
 ];
 const PAGE_WINDOW_SIZE = 8;
 
@@ -52,6 +71,8 @@ export function filtersFor() {
     ...EMPTY_FILTERS,
     genre: [],
     tag: [],
+    studio: [],
+    streaming_service: [],
   };
 }
 
@@ -86,7 +107,7 @@ function filterKeysFor(contentType) {
   if (contentType === "MANGA" || contentType === "MANHWA") {
     return PRINT_FILTER_KEYS;
   }
-  return COMMON_FILTER_KEYS;
+  return ALL_FILTER_KEYS;
 }
 
 function addFilterParams(params, filters, contentType) {
@@ -109,6 +130,19 @@ export function queryString(
     page: String(page),
     per_page: "24",
     sort,
+  });
+  addFilterParams(params, filters, contentType);
+  return params.toString();
+}
+
+export function randomQueryString(
+  filters,
+  contentType = "ANIME",
+  limit = 6,
+) {
+  const params = new URLSearchParams({
+    content_type: contentType,
+    limit: String(limit),
   });
   addFilterParams(params, filters, contentType);
   return params.toString();
@@ -314,25 +348,64 @@ export function filtersFromPreset(preset) {
 
 export function activeFilterChips(filters, contentType) {
   const chips = [];
+  const activeKeys = filterKeysFor(contentType);
   filters.genre.forEach((value) => {
     chips.push({ key: "genre", value, label: value });
   });
   filters.tag.forEach((value) => {
     chips.push({ key: "tag", value, label: `Tag: ${value}` });
   });
+  if (activeKeys.includes("studio")) {
+    filters.studio.forEach((value) => {
+      chips.push({ key: "studio", value, label: `Studio: ${value}` });
+    });
+  }
+  if (activeKeys.includes("streaming_service")) {
+    filters.streaming_service.forEach((value) => {
+      chips.push({
+        key: "streaming_service",
+        value,
+        label: `Streaming: ${value}`,
+      });
+    });
+  }
+
+  const addRangeChip = (label, minKey, maxKey) => {
+    const minimum = filters[minKey];
+    const maximum = filters[maxKey];
+    if (!activeKeys.includes(minKey)
+      || (!minimum && !maximum)) {
+      return;
+    }
+    let valueLabel;
+    if (minimum && maximum) {
+      valueLabel = `${minimum}–${maximum}`;
+    } else if (minimum) {
+      valueLabel = `${minimum}+`;
+    } else {
+      valueLabel = `up to ${maximum}`;
+    }
+    chips.push({
+      key: `${minKey}:${maxKey}`,
+      keys: [minKey, maxKey],
+      value: `${minimum}:${maximum}`,
+      label: `${label}: ${valueLabel}`,
+    });
+  };
+
   const scalarLabels = {
     type: (value) => `Type: ${value}`,
     season: (value) => `Season: ${formatSeason(value)}`,
     min_score: (value) => `Score: ${value}+`,
-    min_year: (value) => `From: ${value}`,
-    max_year: (value) => `To: ${value}`,
     status: (value) => `Status: ${formatStatus(value)}`,
-    min_episodes: (value) => `Episodes: ${value}+`,
-    max_episodes: (value) => `Episodes: up to ${value}`,
-    min_chapters: (value) => `Chapters: ${value}+`,
-    min_volumes: (value) => `Volumes: ${value}+`,
   };
-  filterKeysFor(contentType).forEach((key) => {
+
+  addRangeChip("Year", "min_year", "max_year");
+  addRangeChip("Episodes", "min_episodes", "max_episodes");
+  addRangeChip("Chapters", "min_chapters", "max_chapters");
+  addRangeChip("Volumes", "min_volumes", "max_volumes");
+
+  activeKeys.forEach((key) => {
     if (
       key !== "q"
       && !Array.isArray(filters[key])
@@ -346,11 +419,18 @@ export function activeFilterChips(filters, contentType) {
 }
 
 export function filtersWithoutChip(filters, chip) {
-  const nextFilters = {
-    ...filters,
-    genre: [...filters.genre],
-    tag: [...filters.tag],
-  };
+  const nextFilters = Object.fromEntries(
+    Object.entries(filters).map(([key, value]) => [
+      key,
+      Array.isArray(value) ? [...value] : value,
+    ]),
+  );
+  if (chip.keys) {
+    chip.keys.forEach((key) => {
+      if (Object.hasOwn(nextFilters, key)) nextFilters[key] = "";
+    });
+    return nextFilters;
+  }
   if (Array.isArray(nextFilters[chip.key])) {
     nextFilters[chip.key] = nextFilters[chip.key].filter(
       (value) => value !== chip.value,
@@ -359,6 +439,113 @@ export function filtersWithoutChip(filters, chip) {
     nextFilters[chip.key] = "";
   }
   return nextFilters;
+}
+
+export function rangeSelectionLabel(minimum, maximum) {
+  if (!minimum && !maximum) return "Any";
+  if (minimum && maximum) return `${minimum}–${maximum}`;
+  return minimum ? `${minimum}+` : `Up to ${maximum}`;
+}
+
+export function discreteRangeValues(
+  minimum,
+  maximum,
+  scale = "linear",
+  includedValues = [],
+) {
+  const floor = Math.ceil(Number(minimum));
+  const ceiling = Math.floor(Number(maximum));
+  if (!Number.isFinite(floor) || !Number.isFinite(ceiling) || ceiling < floor) {
+    return [0];
+  }
+
+  const values = [];
+  let current = floor;
+  while (current <= ceiling) {
+    values.push(current);
+    if (scale === "episodes") {
+      current += current < 100 ? 1 : current < 500 ? 20 : 100;
+    } else if (scale === "chapters") {
+      current += current < 200 ? 1 : current < 1000 ? 20 : 200;
+    } else if (scale === "volumes") {
+      current += current < 100 ? 1 : current < 500 ? 10 : 50;
+    } else {
+      current += 1;
+    }
+  }
+
+  values.push(
+    ceiling,
+    ...includedValues
+      .map(Number)
+      .filter((value) => Number.isFinite(value) && value >= floor && value <= ceiling),
+  );
+  return [...new Set(values)].sort((left, right) => left - right);
+}
+
+export function nearestRangeIndex(values, requestedValue) {
+  const target = Number(requestedValue);
+  if (!Number.isFinite(target) || values.length === 0) return 0;
+  let low = 0;
+  let high = values.length - 1;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (values[middle] < target) low = middle + 1;
+    else high = middle;
+  }
+  if (low === 0) return 0;
+  const previous = low - 1;
+  return Math.abs(values[low] - target) < Math.abs(values[previous] - target)
+    ? low
+    : previous;
+}
+
+export function namedValues(entries) {
+  const seen = new Set();
+  return (entries ?? [])
+    .map((entry) => (
+      typeof entry === "string"
+        ? entry.trim()
+        : String(entry?.name ?? entry?.title ?? "").trim()
+    ))
+    .filter((name) => {
+      if (!name) return false;
+      const key = name.toLocaleLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+export function safeExternalUrl(value) {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return ["http:", "https:"].includes(parsed.protocol) ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+export function streamingServiceEntries(entries) {
+  const seen = new Set();
+  return (entries ?? [])
+    .map((entry) => {
+      const name = typeof entry === "string"
+        ? entry.trim()
+        : String(entry?.name ?? entry?.title ?? "").trim();
+      const url = typeof entry === "string"
+        ? null
+        : safeExternalUrl(entry?.url);
+      return { name, url };
+    })
+    .filter(({ name }) => {
+      if (!name) return false;
+      const key = name.toLocaleLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 export function validatedPage(value, totalPages) {

@@ -7,6 +7,7 @@ import {
   activeFilterChips,
   catalogueStateFromSearch,
   catalogueUrlSearch,
+  discreteRangeValues,
   filtersFor,
   filtersFromPreset,
   filtersMatch,
@@ -14,11 +15,17 @@ import {
   formatFreshness,
   itemContentType,
   itemMetadata,
+  namedValues,
+  nearestRangeIndex,
   presetsFor,
   queryString,
+  randomQueryString,
+  rangeSelectionLabel,
   responsiveFilterPanelClasses,
+  safeExternalUrl,
   scoreLabel,
   sortOptionsFor,
+  streamingServiceEntries,
   usesTopRatedAnimeHomepage,
   validatedPage,
   visiblePageNumbers,
@@ -32,6 +39,10 @@ test("clear filters are visually blank while the anime homepage stays TV-ranked"
   assert.equal(cleared.status, "");
   assert.equal(cleared.genre.length, 0);
   assert.equal(cleared.tag.length, 0);
+  assert.equal(cleared.studio.length, 0);
+  assert.equal(cleared.streaming_service.length, 0);
+  assert.equal(cleared.max_chapters, "");
+  assert.equal(cleared.max_volumes, "");
   assert.equal(TOP_RATED_FILTERS.type, "TV");
   assert.equal(filtersMatch(cleared, filtersFor("MANGA")), true);
 });
@@ -60,6 +71,8 @@ test("anime queries send anime filters and omit readable-title filters", () => {
     min_episodes: "12",
     min_chapters: "50",
     genre: ["Drama", "Mystery"],
+    studio: ["Bones", "Madhouse"],
+    streaming_service: ["Crunchyroll", "Netflix"],
   };
   const params = new URLSearchParams(queryString(filters, 3, "ANIME"));
 
@@ -70,6 +83,8 @@ test("anime queries send anime filters and omit readable-title filters", () => {
   assert.equal(params.get("status"), "CURRENTLY_AIRING");
   assert.equal(params.get("min_episodes"), "12");
   assert.equal(params.get("genre"), "Drama,Mystery");
+  assert.equal(params.get("studio"), "Bones,Madhouse");
+  assert.equal(params.get("streaming_service"), "Crunchyroll,Netflix");
   assert.equal(params.get("sort"), DEFAULT_SORT);
   assert.equal(params.has("min_chapters"), false);
 });
@@ -80,29 +95,46 @@ test("manga and manhwa queries send print filters and omit anime filters", () =>
       ...filtersFor(),
       status: "PUBLISHING",
       min_chapters: "25",
+      max_chapters: "200",
       min_volumes: "3",
+      max_volumes: "20",
       min_episodes: "12",
       type: "TV",
       tag: ["school"],
+      studio: ["Bones"],
+      streaming_service: ["Crunchyroll"],
     };
     const params = new URLSearchParams(queryString(filters, 1, contentType));
 
     assert.equal(params.get("content_type"), contentType);
     assert.equal(params.get("status"), "PUBLISHING");
     assert.equal(params.get("min_chapters"), "25");
+    assert.equal(params.get("max_chapters"), "200");
     assert.equal(params.get("min_volumes"), "3");
+    assert.equal(params.get("max_volumes"), "20");
     assert.equal(params.get("tag"), "school");
     assert.equal(params.has("min_episodes"), false);
     assert.equal(params.has("type"), false);
+    assert.equal(params.has("studio"), false);
+    assert.equal(params.has("streaming_service"), false);
   }
 });
 
-test("all-content queries retain only shared filters", () => {
+test("all-content queries include shared and medium-specific range filters", () => {
   const filters = {
     ...filtersFor(),
     q: "hero",
     min_score: "7",
     min_year: "2000",
+    max_year: "2026",
+    min_episodes: "6",
+    max_episodes: "24",
+    min_chapters: "10",
+    max_chapters: "100",
+    min_volumes: "2",
+    max_volumes: "12",
+    studio: ["Bones"],
+    streaming_service: ["Netflix"],
     type: "TV",
     status: "PUBLISHING",
   };
@@ -111,8 +143,34 @@ test("all-content queries retain only shared filters", () => {
   assert.equal(params.get("q"), "hero");
   assert.equal(params.get("min_score"), "7");
   assert.equal(params.get("min_year"), "2000");
+  assert.equal(params.get("max_year"), "2026");
+  assert.equal(params.get("min_episodes"), "6");
+  assert.equal(params.get("max_episodes"), "24");
+  assert.equal(params.get("min_chapters"), "10");
+  assert.equal(params.get("max_chapters"), "100");
+  assert.equal(params.get("min_volumes"), "2");
+  assert.equal(params.get("max_volumes"), "12");
+  assert.equal(params.get("studio"), "Bones");
+  assert.equal(params.get("streaming_service"), "Netflix");
   assert.equal(params.has("type"), false);
   assert.equal(params.has("status"), false);
+});
+
+test("random catalogue queries preserve compatible active filters", () => {
+  const params = new URLSearchParams(randomQueryString({
+    ...filtersFor(),
+    min_score: "8",
+    studio: ["Bones"],
+    streaming_service: ["Crunchyroll"],
+  }, "ANIME", 6));
+
+  assert.equal(params.get("content_type"), "ANIME");
+  assert.equal(params.get("limit"), "6");
+  assert.equal(params.get("min_score"), "8");
+  assert.equal(params.get("studio"), "Bones");
+  assert.equal(params.get("streaming_service"), "Crunchyroll");
+  assert.equal(params.has("page"), false);
+  assert.equal(params.has("sort"), false);
 });
 
 test("cards use episodes for anime and chapters plus volumes for print media", () => {
@@ -179,6 +237,11 @@ test("URL state round-trips filters, sorting, content type, and page", () => {
     q: "tower",
     min_score: "7.5",
     min_year: "2015",
+    max_year: "2025",
+    min_chapters: "20",
+    max_chapters: "120",
+    min_volumes: "2",
+    max_volumes: "15",
     status: "PUBLISHING",
     genre: ["Action", "Fantasy"],
     tag: ["school"],
@@ -197,6 +260,11 @@ test("URL state round-trips filters, sorting, content type, and page", () => {
   assert.equal(restored.sort, "newest");
   assert.equal(restored.filters.q, "tower");
   assert.equal(restored.filters.status, "PUBLISHING");
+  assert.equal(restored.filters.max_year, "2025");
+  assert.equal(restored.filters.min_chapters, "20");
+  assert.equal(restored.filters.max_chapters, "120");
+  assert.equal(restored.filters.min_volumes, "2");
+  assert.equal(restored.filters.max_volumes, "15");
   assert.deepEqual(restored.filters.genre, ["Action", "Fantasy"]);
   assert.deepEqual(restored.filters.tag, ["school"]);
 });
@@ -249,6 +317,37 @@ test("anime airing status survives shareable URL round-trips", () => {
   );
 });
 
+test("all-content URL state restores studio, streaming, and length filters", () => {
+  const filters = {
+    ...filtersFor(),
+    min_episodes: "6",
+    max_episodes: "24",
+    min_chapters: "10",
+    max_chapters: "100",
+    min_volumes: "1",
+    max_volumes: "12",
+    studio: ["Bones", "Madhouse"],
+    streaming_service: ["Crunchyroll", "Netflix"],
+  };
+  const search = catalogueUrlSearch({
+    contentType: "ALL",
+    filters,
+    page: 2,
+    view: "results",
+  });
+  const restored = catalogueStateFromSearch(search);
+
+  assert.equal(restored.contentType, "ALL");
+  assert.equal(restored.filters.max_episodes, "24");
+  assert.equal(restored.filters.max_chapters, "100");
+  assert.equal(restored.filters.max_volumes, "12");
+  assert.deepEqual(restored.filters.studio, ["Bones", "Madhouse"]);
+  assert.deepEqual(
+    restored.filters.streaming_service,
+    ["Crunchyroll", "Netflix"],
+  );
+});
+
 test("presets create clean, media-relevant filter state", () => {
   const animePresets = presetsFor("ANIME", new Date("2026-07-15T12:00:00Z"));
   const seasonal = animePresets.find(({ id }) => id === "new-season");
@@ -289,6 +388,8 @@ test("active chips represent each removable catalogue filter", () => {
     max_episodes: "24",
     genre: ["Drama"],
     tag: ["school"],
+    studio: ["Bones"],
+    streaming_service: ["Crunchyroll"],
   }, "ANIME");
 
   assert.deepEqual(
@@ -296,15 +397,32 @@ test("active chips represent each removable catalogue filter", () => {
     [
       "genre",
       "tag",
+      "studio",
+      "streaming_service",
+      "min_year:max_year",
+      "min_episodes:max_episodes",
       "min_score",
-      "min_year",
-      "max_year",
-      "min_episodes",
-      "max_episodes",
       "type",
       "season",
       "status",
     ],
+  );
+});
+
+test("print chips use bounded chapter and volume ranges without anime facets", () => {
+  const chips = activeFilterChips({
+    ...filtersFor(),
+    min_chapters: "10",
+    max_chapters: "100",
+    min_volumes: "2",
+    max_volumes: "12",
+    studio: ["Bones"],
+    streaming_service: ["Netflix"],
+  }, "MANGA");
+
+  assert.deepEqual(
+    chips.map(({ label }) => label),
+    ["Chapters: 10–100", "Volumes: 2–12"],
   );
 });
 
@@ -314,6 +432,9 @@ test("removing a chip clears only its matching filter value", () => {
     type: "TV",
     genre: ["Action", "Drama"],
     tag: ["school"],
+    studio: ["Bones", "Madhouse"],
+    min_year: "2000",
+    max_year: "2020",
   };
   const withoutAction = filtersWithoutChip(
     filters,
@@ -327,13 +448,29 @@ test("removing a chip clears only its matching filter value", () => {
     { ...withoutAction, status: "CURRENTLY_AIRING" },
     { key: "status", value: "CURRENTLY_AIRING" },
   );
+  const withoutStudio = filtersWithoutChip(
+    filters,
+    { key: "studio", value: "Bones" },
+  );
+  const withoutYear = filtersWithoutChip(
+    filters,
+    {
+      key: "min_year:max_year",
+      keys: ["min_year", "max_year"],
+      value: "2000:2020",
+    },
+  );
 
   assert.deepEqual(withoutAction.genre, ["Drama"]);
   assert.deepEqual(withoutAction.tag, ["school"]);
   assert.equal(withoutAction.type, "TV");
   assert.equal(withoutType.type, "");
   assert.equal(withoutStatus.status, "");
+  assert.deepEqual(withoutStudio.studio, ["Madhouse"]);
+  assert.equal(withoutYear.min_year, "");
+  assert.equal(withoutYear.max_year, "");
   assert.deepEqual(filters.genre, ["Action", "Drama"]);
+  assert.deepEqual(filters.studio, ["Bones", "Madhouse"]);
 });
 
 test("jump-to-page validation rejects unsafe and out-of-range pages", () => {
@@ -353,6 +490,63 @@ test("responsive filter panel stays collapsed until explicitly opened", () => {
   assert.match(collapsed, /\bsm:hidden\b/);
   assert.match(mobileOpen, /\bgrid\b/);
   assert.match(desktopOpen, /\bsm:grid\b/);
+});
+
+test("range labels distinguish unrestricted, one-sided, and bounded filters", () => {
+  assert.equal(rangeSelectionLabel("", ""), "Any");
+  assert.equal(rangeSelectionLabel("2000", ""), "2000+");
+  assert.equal(rangeSelectionLabel("", "2020"), "Up to 2020");
+  assert.equal(rangeSelectionLabel("2000", "2020"), "2000–2020");
+});
+
+test("adaptive range scales keep common lengths dense and preserve exact URLs", () => {
+  const episodes = discreteRangeValues(1, 3000, "episodes", [203]);
+  const chapters = discreteRangeValues(1, 6477, "chapters");
+
+  assert.equal(episodes.includes(12), true);
+  assert.equal(episodes.includes(24), true);
+  assert.equal(episodes.includes(203), true);
+  assert.equal(episodes.includes(3000), true);
+  assert.equal(episodes.length < 250, true);
+  assert.equal(chapters.includes(100), true);
+  assert.equal(chapters.includes(6477), true);
+  assert.equal(chapters.length < 450, true);
+  assert.equal(
+    episodes[nearestRangeIndex(episodes, 24)],
+    24,
+  );
+});
+
+test("studio and streaming helpers normalize names and safe external links", () => {
+  assert.deepEqual(
+    namedValues([
+      " Bones ",
+      { name: "Madhouse" },
+      { name: "bones" },
+      null,
+    ]),
+    ["Bones", "Madhouse"],
+  );
+  assert.equal(safeExternalUrl("javascript:alert(1)"), null);
+  assert.equal(safeExternalUrl("not a URL"), null);
+  assert.equal(
+    safeExternalUrl("https://www.crunchyroll.com/watch"),
+    "https://www.crunchyroll.com/watch",
+  );
+  assert.deepEqual(
+    streamingServiceEntries([
+      { name: "Crunchyroll", url: "https://www.crunchyroll.com/watch" },
+      { name: "crunchyroll", url: "https://duplicate.example" },
+      { name: "Netflix", url: "javascript:alert(1)" },
+    ]),
+    [
+      {
+        name: "Crunchyroll",
+        url: "https://www.crunchyroll.com/watch",
+      },
+      { name: "Netflix", url: null },
+    ],
+  );
 });
 
 test("freshness text is omitted for missing data and humanized when present", () => {
