@@ -272,17 +272,19 @@ describe("catalogue filter integration", () => {
     })).toBe(true));
   });
 
-  test("All content warns when anime-only and print-only filters conflict", async () => {
-    window.history.replaceState(
-      {},
-      "",
-      "/?content_type=ALL&min_episodes=12&min_chapters=10",
-    );
+  test("All content exposes only cross-catalogue filters", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState({}, "", "/?content_type=ALL");
     render(<App />);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Anime-only and print-only filters cannot match the same title",
-    );
+    await user.click(screen.getByRole("button", { name: "More filters" }));
+    expect(screen.getByRole("slider", { name: "Minimum score" })).toBeInTheDocument();
+    expect(screen.getByRole("slider", { name: "Minimum year" })).toBeInTheDocument();
+    expect(screen.queryByRole("slider", { name: "Minimum episodes" })).toBeNull();
+    expect(screen.queryByRole("slider", { name: "Minimum chapters" })).toBeNull();
+    expect(screen.queryByRole("slider", { name: "Minimum volumes" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Studio" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Streaming Service" })).toBeNull();
   });
 
   test("mobile Filters reveals the responsive slider panel", async () => {

@@ -1142,7 +1142,7 @@ export default function App() {
     loadGenres(contentType);
     setFilterRanges(DEFAULT_FILTER_RANGES);
     loadFilterRanges(contentType);
-    if (contentType === "ANIME" || contentType === "ALL") {
+    if (contentType === "ANIME") {
       setStudios([]);
       setStreamingServices([]);
       loadStudios("", contentType);
@@ -1231,38 +1231,6 @@ export default function App() {
     : activeFilterChips(appliedFilters, contentType);
   const freshness = formatFreshness(updatedAt);
   const filterPresets = presetsFor(contentType);
-  const hasAnimeOnlyAllFilters = contentType === "ALL" && Boolean(
-    filters.min_episodes
-    || filters.max_episodes
-    || filters.studio.length
-    || filters.streaming_service.length
-  );
-  const hasPrintOnlyAllFilters = contentType === "ALL" && Boolean(
-    filters.min_chapters
-    || filters.max_chapters
-    || filters.min_volumes
-    || filters.max_volumes
-  );
-  const hasAppliedAnimeOnlyAllFilters = contentType === "ALL" && Boolean(
-    appliedFilters.min_episodes
-    || appliedFilters.max_episodes
-    || appliedFilters.studio.length
-    || appliedFilters.streaming_service.length
-  );
-  const hasAppliedPrintOnlyAllFilters = contentType === "ALL" && Boolean(
-    appliedFilters.min_chapters
-    || appliedFilters.max_chapters
-    || appliedFilters.min_volumes
-    || appliedFilters.max_volumes
-  );
-  const hasIncompatibleAllFilters = (
-    (hasAnimeOnlyAllFilters && hasPrintOnlyAllFilters)
-    || (
-      hasAppliedAnimeOnlyAllFilters
-      && hasAppliedPrintOnlyAllFilters
-    )
-  );
-
   const applyFilters = useCallback((nextFilters, {
     allTypesSelected = allTypesExplicitlySelected,
   } = {}) => {
@@ -1784,14 +1752,7 @@ export default function App() {
             filterLayout.panelGrid,
           )}
         >
-          {contentType === "ALL" && (
-            <p className={`rounded-xl border border-sky-400/20 bg-sky-400/10 px-3 py-2 text-xs leading-5 text-sky-100 sm:col-span-2 ${filterLayout.panelSpan}`}>
-              Episodes, Studio, and Streaming Service show Anime only.
-              Chapters and Volumes show Manga and Manhwa only.
-            </p>
-          )}
-
-          {(contentType === "ANIME" || contentType === "ALL") && (
+          {contentType === "ANIME" && (
             <div id="studio-filter" className="sm:col-span-1 lg:col-span-1">
               <SearchableMultiSelect
                 label="Studio"
@@ -1818,7 +1779,7 @@ export default function App() {
             </div>
           )}
 
-          {(contentType === "ANIME" || contentType === "ALL") && (
+          {contentType === "ANIME" && (
             <div
               id="streaming-service-filter"
               className="sm:col-span-1 lg:col-span-1"
@@ -1895,52 +1856,33 @@ export default function App() {
                 bounds={filterRanges.year}
                 onValueChange={changeFilterValue}
               />
-              {contentType === "ALL" && (
-                <DualRangeSlider
-                  label="Episodes"
-                  minName="min_episodes"
-                  maxName="max_episodes"
-                  minValue={filters.min_episodes}
-                  maxValue={filters.max_episodes}
-                  bounds={filterRanges.episodes}
-                  scale="episodes"
-                  onValueChange={changeFilterValue}
-                />
+              {contentType !== "ALL" && (
+                <>
+                  <DualRangeSlider
+                    label="Chapters"
+                    minName="min_chapters"
+                    maxName="max_chapters"
+                    minValue={filters.min_chapters}
+                    maxValue={filters.max_chapters}
+                    bounds={filterRanges.chapters}
+                    scale="chapters"
+                    onValueChange={changeFilterValue}
+                  />
+                  <DualRangeSlider
+                    label="Volumes"
+                    minName="min_volumes"
+                    maxName="max_volumes"
+                    minValue={filters.min_volumes}
+                    maxValue={filters.max_volumes}
+                    bounds={filterRanges.volumes}
+                    scale="volumes"
+                    onValueChange={changeFilterValue}
+                  />
+                </>
               )}
-              <DualRangeSlider
-                label="Chapters"
-                minName="min_chapters"
-                maxName="max_chapters"
-                minValue={filters.min_chapters}
-                maxValue={filters.max_chapters}
-                bounds={filterRanges.chapters}
-                scale="chapters"
-                onValueChange={changeFilterValue}
-              />
-              <DualRangeSlider
-                label="Volumes"
-                minName="min_volumes"
-                maxName="max_volumes"
-                minValue={filters.min_volumes}
-                maxValue={filters.max_volumes}
-                bounds={filterRanges.volumes}
-                scale="volumes"
-                onValueChange={changeFilterValue}
-              />
             </div>
           )}
         </div>
-
-        {hasIncompatibleAllFilters && (
-          <p
-            className={`rounded-xl border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-100 sm:col-span-2 ${filterLayout.panelSpan}`}
-            role="alert"
-          >
-            Anime-only and print-only filters cannot match the same title.
-            Clear Episodes, Studio, and Streaming Service or clear Chapters
-            and Volumes before searching.
-          </p>
-        )}
 
         <div className={`flex flex-wrap items-center justify-between gap-2 sm:col-span-2 ${filterLayout.panelSpan}`}>
           <button

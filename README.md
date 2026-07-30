@@ -86,10 +86,9 @@ restore the complete state. When no range is selected, records with unknown
 values remain eligible. Applying a range excludes unknown values because they
 cannot be confirmed to satisfy it. Adaptive slider scales keep common episode,
 chapter, and volume values precise while retaining the catalogue's full
-extrema. In an `ALL` search, Episodes, Studio, and Streaming Service filters
-select Anime, while Chapters and Volumes select Manga and Manhwa. Combining
-both media-specific groups correctly produces no matching title and is
-explained in the interface.
+extrema. The `ALL` view intentionally shows only filters that apply across the
+whole catalogue: search, genres/tags, score, and year. Media-specific filters
+remain available in the Anime, Manga, and Manhwa views.
 
 Multiple Studio or Streaming Service selections use match-any semantics.
 Streaming links are provider-supplied hints rather than guaranteed regional
