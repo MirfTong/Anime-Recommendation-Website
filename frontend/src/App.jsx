@@ -130,6 +130,7 @@ function ContentBadge({ contentType }) {
 function CatalogueCard({ item, onSelect, showContentBadge = false }) {
   const metadata = itemMetadata(item).join(" · ");
   const cardContentType = itemContentType(item);
+  const visibleGenres = (item.genres ?? []).slice(0, 4);
 
   return (
     <button
@@ -161,11 +162,11 @@ function CatalogueCard({ item, onSelect, showContentBadge = false }) {
         >
           {metadata}
         </p>
-        <div className="mt-auto flex min-h-7 flex-wrap gap-1.5">
-          {(item.genres ?? []).slice(0, 3).map((genre) => (
+        <div className="mt-auto flex h-14 content-start flex-wrap gap-1.5 overflow-hidden">
+          {visibleGenres.map((genre) => (
             <span
               key={genre}
-              className="rounded-full bg-violet-400/10 px-2 py-1 text-xs text-violet-200"
+              className="h-7 shrink-0 rounded-full bg-violet-400/10 px-2 py-1 text-xs text-violet-200"
             >
               {genre}
             </span>
