@@ -53,17 +53,7 @@ const PRINT_FILTER_KEYS = [
   "max_volumes",
   "status",
 ];
-const ALL_FILTER_KEYS = [
-  ...COMMON_FILTER_KEYS,
-  "min_episodes",
-  "max_episodes",
-  "min_chapters",
-  "max_chapters",
-  "min_volumes",
-  "max_volumes",
-  "studio",
-  "streaming_service",
-];
+const ALL_FILTER_KEYS = [...COMMON_FILTER_KEYS];
 const PAGE_WINDOW_SIZE = 8;
 
 export function filtersFor() {

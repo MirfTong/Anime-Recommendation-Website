@@ -120,7 +120,7 @@ test("manga and manhwa queries send print filters and omit anime filters", () =>
   }
 });
 
-test("all-content queries include shared and medium-specific range filters", () => {
+test("all-content queries include only cross-catalogue filters", () => {
   const filters = {
     ...filtersFor(),
     q: "hero",
@@ -144,14 +144,14 @@ test("all-content queries include shared and medium-specific range filters", () 
   assert.equal(params.get("min_score"), "7");
   assert.equal(params.get("min_year"), "2000");
   assert.equal(params.get("max_year"), "2026");
-  assert.equal(params.get("min_episodes"), "6");
-  assert.equal(params.get("max_episodes"), "24");
-  assert.equal(params.get("min_chapters"), "10");
-  assert.equal(params.get("max_chapters"), "100");
-  assert.equal(params.get("min_volumes"), "2");
-  assert.equal(params.get("max_volumes"), "12");
-  assert.equal(params.get("studio"), "Bones");
-  assert.equal(params.get("streaming_service"), "Netflix");
+  assert.equal(params.has("min_episodes"), false);
+  assert.equal(params.has("max_episodes"), false);
+  assert.equal(params.has("min_chapters"), false);
+  assert.equal(params.has("max_chapters"), false);
+  assert.equal(params.has("min_volumes"), false);
+  assert.equal(params.has("max_volumes"), false);
+  assert.equal(params.has("studio"), false);
+  assert.equal(params.has("streaming_service"), false);
   assert.equal(params.has("type"), false);
   assert.equal(params.has("status"), false);
 });
@@ -317,35 +317,21 @@ test("anime airing status survives shareable URL round-trips", () => {
   );
 });
 
-test("all-content URL state restores studio, streaming, and length filters", () => {
-  const filters = {
-    ...filtersFor(),
-    min_episodes: "6",
-    max_episodes: "24",
-    min_chapters: "10",
-    max_chapters: "100",
-    min_volumes: "1",
-    max_volumes: "12",
-    studio: ["Bones", "Madhouse"],
-    streaming_service: ["Crunchyroll", "Netflix"],
-  };
-  const search = catalogueUrlSearch({
-    contentType: "ALL",
-    filters,
-    page: 2,
-    view: "results",
-  });
-  const restored = catalogueStateFromSearch(search);
+test("all-content URL state ignores media-specific filters", () => {
+  const restored = catalogueStateFromSearch(
+    "?content_type=ALL&q=hero&min_score=7&min_episodes=6&max_episodes=24"
+    + "&min_chapters=10&max_chapters=100&min_volumes=1&max_volumes=12"
+    + "&studio=Bones,Madhouse&streaming_service=Crunchyroll,Netflix",
+  );
 
   assert.equal(restored.contentType, "ALL");
-  assert.equal(restored.filters.max_episodes, "24");
-  assert.equal(restored.filters.max_chapters, "100");
-  assert.equal(restored.filters.max_volumes, "12");
-  assert.deepEqual(restored.filters.studio, ["Bones", "Madhouse"]);
-  assert.deepEqual(
-    restored.filters.streaming_service,
-    ["Crunchyroll", "Netflix"],
-  );
+  assert.equal(restored.filters.q, "hero");
+  assert.equal(restored.filters.min_score, "7");
+  assert.equal(restored.filters.max_episodes, "");
+  assert.equal(restored.filters.max_chapters, "");
+  assert.equal(restored.filters.max_volumes, "");
+  assert.deepEqual(restored.filters.studio, []);
+  assert.deepEqual(restored.filters.streaming_service, []);
 });
 
 test("presets create clean, media-relevant filter state", () => {
