@@ -286,6 +286,9 @@ class Manga(db.Model):
     genre_entries: Mapped[list[Genre]] = relationship(
         secondary="manga_genre", viewonly=True, lazy="selectin"
     )
+    author_links: Mapped[list["MangaAuthor"]] = relationship(
+        back_populates="manga", cascade="all, delete-orphan", lazy="selectin"
+    )
 
     @property
     def genres(self) -> list[str]:
@@ -311,6 +314,46 @@ class MangaGenre(db.Model):
     genre: Mapped[Genre] = relationship(back_populates="manga_links")
 
 
+class Author(db.Model):
+    """One normalized person credited on Manga or Manhwa titles."""
+
+    __tablename__ = "author"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mal_id: Mapped[int | None] = mapped_column(unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    normalized_name: Mapped[str] = mapped_column(
+        String(200), unique=True, index=True
+    )
+
+    manga_links: Mapped[list["MangaAuthor"]] = relationship(
+        back_populates="author", cascade="all, delete-orphan"
+    )
+    manga_entries: Mapped[list[Manga]] = relationship(
+        secondary="manga_author", viewonly=True
+    )
+
+
+class MangaAuthor(db.Model):
+    """A credited author and optional role for one readable title."""
+
+    __tablename__ = "manga_author"
+    __table_args__ = (
+        Index("ix_manga_author_author_manga", "author_id", "manga_id"),
+    )
+
+    manga_id: Mapped[int] = mapped_column(
+        ForeignKey("manga.manga_id", ondelete="CASCADE"), primary_key=True
+    )
+    author_id: Mapped[int] = mapped_column(
+        ForeignKey("author.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[str | None] = mapped_column(String(100))
+
+    manga: Mapped[Manga] = relationship(back_populates="author_links")
+    author: Mapped[Author] = relationship(back_populates="manga_links")
+
+
 class CatalogueFacet(db.Model):
     """Precomputed public filter options for one catalogue content type."""
 
@@ -321,7 +364,8 @@ class CatalogueFacet(db.Model):
             name="ck_catalogue_facet_content_type",
         ),
         CheckConstraint(
-            "facet_type IN ('genre', 'tag', 'studio', 'streaming_service')",
+            "facet_type IN "
+            "('genre', 'tag', 'studio', 'streaming_service', 'author')",
             name="ck_catalogue_facet_type",
         ),
     )

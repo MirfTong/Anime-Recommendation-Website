@@ -1,6 +1,8 @@
 import os
+import tempfile
 import unittest
 from email.message import Message
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -19,19 +21,24 @@ with patch.object(schema_module, "ensure_anime_schema"):
 app_module.ensure_anime_schema = schema_module.ensure_anime_schema
 
 from backend.jobs.manga_etl import (
+    AuthorCaches,
+    AuthorSyncStats,
     MANGA_PROVIDER_TYPES,
     MANGA_STATE_KEYS,
     MangaPageApplyResult,
+    MangaRefreshResult,
     MangaTypeSyncResult,
     _apply_manga_page,
+    _author_values,
     _publication_year,
     _sync_manga_type,
     _update_manga,
     is_adult_content,
     refresh_manga_catalogue,
+    report_manga_refresh,
     sync_manga_catalogue,
 )
-from backend.models import Genre, Manga
+from backend.models import Author, Genre, Manga, MangaAuthor
 from backend.services.jikan_client import JikanMangaPage, JikanTemporaryError
 
 
@@ -185,6 +192,128 @@ class MangaMappingTests(unittest.TestCase):
         )
         self.assertIsNone(_publication_year({"published": None}))
 
+    def test_authors_are_normalized_deduplicated_and_store_roles(self):
+        manga = manga_record()
+        stats = AuthorSyncStats()
+        caches = AuthorCaches(by_name={}, by_mal_id={})
+
+        with patch("backend.jobs.manga_etl.db"):
+            _update_manga(
+                manga,
+                {
+                    "mal_id": 1,
+                    "type": "Manga",
+                    "authors": [
+                        {
+                            "mal_id": 11,
+                            "name": " Hiromu   Arakawa ",
+                            "role": "Story & Art",
+                        },
+                        {
+                            "mal_id": 11,
+                            "name": "hiromu arakawa",
+                            "role": "Story & Art",
+                        },
+                    ],
+                },
+                {},
+                expected_content_type="MANGA",
+                authors=caches,
+                author_stats=stats,
+            )
+
+        self.assertEqual(len(manga.author_links), 1)
+        self.assertEqual(
+            manga.author_links[0].author.normalized_name,
+            "hiromu arakawa",
+        )
+        self.assertEqual(manga.author_links[0].author.mal_id, 11)
+        self.assertEqual(manga.author_links[0].role, "Story & Art")
+        self.assertEqual(stats.authors_processed, 1)
+        self.assertEqual(stats.authors_created, 1)
+        self.assertEqual(stats.links_created, 1)
+
+    def test_sparse_or_malformed_authors_preserve_existing_links(self):
+        author = Author(
+            mal_id=11,
+            name="Existing Author",
+            normalized_name="existing author",
+        )
+        manga = manga_record()
+        manga.author_links.append(
+            MangaAuthor(author=author, role="Story")
+        )
+        stats = AuthorSyncStats()
+        caches = AuthorCaches(
+            by_name={author.normalized_name: author},
+            by_mal_id={11: author},
+        )
+
+        with patch("backend.jobs.manga_etl.db") as mock_db:
+            _update_manga(
+                manga,
+                {"mal_id": 1, "type": "Manga"},
+                {},
+                expected_content_type="MANGA",
+                authors=caches,
+                author_stats=stats,
+            )
+            _update_manga(
+                manga,
+                {"mal_id": 1, "type": "Manga", "authors": {"bad": "shape"}},
+                {},
+                expected_content_type="MANGA",
+                authors=caches,
+                author_stats=stats,
+            )
+
+        self.assertEqual(len(manga.author_links), 1)
+        mock_db.session.delete.assert_not_called()
+        self.assertEqual(stats.reconciliation_failures, 1)
+
+    def test_explicit_empty_authors_reconciles_existing_links(self):
+        author = Author(
+            mal_id=11,
+            name="Existing Author",
+            normalized_name="existing author",
+        )
+        manga = manga_record()
+        link = MangaAuthor(author=author, role="Story")
+        manga.author_links.append(link)
+        stats = AuthorSyncStats()
+
+        with patch("backend.jobs.manga_etl.db") as mock_db:
+            _update_manga(
+                manga,
+                {"mal_id": 1, "type": "Manga", "authors": []},
+                {},
+                expected_content_type="MANGA",
+                authors=AuthorCaches(
+                    by_name={author.normalized_name: author},
+                    by_mal_id={11: author},
+                ),
+                author_stats=stats,
+            )
+
+        mock_db.session.delete.assert_called_once_with(link)
+        self.assertEqual(stats.links_removed, 1)
+
+    def test_author_parser_marks_bad_entries_without_losing_valid_ones(self):
+        parsed = _author_values(
+            [
+                {"mal_id": 7, "name": "Valid Author"},
+                {"mal_id": -1, "name": "Name Without Valid ID"},
+                {"mal_id": 8},
+                "bad",
+            ]
+        )
+
+        self.assertIsNotNone(parsed)
+        values, malformed, complete = parsed
+        self.assertEqual(len(values), 2)
+        self.assertEqual(malformed, 3)
+        self.assertFalse(complete)
+
     def test_adult_classification_is_defensive_without_overfiltering(self):
         restricted = (
             {"genres": [{"name": "Hentai"}]},
@@ -259,7 +388,7 @@ class MangaPageSyncTests(unittest.TestCase):
             patch("backend.jobs.manga_etl.db") as mock_db,
             patch("backend.jobs.manga_etl._sync_state", return_value=state),
         ):
-            mock_db.session.scalars.side_effect = [[existing, adult], []]
+            mock_db.session.scalars.side_effect = [[existing, adult], [], []]
 
             result = _apply_manga_page(
                 page,
@@ -495,7 +624,7 @@ class MangaRefreshTests(unittest.TestCase):
         with (
             patch("backend.jobs.manga_etl.db") as mock_db,
         ):
-            mock_db.session.scalars.side_effect = [records, []]
+            mock_db.session.scalars.side_effect = [records, [], []]
 
             result = refresh_manga_catalogue(
                 limit=7,
@@ -519,6 +648,36 @@ class MangaRefreshTests(unittest.TestCase):
             all(record.last_jikan_attempt is not None for record in records)
         )
         self.assertEqual(mock_db.session.commit.call_count, 4)
+
+    def test_refresh_report_includes_author_action_metrics(self):
+        result = MangaRefreshResult(
+            selected=2,
+            updated=2,
+            author_stats=AuthorSyncStats(
+                payloads_processed=2,
+                authors_processed=3,
+                authors_created=2,
+                links_created=3,
+                links_removed=1,
+                roles_updated=1,
+                malformed_entries=1,
+                reconciliation_failures=1,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            summary_path = Path(directory) / "summary.md"
+            with patch.dict(
+                os.environ,
+                {"GITHUB_STEP_SUMMARY": str(summary_path)},
+            ):
+                report_manga_refresh(result)
+            summary = summary_path.read_text(encoding="utf-8")
+
+        self.assertIn("Author payloads processed", summary)
+        self.assertIn("Author relationships created", summary)
+        self.assertIn("Author relationships removed", summary)
+        self.assertIn("Malformed author entries skipped", summary)
+        self.assertIn("Author reconciliation failures", summary)
 
 
 if __name__ == "__main__":

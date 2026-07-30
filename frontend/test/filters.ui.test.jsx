@@ -107,6 +107,7 @@ function mockCatalogueFetch() {
       url.includes("/api/v1/genres")
       || url.includes("/api/v1/studios")
       || url.includes("/api/v1/streaming-services")
+      || url.includes("/api/v1/authors")
       || url.includes("/api/v1/tags")
     ) {
       return { ok: true, json: async () => ({ items: [] }) };
@@ -272,7 +273,7 @@ describe("catalogue filter integration", () => {
     })).toBe(true));
   });
 
-  test("All content exposes only cross-catalogue filters", async () => {
+  test("All content exposes shared filters and print authors", async () => {
     const user = userEvent.setup();
     window.history.replaceState({}, "", "/?content_type=ALL");
     render(<App />);
@@ -285,6 +286,88 @@ describe("catalogue filter integration", () => {
     expect(screen.queryByRole("slider", { name: "Minimum volumes" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Studio" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Streaming Service" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Author" })).toBeInTheDocument();
+  });
+
+  test("Manga authors support searching, selection, chips, and URL state", async () => {
+    const user = userEvent.setup();
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/api/v1/authors")) {
+        return {
+          ok: true,
+          json: async () => ({ items: ["Hiromu Arakawa", "SIU"] }),
+        };
+      }
+      return mockCatalogueFetch()(input);
+    });
+    window.history.replaceState({}, "", "/?content_type=MANGA");
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "More filters" }));
+    await user.click(await screen.findByRole("button", { name: "Author" }));
+    const search = screen.getByRole("combobox", { name: "Search author" });
+    await user.type(search, "Hiromu");
+    await user.click(await screen.findByRole("option", {
+      name: "Hiromu Arakawa",
+    }));
+
+    expect(await screen.findByText("Author: Hiromu Arakawa")).toBeInTheDocument();
+    expect(new URLSearchParams(window.location.search).get("author")).toBe(
+      "Hiromu Arakawa",
+    );
+    expect(fetchMock.mock.calls.some(([input]) => {
+      const request = new URL(String(input), "https://kyoquan.test");
+      return request.pathname === "/api/v1/catalogue"
+        && request.searchParams.get("author") === "Hiromu Arakawa";
+    })).toBe(true);
+  });
+
+  test("Manga details display author names and roles", async () => {
+    const user = userEvent.setup();
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/api/v1/catalogue/MANGA/1")) {
+        return {
+          ok: true,
+          json: async () => ({
+            item: {
+              mal_id: 1,
+              content_type: "MANGA",
+              title: "Example Manga",
+              genres: [],
+              authors: [
+                { name: "Hiromu Arakawa", role: "Story & Art" },
+              ],
+            },
+          }),
+        };
+      }
+      if (url.includes("/api/v1/catalogue?")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [{
+              mal_id: 1,
+              content_type: "MANGA",
+              title: "Example Manga",
+              genres: [],
+              authors: [],
+            }],
+            pagination: { page: 1, pages: 1, total: 1 },
+            updated_at: null,
+          }),
+        };
+      }
+      return mockCatalogueFetch()(input);
+    });
+    window.history.replaceState({}, "", "/?content_type=MANGA");
+    render(<App />);
+
+    await user.click(await screen.findByText("Example Manga"));
+
+    expect(await screen.findByText("Author:")).toBeInTheDocument();
+    expect(screen.getByText("Hiromu Arakawa (Story & Art)")).toBeInTheDocument();
   });
 
   test("mobile Filters reveals the responsive slider panel", async () => {

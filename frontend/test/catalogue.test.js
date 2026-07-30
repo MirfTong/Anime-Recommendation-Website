@@ -73,6 +73,7 @@ test("anime queries send anime filters and omit readable-title filters", () => {
     genre: ["Drama", "Mystery"],
     studio: ["Bones", "Madhouse"],
     streaming_service: ["Crunchyroll", "Netflix"],
+    author: ["Hiromu Arakawa"],
   };
   const params = new URLSearchParams(queryString(filters, 3, "ANIME"));
 
@@ -85,6 +86,7 @@ test("anime queries send anime filters and omit readable-title filters", () => {
   assert.equal(params.get("genre"), "Drama,Mystery");
   assert.equal(params.get("studio"), "Bones,Madhouse");
   assert.equal(params.get("streaming_service"), "Crunchyroll,Netflix");
+  assert.equal(params.has("author"), false);
   assert.equal(params.get("sort"), DEFAULT_SORT);
   assert.equal(params.has("min_chapters"), false);
 });
@@ -103,6 +105,7 @@ test("manga and manhwa queries send print filters and omit anime filters", () =>
       tag: ["school"],
       studio: ["Bones"],
       streaming_service: ["Crunchyroll"],
+      author: ["Hiromu Arakawa"],
     };
     const params = new URLSearchParams(queryString(filters, 1, contentType));
 
@@ -117,10 +120,11 @@ test("manga and manhwa queries send print filters and omit anime filters", () =>
     assert.equal(params.has("type"), false);
     assert.equal(params.has("studio"), false);
     assert.equal(params.has("streaming_service"), false);
+    assert.equal(params.get("author"), "Hiromu Arakawa");
   }
 });
 
-test("all-content queries include only cross-catalogue filters", () => {
+test("all-content queries omit length filters but allow print authors", () => {
   const filters = {
     ...filtersFor(),
     q: "hero",
@@ -135,6 +139,7 @@ test("all-content queries include only cross-catalogue filters", () => {
     max_volumes: "12",
     studio: ["Bones"],
     streaming_service: ["Netflix"],
+    author: ["SIU"],
     type: "TV",
     status: "PUBLISHING",
   };
@@ -152,6 +157,7 @@ test("all-content queries include only cross-catalogue filters", () => {
   assert.equal(params.has("max_volumes"), false);
   assert.equal(params.has("studio"), false);
   assert.equal(params.has("streaming_service"), false);
+  assert.equal(params.get("author"), "SIU");
   assert.equal(params.has("type"), false);
   assert.equal(params.has("status"), false);
 });
@@ -193,7 +199,18 @@ test("cards use episodes for anime and chapters plus volumes for print media", (
       year: 2026,
       episodes: 12,
     }),
-    ["TV", "Currently Airing", "Spring", 2026, "12 eps"],
+    ["TV", "Spring", 2026, "12 eps"],
+  );
+  assert.deepEqual(
+    itemMetadata({
+      content_type: "ANIME",
+      type: "TV",
+      status: "CURRENTLY_AIRING",
+      season: "spring",
+      year: 2026,
+      episodes: 12,
+    }, true),
+    ["TV", "Currently Airing", "Spring", 2026, "12 episodes"],
   );
   assert.deepEqual(
     itemMetadata({
@@ -203,7 +220,7 @@ test("cards use episodes for anime and chapters plus volumes for print media", (
       chapters: 50,
       volumes: 4,
     }),
-    ["Manhwa", "On Hiatus", 2020, "50 ch", "4 vols"],
+    ["Manhwa", 2020, "50 ch", "4 vols"],
   );
   assert.equal(itemContentType({ content_type: "manga" }), "MANGA");
 });
@@ -321,7 +338,8 @@ test("all-content URL state ignores media-specific filters", () => {
   const restored = catalogueStateFromSearch(
     "?content_type=ALL&q=hero&min_score=7&min_episodes=6&max_episodes=24"
     + "&min_chapters=10&max_chapters=100&min_volumes=1&max_volumes=12"
-    + "&studio=Bones,Madhouse&streaming_service=Crunchyroll,Netflix",
+    + "&studio=Bones,Madhouse&streaming_service=Crunchyroll,Netflix"
+    + "&author=SIU,Hiromu%20Arakawa",
   );
 
   assert.equal(restored.contentType, "ALL");
@@ -332,6 +350,7 @@ test("all-content URL state ignores media-specific filters", () => {
   assert.equal(restored.filters.max_volumes, "");
   assert.deepEqual(restored.filters.studio, []);
   assert.deepEqual(restored.filters.streaming_service, []);
+  assert.deepEqual(restored.filters.author, ["SIU", "Hiromu Arakawa"]);
 });
 
 test("presets create clean, media-relevant filter state", () => {
@@ -408,11 +427,16 @@ test("print chips use bounded chapter and volume ranges without anime facets", (
     max_volumes: "12",
     studio: ["Bones"],
     streaming_service: ["Netflix"],
+    author: ["Hiromu Arakawa"],
   }, "MANGA");
 
   assert.deepEqual(
     chips.map(({ label }) => label),
-    ["Chapters: 10–100", "Volumes: 2–12"],
+    [
+      "Author: Hiromu Arakawa",
+      "Chapters: 10–100",
+      "Volumes: 2–12",
+    ],
   );
 });
 
