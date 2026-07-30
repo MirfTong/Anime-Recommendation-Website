@@ -794,6 +794,7 @@ export function MinimumSlider({
     : bounds.min;
   const floor = Math.min(bounds.min, selectedValue);
   const ceiling = Math.max(bounds.max, selectedValue);
+  const progress = ((selectedValue - floor) / Math.max(1, ceiling - floor)) * 100;
 
   return (
     <fieldset className="range-filter rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2.5">
@@ -818,18 +819,27 @@ export function MinimumSlider({
           </button>
         </div>
       </div>
-      <input
-        className="single-range mt-2"
-        type="range"
-        name={name}
-        min={floor}
-        max={ceiling}
-        step={bounds.step}
-        value={selectedValue}
-        aria-label={`Minimum ${label.toLocaleLowerCase()}`}
-        aria-describedby={outputId}
-        onChange={(event) => onValueChange(name, event.target.value)}
-      />
+      <div className="dual-range mt-2">
+        <div className="dual-range-track" aria-hidden="true">
+          <span
+            className="dual-range-selection"
+            data-testid={`${name}-progress`}
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+        <input
+          className="single-range"
+          type="range"
+          name={name}
+          min={floor}
+          max={ceiling}
+          step={bounds.step}
+          value={selectedValue}
+          aria-label={`Minimum ${label.toLocaleLowerCase()}`}
+          aria-describedby={outputId}
+          onChange={(event) => onValueChange(name, event.target.value)}
+        />
+      </div>
     </fieldset>
   );
 }

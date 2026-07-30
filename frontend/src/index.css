@@ -35,15 +35,15 @@
   }
 
   .single-range {
-    @apply h-11 w-full cursor-pointer appearance-none bg-transparent outline-none;
+    @apply absolute inset-0 h-11 w-full cursor-pointer appearance-none bg-transparent outline-none;
   }
 
   .single-range::-webkit-slider-runnable-track {
-    @apply h-1.5 rounded-full bg-slate-700;
+    @apply h-1.5 bg-transparent;
   }
 
   .single-range::-moz-range-track {
-    @apply h-1.5 rounded-full bg-slate-700;
+    @apply h-1.5 bg-transparent;
   }
 
   .dual-range-input::-webkit-slider-runnable-track {

@@ -331,9 +331,9 @@ export function presetsFor(contentType, now = new Date()) {
   }
   if (contentType === "MANHWA") {
     presets.push({
-      id: "ongoing-manhwa",
-      label: "Ongoing manhwa",
-      filters: { status: "PUBLISHING" },
+      id: "completed-manhwa",
+      label: "Completed manhwa",
+      filters: { status: "FINISHED" },
     });
   }
   return presets;
