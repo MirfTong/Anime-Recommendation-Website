@@ -44,6 +44,25 @@ const DEFAULT_FILTER_RANGES = {
   volumes: { min: 1, max: 100, step: 1 },
 };
 
+const FILTER_LAYOUTS = {
+  ANIME: {
+    grid: "sm:grid-cols-2 lg:grid-cols-5",
+    panelSpan: "lg:col-span-5",
+  },
+  MANGA: {
+    grid: "sm:grid-cols-2 lg:grid-cols-3",
+    panelSpan: "lg:col-span-3",
+  },
+  MANHWA: {
+    grid: "sm:grid-cols-2 lg:grid-cols-3",
+    panelSpan: "lg:col-span-3",
+  },
+  ALL: {
+    grid: "sm:grid-cols-2 lg:grid-cols-2",
+    panelSpan: "lg:col-span-2",
+  },
+};
+
 function normalizedFilterRanges(payload) {
   const source = payload?.ranges ?? payload ?? {};
   return Object.fromEntries(
@@ -1207,6 +1226,7 @@ export default function App() {
   const hasAppliedSelections = !showHomepageSections
     && !filtersMatch(appliedFilters, defaultFilters);
   const contentDetails = contentTypeDetails(contentType);
+  const filterLayout = FILTER_LAYOUTS[contentType];
   const chips = showHomepageSections
     ? []
     : activeFilterChips(appliedFilters, contentType);
@@ -1244,20 +1264,22 @@ export default function App() {
     )
   );
 
-  const submitFilters = (event) => {
-    event.preventDefault();
-    const submittedFilters = copiedFilters(filters);
+  const applyFilters = useCallback((nextFilters, {
+    allTypesSelected = allTypesExplicitlySelected,
+  } = {}) => {
+    const submittedFilters = copiedFilters(nextFilters);
     const returnsHome = usesTopRatedAnimeHomepage(
       contentType,
-      filters,
-      allTypesExplicitlySelected,
+      submittedFilters,
+      allTypesSelected,
     );
     const requestFilters = returnsHome ? TOP_RATED_FILTERS : submittedFilters;
     const nextView = returnsHome ? "home" : "results";
+    setFilters(submittedFilters);
     setAppliedFilters(requestFilters);
+    setAllTypesExplicitlySelected(allTypesSelected);
     setViewMode(nextView);
     setActivePreset("");
-    setMobileFiltersOpen(false);
     setJumpPage("");
     setPageError("");
     navigateCatalogue({
@@ -1267,7 +1289,20 @@ export default function App() {
       activeSort: sort,
       activeView: nextView,
     });
-  };
+  }, [
+    allTypesExplicitlySelected,
+    contentType,
+    navigateCatalogue,
+    sort,
+  ]);
+
+  useEffect(() => {
+    if (filters.q === appliedFilters.q) return undefined;
+    const timer = window.setTimeout(() => {
+      applyFilters(filters);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [appliedFilters.q, applyFilters, filters]);
 
   const selectContentType = (nextContentType) => {
     if (nextContentType === contentType) return;
@@ -1384,40 +1419,38 @@ export default function App() {
   };
 
   const changeFilter = (event) => {
-    if (event.target.name === "type") setAllTypesExplicitlySelected(true);
-    setActivePreset("");
-    setFilters((current) => ({
-      ...current,
-      [event.target.name]: event.target.value,
-    }));
+    const { name, value } = event.target;
+    const nextFilters = { ...filters, [name]: value };
+    if (name === "q") {
+      setActivePreset("");
+      setFilters(nextFilters);
+      return;
+    }
+    applyFilters(nextFilters, {
+      allTypesSelected: name === "type" || allTypesExplicitlySelected,
+    });
   };
 
   const changeFilterValue = (name, value) => {
-    setActivePreset("");
-    setFilters((current) => ({
-      ...current,
-      [name]: value,
-    }));
+    applyFilters({ ...filters, [name]: value });
   };
 
   const toggleMultiFilter = (name, value) => {
-    setActivePreset("");
-    setFilters((current) => ({
-      ...current,
-      [name]: current[name].includes(value)
-        ? current[name].filter((selectedValue) => selectedValue !== value)
-        : [...current[name], value],
-    }));
+    applyFilters({
+      ...filters,
+      [name]: filters[name].includes(value)
+        ? filters[name].filter((selectedValue) => selectedValue !== value)
+        : [...filters[name], value],
+    });
   };
 
   const toggleGenre = (genre) => {
-    setActivePreset("");
-    setFilters((current) => ({
-      ...current,
-      genre: current.genre.includes(genre)
-        ? current.genre.filter((selectedGenre) => selectedGenre !== genre)
-        : [...current.genre, genre],
-    }));
+    applyFilters({
+      ...filters,
+      genre: filters.genre.includes(genre)
+        ? filters.genre.filter((selectedGenre) => selectedGenre !== genre)
+        : [...filters.genre, genre],
+    });
   };
 
   const toggleTag = (tag) => {
@@ -1582,11 +1615,11 @@ export default function App() {
         ))}
       </div>
 
-      <form
-        className="relative z-20 mb-4 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl backdrop-blur sm:grid-cols-2 lg:grid-cols-6"
-        onSubmit={submitFilters}
+      <section
+        className={`relative z-20 mb-4 grid gap-3 rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-xl backdrop-blur ${filterLayout.grid}`}
+        aria-label="Catalogue filters"
       >
-        <label className="sm:col-span-2 lg:col-span-2">
+        <label>
           <span className="sr-only">Search catalogue</span>
           <input
             className="filter-input"
@@ -1653,6 +1686,28 @@ export default function App() {
 
         {contentType === "ANIME" && (
           <label
+            id="anime-season-filter"
+            className={`${mobileFiltersOpen ? "block" : "hidden"} sm:block`}
+          >
+            <span className="sr-only">Season</span>
+            <select
+              className="filter-input !bg-slate-950"
+              name="season"
+              value={filters.season}
+              onChange={changeFilter}
+              style={{ colorScheme: "dark" }}
+            >
+              <option className="bg-slate-950" value="">Season</option>
+              <option className="bg-slate-950" value="winter">Winter</option>
+              <option className="bg-slate-950" value="spring">Spring</option>
+              <option className="bg-slate-950" value="summer">Summer</option>
+              <option className="bg-slate-950" value="fall">Fall</option>
+            </select>
+          </label>
+        )}
+
+        {contentType === "ANIME" && (
+          <label
             id="anime-status-filter"
             className={`${mobileFiltersOpen ? "block" : "hidden"} sm:block`}
           >
@@ -1703,13 +1758,13 @@ export default function App() {
           </label>
         )}
 
-        <div className="flex gap-2">
+        <div className="sm:hidden">
           <button
-            className="flex-1 rounded-xl border border-white/15 px-3 py-3 text-sm font-semibold text-slate-200 transition hover:border-violet-400 hover:text-white sm:hidden"
+            className="w-full rounded-xl border border-white/15 px-3 py-3 text-sm font-semibold text-slate-200 transition hover:border-violet-400 hover:text-white"
             type="button"
             aria-controls={`genre-tag-filter${
               contentType === "ANIME"
-                ? " anime-type-filter anime-status-filter"
+                ? " anime-type-filter anime-status-filter anime-season-filter"
                 : contentType === "ALL"
                   ? ""
                   : " print-status-filter"
@@ -1719,42 +1774,21 @@ export default function App() {
           >
             Filters
           </button>
-          <button
-            className="flex-1 rounded-xl bg-violet-500 px-4 py-3 text-sm font-bold text-white hover:bg-violet-400"
-            type="submit"
-          >
-            Search
-          </button>
         </div>
 
         <div
           id="mobile-more-filters"
-          className={responsiveFilterPanelClasses(mobileFiltersOpen, moreFiltersOpen)}
+          className={responsiveFilterPanelClasses(
+            mobileFiltersOpen,
+            moreFiltersOpen,
+            filterLayout.panelSpan,
+          )}
         >
           {contentType === "ALL" && (
             <p className="rounded-xl border border-sky-400/20 bg-sky-400/10 px-3 py-2 text-xs leading-5 text-sky-100 sm:col-span-2 lg:col-span-6">
               Episodes, Studio, and Streaming Service show Anime only.
               Chapters and Volumes show Manga and Manhwa only.
             </p>
-          )}
-
-          {contentType === "ANIME" && (
-            <label>
-              <span className="sr-only">Season</span>
-              <select
-                className="filter-input !bg-slate-950"
-                name="season"
-                value={filters.season}
-                onChange={changeFilter}
-                style={{ colorScheme: "dark" }}
-              >
-                <option className="bg-slate-950" value="">Season</option>
-                <option className="bg-slate-950" value="winter">Winter</option>
-                <option className="bg-slate-950" value="spring">Spring</option>
-                <option className="bg-slate-950" value="summer">Summer</option>
-                <option className="bg-slate-950" value="fall">Fall</option>
-              </select>
-            </label>
           )}
 
           {(contentType === "ANIME" || contentType === "ALL") && (
@@ -1885,7 +1919,7 @@ export default function App() {
 
         {hasIncompatibleAllFilters && (
           <p
-            className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-100 sm:col-span-2 lg:col-span-6"
+            className={`rounded-xl border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-100 sm:col-span-2 ${filterLayout.panelSpan}`}
             role="alert"
           >
             Anime-only and print-only filters cannot match the same title.
@@ -1894,7 +1928,7 @@ export default function App() {
           </p>
         )}
 
-        <div className="flex flex-wrap items-center justify-between gap-2 sm:col-span-2 lg:col-span-6">
+        <div className={`flex flex-wrap items-center justify-between gap-2 sm:col-span-2 ${filterLayout.panelSpan}`}>
           <button
             className="hidden rounded-lg border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-violet-400 hover:text-white sm:inline-flex"
             type="button"
@@ -1918,7 +1952,7 @@ export default function App() {
             Clear selections
           </button>
         </div>
-      </form>
+      </section>
 
       <div className="mb-5 space-y-3">
         <div className="flex flex-wrap items-center gap-2" aria-label="Filter presets">

@@ -216,8 +216,11 @@ describe("rendered filter controls", () => {
 });
 
 describe("catalogue filter integration", () => {
+  let fetchMock;
+
   beforeEach(() => {
-    vi.stubGlobal("fetch", mockCatalogueFetch());
+    fetchMock = mockCatalogueFetch();
+    vi.stubGlobal("fetch", fetchMock);
   });
 
   afterEach(() => {
@@ -226,7 +229,7 @@ describe("catalogue filter integration", () => {
     window.history.replaceState({}, "", "/");
   });
 
-  test("Clear Selections stays enabled while applied print filters remain", async () => {
+  test("clearing a filter automatically clears its applied result state", async () => {
     const user = userEvent.setup();
     window.history.replaceState(
       {},
@@ -240,7 +243,30 @@ describe("catalogue filter integration", () => {
 
     expect(screen.getByRole("button", {
       name: "Clear selections",
-    })).toBeEnabled();
+    })).toBeDisabled();
+  });
+
+  test("Season replaces Search and filter changes load results automatically", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(screen.queryByRole("button", { name: "Search" })).toBeNull();
+    const season = screen.getByRole("combobox", { name: "Season" });
+    await user.selectOptions(season, "summer");
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => {
+      const request = new URL(String(input), "https://kyoquan.test");
+      return request.pathname === "/api/v1/catalogue"
+        && request.searchParams.get("season") === "summer";
+    })).toBe(true));
+
+    const search = screen.getByRole("textbox", { name: "Search catalogue" });
+    await user.type(search, "Frieren");
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => {
+      const request = new URL(String(input), "https://kyoquan.test");
+      return request.pathname === "/api/v1/catalogue"
+        && request.searchParams.get("q") === "Frieren";
+    })).toBe(true));
   });
 
   test("All content warns when anime-only and print-only filters conflict", async () => {
