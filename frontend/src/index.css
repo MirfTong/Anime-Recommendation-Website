@@ -15,7 +15,7 @@
 
 @layer components {
   .filter-input {
-    @apply w-full rounded-xl border border-white/10 bg-slate-950/70 px-3 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-violet-400;
+    @apply w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-violet-400;
   }
 
   .dual-range {

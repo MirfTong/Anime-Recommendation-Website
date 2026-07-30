@@ -167,7 +167,7 @@ function CatalogueCard({ item, onSelect, showContentBadge = false }) {
             className="overflow-hidden text-ellipsis whitespace-nowrap text-xs text-violet-200"
             title={studios.join(", ")}
           >
-            {studios.length === 1 ? "Studio" : "Studios"}: {studios.join(", ")}
+            {studios.join(", ")}
           </p>
         )}
         <div className="mt-auto flex min-h-7 flex-wrap gap-1.5">
@@ -702,7 +702,7 @@ export function DualRangeSlider({
   };
 
   return (
-    <fieldset className="range-filter rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2.5">
+    <fieldset className="range-filter rounded-xl border border-white/10 bg-slate-950 px-3 py-2.5">
       <legend className="sr-only">{label}</legend>
       <div className="flex items-center justify-between gap-3">
         <span className="text-sm font-semibold text-slate-200">{label}</span>
@@ -801,7 +801,7 @@ export function MinimumSlider({
   const progress = ((selectedValue - floor) / Math.max(1, ceiling - floor)) * 100;
 
   return (
-    <fieldset className="range-filter rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2.5">
+    <fieldset className="range-filter rounded-xl border border-white/10 bg-slate-950 px-3 py-2.5">
       <legend className="sr-only">{label}</legend>
       <div className="flex items-center justify-between gap-3">
         <span className="text-sm font-semibold text-slate-200">{label}</span>
@@ -1864,7 +1864,7 @@ export default function App() {
           )}
 
           {contentType === "ANIME" ? (
-            <div className="grid gap-3 sm:col-span-2 sm:grid-cols-2 lg:col-span-5 lg:grid-cols-3">
+            <div className="grid gap-3 sm:col-span-2 sm:grid-cols-2 lg:col-span-5 lg:grid-cols-5">
               <MinimumSlider
                 label="Score"
                 name="min_score"
