@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from time import sleep
@@ -17,7 +18,15 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import lazyload, selectinload
 
 from backend.app import app
-from backend.models import Genre, JikanSyncState, Manga, MangaGenre, db
+from backend.models import (
+    Author,
+    Genre,
+    JikanSyncState,
+    Manga,
+    MangaAuthor,
+    MangaGenre,
+    db,
+)
 from backend.services.jikan_client import (
     JikanMangaPage,
     JikanTemporaryError,
@@ -40,6 +49,35 @@ DEFAULT_MANGA_REFRESH_LIMIT = 1000
 MAX_CONSECUTIVE_FAILURES = 3
 PROVIDER_MAX_PAGE = 1000
 DEADLOCK_SQLSTATE = "40P01"
+AUTHOR_NAME_MAX_LENGTH = 200
+AUTHOR_ROLE_MAX_LENGTH = 100
+
+
+@dataclass
+class AuthorSyncStats:
+    payloads_processed: int = 0
+    titles_updated: int = 0
+    authors_processed: int = 0
+    authors_created: int = 0
+    links_created: int = 0
+    links_removed: int = 0
+    roles_updated: int = 0
+    malformed_entries: int = 0
+    reconciliation_failures: int = 0
+
+    def add(self, other: "AuthorSyncStats") -> None:
+        for attribute in self.__dataclass_fields__:
+            setattr(
+                self,
+                attribute,
+                getattr(self, attribute) + getattr(other, attribute),
+            )
+
+
+@dataclass
+class AuthorCaches:
+    by_name: dict[str, Author]
+    by_mal_id: dict[int, Author]
 
 
 @dataclass
@@ -49,6 +87,7 @@ class MangaPageApplyResult:
     updated: int = 0
     removed_adult: int = 0
     skipped: int = 0
+    author_stats: AuthorSyncStats = field(default_factory=AuthorSyncStats)
 
 
 @dataclass
@@ -62,6 +101,7 @@ class MangaTypeSyncResult:
     complete: bool = False
     next_page: int = 1
     provider_page_limit_exceeded: bool = False
+    author_stats: AuthorSyncStats = field(default_factory=AuthorSyncStats)
 
 
 @dataclass(frozen=True)
@@ -88,6 +128,13 @@ class MangaCatalogueSyncResult:
     def removed_adult(self) -> int:
         return sum(scan.removed_adult for scan in self.scans.values())
 
+    @property
+    def author_stats(self) -> AuthorSyncStats:
+        stats = AuthorSyncStats()
+        for scan in self.scans.values():
+            stats.add(scan.author_stats)
+        return stats
+
 
 @dataclass
 class MangaRefreshResult:
@@ -98,6 +145,7 @@ class MangaRefreshResult:
     not_found: int = 0
     temporary_errors: int = 0
     invalid_payloads: int = 0
+    author_stats: AuthorSyncStats = field(default_factory=AuthorSyncStats)
 
     @property
     def success_rate(self) -> float:
@@ -148,6 +196,173 @@ def _normalized_text(value: Any) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _display_author_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = " ".join(unicodedata.normalize("NFKC", value).split())
+    return name if name and len(name) <= AUTHOR_NAME_MAX_LENGTH else None
+
+
+def _normalized_author_name(value: Any) -> str | None:
+    name = _display_author_name(value)
+    return name.casefold() if name is not None else None
+
+
+def _author_role(entry: dict[str, Any]) -> str | None:
+    role = _normalized_text(entry.get("role"))
+    if role is None:
+        provider_type = _normalized_text(entry.get("type"))
+        if provider_type and provider_type.casefold() not in {"people", "person"}:
+            role = provider_type
+    if role is None or len(role) > AUTHOR_ROLE_MAX_LENGTH:
+        return None
+    return role
+
+
+def _author_values(
+    value: Any,
+) -> tuple[list[tuple[int | None, str, str, str | None]], int, bool] | None:
+    """Parse authors; None means the existing relationships must be preserved."""
+    if not isinstance(value, list):
+        return None
+    parsed: dict[str, tuple[int | None, str, str, str | None]] = {}
+    malformed = 0
+    for entry in value:
+        if not isinstance(entry, dict):
+            malformed += 1
+            continue
+        name = _display_author_name(entry.get("name"))
+        normalized_name = _normalized_author_name(name)
+        if name is None or normalized_name is None:
+            malformed += 1
+            continue
+        provider_id = entry.get("mal_id")
+        if provider_id is not None and (
+            isinstance(provider_id, bool)
+            or not isinstance(provider_id, int)
+            or provider_id <= 0
+        ):
+            provider_id = None
+            malformed += 1
+        role = _author_role(entry)
+        existing = parsed.get(normalized_name)
+        if existing is None or (existing[3] is None and role is not None):
+            parsed[normalized_name] = (
+                provider_id,
+                name,
+                normalized_name,
+                role,
+            )
+    return list(parsed.values()), malformed, malformed == 0
+
+
+def _author_caches() -> AuthorCaches:
+    authors = list(db.session.scalars(select(Author)))
+    return AuthorCaches(
+        by_name={author.normalized_name: author for author in authors},
+        by_mal_id={
+            author.mal_id: author
+            for author in authors
+            if author.mal_id is not None
+        },
+    )
+
+
+def _author_for_value(
+    provider_id: int | None,
+    name: str,
+    normalized_name: str,
+    caches: AuthorCaches,
+    stats: AuthorSyncStats,
+) -> Author:
+    author = caches.by_name.get(normalized_name)
+    if author is None and provider_id is not None:
+        author = caches.by_mal_id.get(provider_id)
+    if author is None:
+        author = Author(
+            mal_id=provider_id,
+            name=name,
+            normalized_name=normalized_name,
+        )
+        db.session.add(author)
+        stats.authors_created += 1
+    else:
+        # A stable provider ID wins identity lookups. Avoid adopting a
+        # normalized name already owned by another row.
+        if (
+            author.normalized_name != normalized_name
+            and normalized_name not in caches.by_name
+        ):
+            caches.by_name.pop(author.normalized_name, None)
+            author.normalized_name = normalized_name
+        author.name = name
+        if (
+            author.mal_id is None
+            and provider_id is not None
+            and provider_id not in caches.by_mal_id
+        ):
+            author.mal_id = provider_id
+    caches.by_name[author.normalized_name] = author
+    if author.mal_id is not None:
+        caches.by_mal_id[author.mal_id] = author
+    return author
+
+
+def _reconcile_authors(
+    manga: Manga,
+    value: Any,
+    caches: AuthorCaches,
+    stats: AuthorSyncStats,
+) -> None:
+    stats.payloads_processed += 1
+    parsed = _author_values(value)
+    if parsed is None:
+        stats.malformed_entries += 1
+        stats.reconciliation_failures += 1
+        return
+    values, malformed, complete = parsed
+    stats.malformed_entries += malformed
+    if malformed:
+        stats.reconciliation_failures += 1
+    stats.authors_processed += len(values)
+    links_by_name = {
+        link.author.normalized_name: link for link in manga.author_links
+    }
+    desired_authors: set[int] = set()
+    changed = False
+    for provider_id, name, normalized_name, role in values:
+        author = _author_for_value(
+            provider_id, name, normalized_name, caches, stats
+        )
+        desired_authors.add(id(author))
+        link = links_by_name.get(author.normalized_name)
+        if link is None:
+            link = next(
+                (
+                    existing
+                    for existing in manga.author_links
+                    if existing.author is author
+                ),
+                None,
+            )
+        if link is None:
+            manga.author_links.append(MangaAuthor(author=author, role=role))
+            stats.links_created += 1
+            changed = True
+        elif link.role != role:
+            link.role = role
+            stats.roles_updated += 1
+            changed = True
+    if complete:
+        for link in list(manga.author_links):
+            if id(link.author) not in desired_authors:
+                db.session.delete(link)
+                stats.links_removed += 1
+                changed = True
+    if changed:
+        stats.titles_updated += 1
 
 
 def _publication_year(data: dict[str, Any]) -> int | None:
@@ -207,6 +422,8 @@ def _update_manga(
     genres: dict[str, Genre],
     *,
     expected_content_type: str,
+    authors: AuthorCaches | None = None,
+    author_stats: AuthorSyncStats | None = None,
 ) -> None:
     manga.is_adult = is_adult_content(data)
     resolved_content_type = _content_type(
@@ -265,6 +482,15 @@ def _update_manga(
         for field in ("genres", "explicit_genres", "themes", "demographics")
     ):
         manga.genres_detailed = _detailed_genres(data)
+    if "authors" in data:
+        if authors is None:
+            authors = AuthorCaches(by_name={}, by_mal_id={})
+        _reconcile_authors(
+            manga,
+            data.get("authors"),
+            authors,
+            author_stats or AuthorSyncStats(),
+        )
     manga.last_jikan_sync = datetime.now(timezone.utc)
 
 
@@ -273,6 +499,8 @@ def _new_manga(
     genres: dict[str, Genre],
     *,
     expected_content_type: str,
+    authors: AuthorCaches | None = None,
+    author_stats: AuthorSyncStats | None = None,
 ) -> Manga:
     mal_id = data["mal_id"]
     images = _jpg_images(data)
@@ -299,6 +527,8 @@ def _new_manga(
         data,
         genres,
         expected_content_type=expected_content_type,
+        authors=authors,
+        author_stats=author_stats,
     )
     return manga
 
@@ -371,7 +601,10 @@ def _apply_manga_page(
                 .where(Manga.mal_id.in_(ids))
                 .options(
                     lazyload("*"),
-                    selectinload(Manga.genre_links).selectinload(MangaGenre.genre)
+                    selectinload(Manga.genre_links).selectinload(MangaGenre.genre),
+                    selectinload(Manga.author_links).selectinload(
+                        MangaAuthor.author
+                    ),
                 )
             )
         }
@@ -384,6 +617,7 @@ def _apply_manga_page(
                 select(Genre).options(lazyload("*"))
             )
         }
+        authors = _author_caches()
         result = MangaPageApplyResult(
             skipped=len(page_result.entries) - len(data_by_mal_id)
         )
@@ -401,6 +635,8 @@ def _apply_manga_page(
                     data,
                     genres,
                     expected_content_type=expected_content_type,
+                    authors=authors,
+                    author_stats=result.author_stats,
                 )
                 db.session.add(manga)
                 existing[mal_id] = manga
@@ -412,6 +648,8 @@ def _apply_manga_page(
                     data,
                     genres,
                     expected_content_type=expected_content_type,
+                    authors=authors,
+                    author_stats=result.author_stats,
                 )
             result.saved += 1
 
@@ -509,6 +747,7 @@ def _sync_manga_type(
         result.inserted += applied.inserted
         result.updated += applied.updated
         result.removed_adult += applied.removed_adult
+        result.author_stats.add(applied.author_stats)
         if not fetched.has_next_page:
             result.complete = True
             result.next_page = 1
@@ -600,7 +839,10 @@ def refresh_manga_catalogue(
                 select(Manga)
                 .options(
                     lazyload("*"),
-                    selectinload(Manga.genre_links).selectinload(MangaGenre.genre)
+                    selectinload(Manga.genre_links).selectinload(MangaGenre.genre),
+                    selectinload(Manga.author_links).selectinload(
+                        MangaAuthor.author
+                    ),
                 )
                 .order_by(
                     Manga.last_jikan_attempt.asc().nulls_first(),
@@ -615,6 +857,7 @@ def refresh_manga_catalogue(
                 select(Genre).options(lazyload("*"))
             )
         }
+        authors = _author_caches()
         result = MangaRefreshResult(selected=len(manga_rows))
 
         for attempted, manga in enumerate(manga_rows, start=1):
@@ -630,6 +873,8 @@ def refresh_manga_catalogue(
                         data,
                         genres,
                         expected_content_type=manga.content_type,
+                        authors=authors,
+                        author_stats=result.author_stats,
                     )
                     result.updated += 1
             elif failure == "not_found":
@@ -699,6 +944,7 @@ def _append_step_summary(title: str, rows: list[tuple[str, Any]]) -> None:
 
 
 def report_manga_catalogue(result: MangaCatalogueSyncResult) -> None:
+    author_stats = result.author_stats
     details = []
     for provider_type, scan in result.scans.items():
         label = MANGA_CONTENT_TYPES[provider_type].title()
@@ -711,7 +957,11 @@ def report_manga_catalogue(result: MangaCatalogueSyncResult) -> None:
         "Manga catalogue sync: "
         f"pages={result.pages_completed}, failed={result.pages_failed}, "
         f"inserted={result.inserted}, updated={result.updated}, "
-        f"removed_adult={result.removed_adult}. "
+        f"removed_adult={result.removed_adult}, "
+        f"author_payloads={author_stats.payloads_processed}, "
+        f"author_links_created={author_stats.links_created}, "
+        f"author_links_removed={author_stats.links_removed}, "
+        f"author_failures={author_stats.reconciliation_failures}. "
         + "; ".join(details)
     )
     _append_step_summary(
@@ -722,6 +972,20 @@ def report_manga_catalogue(result: MangaCatalogueSyncResult) -> None:
             ("Titles inserted", result.inserted),
             ("Titles updated", result.updated),
             ("Adult titles removed", result.removed_adult),
+            ("Author payloads processed", author_stats.payloads_processed),
+            ("Authors processed", author_stats.authors_processed),
+            ("Author records created", author_stats.authors_created),
+            ("Author relationships created", author_stats.links_created),
+            ("Author relationships removed", author_stats.links_removed),
+            ("Author roles updated", author_stats.roles_updated),
+            (
+                "Malformed author entries skipped",
+                author_stats.malformed_entries,
+            ),
+            (
+                "Author reconciliation failures",
+                author_stats.reconciliation_failures,
+            ),
             *[
                 (
                     MANGA_CONTENT_TYPES[provider_type].title(),
@@ -764,12 +1028,17 @@ def report_manga_cleanup(removed: int) -> None:
 
 
 def report_manga_refresh(result: MangaRefreshResult) -> None:
+    author_stats = result.author_stats
     print(
         "Manga detail refresh: "
         f"selected={result.selected}, updated={result.updated}, "
         f"removed_adult={result.removed_adult}, not_found={result.not_found}, "
         f"removed_unsupported={result.removed_unsupported}, "
         f"temporary={result.temporary_errors}, invalid={result.invalid_payloads}, "
+        f"author_payloads={author_stats.payloads_processed}, "
+        f"author_links_created={author_stats.links_created}, "
+        f"author_links_removed={author_stats.links_removed}, "
+        f"author_failures={author_stats.reconciliation_failures}, "
         f"success_rate={result.success_rate:.1%}."
     )
     _append_step_summary(
@@ -782,6 +1051,20 @@ def report_manga_refresh(result: MangaRefreshResult) -> None:
             ("Not found", result.not_found),
             ("Temporary failures", result.temporary_errors),
             ("Invalid payloads", result.invalid_payloads),
+            ("Author payloads processed", author_stats.payloads_processed),
+            ("Authors processed", author_stats.authors_processed),
+            ("Author records created", author_stats.authors_created),
+            ("Author relationships created", author_stats.links_created),
+            ("Author relationships removed", author_stats.links_removed),
+            ("Author roles updated", author_stats.roles_updated),
+            (
+                "Malformed author entries skipped",
+                author_stats.malformed_entries,
+            ),
+            (
+                "Author reconciliation failures",
+                author_stats.reconciliation_failures,
+            ),
             ("Success rate", f"{result.success_rate:.1%}"),
         ],
     )

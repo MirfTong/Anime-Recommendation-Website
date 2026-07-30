@@ -8,7 +8,7 @@ from sqlalchemy import text
 from backend.models import db
 
 
-CATALOGUE_SCHEMA_VERSION = 1
+CATALOGUE_SCHEMA_VERSION = 2
 CATALOGUE_SCHEMA_LOCK_ID = 5_423_769_101
 CATALOGUE_SCHEMA_VERSION_TABLE = "catalogue_schema_version"
 
@@ -97,7 +97,13 @@ def refresh_catalogue_facets(*, commit: bool = True) -> int:
             "JOIN streaming_service "
             "ON streaming_service.id = "
             "anime_streaming_service.streaming_service_id "
-            "WHERE anime.is_adult = FALSE"
+            "WHERE anime.is_adult = FALSE "
+            "UNION ALL "
+            "SELECT manga.content_type, 'author', author.name "
+            "FROM manga "
+            "JOIN manga_author ON manga_author.manga_id = manga.manga_id "
+            "JOIN author ON author.id = manga_author.author_id "
+            "WHERE manga.is_adult = FALSE"
             ") AS source "
             "WHERE source.value IS NOT NULL "
             "AND TRIM(source.value) <> '' "
@@ -144,7 +150,13 @@ def _apply_catalogue_schema_migration(connection) -> None:
             "AND conname = 'ck_catalogue_facet_type'"
         )
     )
-    required_facet_types = {"genre", "tag", "studio", "streaming_service"}
+    required_facet_types = {
+        "genre",
+        "tag",
+        "studio",
+        "streaming_service",
+        "author",
+    }
     constraint_facet_types = (
         set(re.findall(r"'([^']+)'", facet_constraint))
         if isinstance(facet_constraint, str)
@@ -161,7 +173,7 @@ def _apply_catalogue_schema_migration(connection) -> None:
             text(
                 "ALTER TABLE catalogue_facet ADD CONSTRAINT "
                 "ck_catalogue_facet_type CHECK (facet_type IN "
-                "('genre', 'tag', 'studio', 'streaming_service'))"
+                "('genre', 'tag', 'studio', 'streaming_service', 'author'))"
             )
         )
 
@@ -323,6 +335,12 @@ def _apply_catalogue_schema_migration(connection) -> None:
         "CREATE INDEX IF NOT EXISTS "
         "ix_anime_streaming_service_service_anime "
         "ON anime_streaming_service (streaming_service_id, anime_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_author_normalized_name "
+        "ON author (normalized_name)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_author_mal_id "
+        "ON author (mal_id)",
+        "CREATE INDEX IF NOT EXISTS ix_manga_author_author_manga "
+        "ON manga_author (author_id, manga_id)",
         "CREATE INDEX IF NOT EXISTS ix_manga_title_trgm "
         "ON manga USING GIN (title gin_trgm_ops)",
         "CREATE INDEX IF NOT EXISTS ix_manga_alternative_title_trgm "

@@ -25,6 +25,7 @@ const EMPTY_FILTERS = {
   tag: [],
   studio: [],
   streaming_service: [],
+  author: [],
 };
 
 const COMMON_FILTER_KEYS = [
@@ -52,8 +53,9 @@ const PRINT_FILTER_KEYS = [
   "min_volumes",
   "max_volumes",
   "status",
+  "author",
 ];
-const ALL_FILTER_KEYS = [...COMMON_FILTER_KEYS];
+const ALL_FILTER_KEYS = [...COMMON_FILTER_KEYS, "author"];
 const PAGE_WINDOW_SIZE = 8;
 
 export function filtersFor() {
@@ -63,6 +65,7 @@ export function filtersFor() {
     tag: [],
     studio: [],
     streaming_service: [],
+    author: [],
   };
 }
 
@@ -244,7 +247,7 @@ export function itemMetadata(item, detailed = false) {
   if (contentType === "ANIME") {
     return [
       item.type || "Anime",
-      formatStatus(item.status),
+      detailed ? formatStatus(item.status) : null,
       formatSeason(item.season),
       year,
       `${item.episodes ?? "?"} ${detailed ? "episodes" : "eps"}`,
@@ -253,7 +256,7 @@ export function itemMetadata(item, detailed = false) {
 
   return [
     contentTypeDetails(contentType).label,
-    formatStatus(item.status),
+    detailed ? formatStatus(item.status) : null,
     year,
     `${item.chapters ?? "?"} ${detailed ? "chapters" : "ch"}`,
     `${item.volumes ?? "?"} ${detailed ? "volumes" : "vols"}`,
@@ -357,6 +360,11 @@ export function activeFilterChips(filters, contentType) {
         value,
         label: `Streaming: ${value}`,
       });
+    });
+  }
+  if (activeKeys.includes("author")) {
+    filters.author.forEach((value) => {
+      chips.push({ key: "author", value, label: `Author: ${value}` });
     });
   }
 

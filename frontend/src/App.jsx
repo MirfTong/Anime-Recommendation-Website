@@ -184,6 +184,14 @@ function DetailModal({ item, loading, onClose }) {
   const tags = item.genres_detailed ?? item.tags ?? [];
   const freshness = formatFreshness(item.last_jikan_sync);
   const studios = contentType === "ANIME" ? namedValues(item.studios) : [];
+  const authors = contentType === "ANIME"
+    ? []
+    : (item.authors ?? [])
+      .map((entry) => ({
+        name: String(entry?.name ?? "").trim(),
+        role: String(entry?.role ?? "").trim(),
+      }))
+      .filter(({ name }) => name);
   const streamingServices = contentType === "ANIME"
     ? streamingServiceEntries(item.streaming_services ?? item.streaming)
     : [];
@@ -241,6 +249,16 @@ function DetailModal({ item, loading, onClose }) {
                   {studios.length === 1 ? "Studio:" : "Studios:"}
                 </span>{" "}
                 {studios.join(", ")}
+              </p>
+            )}
+            {authors.length > 0 && (
+              <p className="text-sm leading-6 text-slate-300">
+                <span className="font-semibold text-violet-200">
+                  {authors.length === 1 ? "Author:" : "Authors:"}
+                </span>{" "}
+                {authors.map(({ name, role }) => (
+                  role ? `${name} (${role})` : name
+                )).join(", ")}
               </p>
             )}
             {loading && (
@@ -852,17 +870,21 @@ export default function App() {
   const [genres, setGenres] = useState([]);
   const [studios, setStudios] = useState([]);
   const [streamingServices, setStreamingServices] = useState([]);
+  const [authors, setAuthors] = useState([]);
   const [filterRanges, setFilterRanges] = useState(DEFAULT_FILTER_RANGES);
   const [tagOptions, setTagOptions] = useState([]);
   const [tagQuery, setTagQuery] = useState("");
   const [studioQuery, setStudioQuery] = useState("");
   const [streamingQuery, setStreamingQuery] = useState("");
+  const [authorQuery, setAuthorQuery] = useState("");
   const [tagsLoading, setTagsLoading] = useState(false);
   const [studiosLoading, setStudiosLoading] = useState(false);
   const [streamingServicesLoading, setStreamingServicesLoading] = useState(false);
+  const [authorsLoading, setAuthorsLoading] = useState(false);
   const [genreDropdownOpen, setGenreDropdownOpen] = useState(false);
   const [studioDropdownOpen, setStudioDropdownOpen] = useState(false);
   const [streamingDropdownOpen, setStreamingDropdownOpen] = useState(false);
+  const [authorDropdownOpen, setAuthorDropdownOpen] = useState(false);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [activePreset, setActivePreset] = useState("");
@@ -890,11 +912,13 @@ export default function App() {
   const genreDropdownRef = useRef(null);
   const studioDropdownRef = useRef(null);
   const streamingDropdownRef = useRef(null);
+  const authorDropdownRef = useRef(null);
   const catalogueRequestRef = useRef(0);
   const genreRequestRef = useRef(0);
   const tagRequestRef = useRef(0);
   const studioRequestRef = useRef(0);
   const streamingRequestRef = useRef(0);
+  const authorRequestRef = useRef(0);
   const rangeRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
 
@@ -1064,6 +1088,32 @@ export default function App() {
     }
   }, []);
 
+  const loadAuthors = useCallback(async (
+    query = "",
+    activeContentType = "ALL",
+  ) => {
+    const requestId = ++authorRequestRef.current;
+    setAuthorsLoading(true);
+    try {
+      const params = new URLSearchParams({ content_type: activeContentType });
+      if (query) params.set("q", query);
+      const response = await fetch(`/api/v1/authors?${params}`);
+      const body = await response.json();
+      if (!response.ok) {
+        throw new Error(body.error?.message || "Could not load authors.");
+      }
+      if (requestId === authorRequestRef.current) {
+        setAuthors(
+          namedValues(body.items).sort((left, right) => left.localeCompare(right)),
+        );
+      }
+    } catch {
+      if (requestId === authorRequestRef.current) setAuthors([]);
+    } finally {
+      if (requestId === authorRequestRef.current) setAuthorsLoading(false);
+    }
+  }, []);
+
   const loadFilterRanges = useCallback(async (activeContentType = "ANIME") => {
     const requestId = ++rangeRequestRef.current;
     try {
@@ -1121,9 +1171,11 @@ export default function App() {
       setTagQuery("");
       setStudioQuery("");
       setStreamingQuery("");
+      setAuthorQuery("");
       setGenreDropdownOpen(false);
       setStudioDropdownOpen(false);
       setStreamingDropdownOpen(false);
+      setAuthorDropdownOpen(false);
       genreDropdownRef.current?.removeAttribute("open");
       setJumpPage("");
       setPageError("");
@@ -1148,6 +1200,9 @@ export default function App() {
       setStreamingServices([]);
       loadStudios("", contentType);
       loadStreamingServices("", contentType);
+      ++authorRequestRef.current;
+      setAuthors([]);
+      setAuthorsLoading(false);
     } else {
       ++studioRequestRef.current;
       ++streamingRequestRef.current;
@@ -1155,11 +1210,14 @@ export default function App() {
       setStreamingServices([]);
       setStudiosLoading(false);
       setStreamingServicesLoading(false);
+      setAuthors([]);
+      loadAuthors("", contentType);
     }
   }, [
     contentType,
     loadFilterRanges,
     loadGenres,
+    loadAuthors,
     loadStreamingServices,
     loadStudios,
   ]);
@@ -1176,6 +1234,10 @@ export default function App() {
       if (!streamingDropdownRef.current?.contains(event.target)) {
         setStreamingDropdownOpen(false);
         setStreamingQuery("");
+      }
+      if (!authorDropdownRef.current?.contains(event.target)) {
+        setAuthorDropdownOpen(false);
+        setAuthorQuery("");
       }
     };
     document.addEventListener("pointerdown", closeFilterDropdowns);
@@ -1217,6 +1279,20 @@ export default function App() {
     loadStreamingServices,
     streamingDropdownOpen,
     streamingQuery,
+  ]);
+
+  useEffect(() => {
+    if (!authorDropdownOpen) return undefined;
+    const timer = window.setTimeout(
+      () => loadAuthors(authorQuery.trim(), contentType),
+      200,
+    );
+    return () => window.clearTimeout(timer);
+  }, [
+    authorDropdownOpen,
+    authorQuery,
+    contentType,
+    loadAuthors,
   ]);
 
   const defaultFilters = filtersFor();
@@ -1296,9 +1372,11 @@ export default function App() {
     setTagQuery("");
     setStudioQuery("");
     setStreamingQuery("");
+    setAuthorQuery("");
     setGenreDropdownOpen(false);
     setStudioDropdownOpen(false);
     setStreamingDropdownOpen(false);
+    setAuthorDropdownOpen(false);
     genreDropdownRef.current?.removeAttribute("open");
     setJumpPage("");
     setPageError("");
@@ -1431,6 +1509,8 @@ export default function App() {
     toggleMultiFilter("streaming_service", service)
   );
 
+  const toggleAuthor = (author) => toggleMultiFilter("author", author);
+
   const clearSelections = () => {
     const clearedFilters = filtersFor();
     const clearedAppliedFilters = contentType === "ANIME"
@@ -1447,9 +1527,11 @@ export default function App() {
     setTagQuery("");
     setStudioQuery("");
     setStreamingQuery("");
+    setAuthorQuery("");
     setGenreDropdownOpen(false);
     setStudioDropdownOpen(false);
     setStreamingDropdownOpen(false);
+    setAuthorDropdownOpen(false);
     genreDropdownRef.current?.removeAttribute("open");
     setJumpPage("");
     setPageError("");
@@ -1617,8 +1699,10 @@ export default function App() {
               if (isOpen) {
                 setStudioDropdownOpen(false);
                 setStreamingDropdownOpen(false);
+                setAuthorDropdownOpen(false);
                 setStudioQuery("");
                 setStreamingQuery("");
+                setAuthorQuery("");
               }
               if (!isOpen) setTagQuery("");
             }}
@@ -1736,7 +1820,7 @@ export default function App() {
                 : contentType === "ALL"
                   ? ""
                   : " print-status-filter"
-            } mobile-more-filters`}
+            }${contentType !== "ANIME" ? " author-filter" : ""} mobile-more-filters`}
             aria-expanded={mobileFiltersOpen}
             onClick={() => setMobileFiltersOpen((open) => !open)}
           >
@@ -1770,6 +1854,8 @@ export default function App() {
                     setGenreDropdownOpen(false);
                     setStreamingDropdownOpen(false);
                     setStreamingQuery("");
+                    setAuthorDropdownOpen(false);
+                    setAuthorQuery("");
                   } else {
                     setStudioQuery("");
                   }
@@ -1800,12 +1886,43 @@ export default function App() {
                     setGenreDropdownOpen(false);
                     setStudioDropdownOpen(false);
                     setStudioQuery("");
+                    setAuthorDropdownOpen(false);
+                    setAuthorQuery("");
                   } else {
                     setStreamingQuery("");
                   }
                 }}
                 onQueryChange={setStreamingQuery}
                 onToggle={toggleStreamingService}
+              />
+            </div>
+          )}
+
+          {contentType !== "ANIME" && (
+            <div id="author-filter" className="sm:col-span-1 lg:col-span-1">
+              <SearchableMultiSelect
+                label="Author"
+                selected={filters.author}
+                options={authors}
+                query={authorQuery}
+                loading={authorsLoading}
+                open={authorDropdownOpen}
+                dropdownRef={authorDropdownRef}
+                onOpenChange={(isOpen) => {
+                  setAuthorDropdownOpen(isOpen);
+                  if (isOpen) {
+                    genreDropdownRef.current?.removeAttribute("open");
+                    setGenreDropdownOpen(false);
+                    setStudioDropdownOpen(false);
+                    setStreamingDropdownOpen(false);
+                    setStudioQuery("");
+                    setStreamingQuery("");
+                  } else {
+                    setAuthorQuery("");
+                  }
+                }}
+                onQueryChange={setAuthorQuery}
+                onToggle={toggleAuthor}
               />
             </div>
           )}

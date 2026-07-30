@@ -9,9 +9,11 @@ from backend.models import (
     Anime,
     AnimeStreamingService,
     AnimeStudio,
+    Author,
     CatalogueFacet,
     Genre,
     Manga,
+    MangaAuthor,
     MangaGenre,
     StreamingService,
     Studio,
@@ -93,6 +95,29 @@ class MangaSchemaTests(unittest.TestCase):
         self.assertIs(
             MangaGenre.__mapper__.relationships["genre"].entity.class_,
             Genre,
+        )
+
+    def test_manga_authors_use_a_normalized_role_aware_link(self):
+        self.assertTrue(Author.__table__.c.mal_id.unique)
+        self.assertTrue(Author.__table__.c.normalized_name.unique)
+        self.assertEqual(
+            {
+                column.name
+                for column in MangaAuthor.__table__.primary_key.columns
+            },
+            {"manga_id", "author_id"},
+        )
+        self.assertEqual(
+            {
+                foreign_key.target_fullname
+                for foreign_key in MangaAuthor.__table__.foreign_keys
+            },
+            {"manga.manga_id", "author.id"},
+        )
+        self.assertIn("role", MangaAuthor.__table__.columns)
+        self.assertIn(
+            "ix_manga_author_author_manga",
+            {index.name for index in MangaAuthor.__table__.indexes},
         )
 
     def test_anime_studios_use_a_normalized_many_to_many_schema(self):
@@ -198,7 +223,7 @@ class MangaSchemaTests(unittest.TestCase):
         self.assertIn("refresh_catalogue_facets", schema_source)
         self.assertIn("INSERT INTO catalogue_facet", schema_source)
 
-    def test_catalogue_facets_support_studio_and_streaming_options(self):
+    def test_catalogue_facets_support_relationship_options(self):
         facet_checks = [
             str(constraint.sqltext)
             for constraint in CatalogueFacet.__table__.constraints
@@ -211,6 +236,7 @@ class MangaSchemaTests(unittest.TestCase):
             any(
                 "studio" in expression
                 and "streaming_service" in expression
+                and "author" in expression
                 for expression in facet_checks
             )
         )
@@ -220,11 +246,12 @@ class MangaSchemaTests(unittest.TestCase):
             schema_source,
         )
         self.assertIn(
-            "'genre', 'tag', 'studio', 'streaming_service'",
+            "'genre', 'tag', 'studio', 'streaming_service', 'author'",
             schema_source,
         )
         self.assertIn("JOIN anime_studio", schema_source)
         self.assertIn("JOIN anime_streaming_service", schema_source)
+        self.assertIn("JOIN manga_author", schema_source)
 
     def test_schema_bootstrap_is_versioned_and_cross_process_safe(self):
         schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
@@ -235,10 +262,7 @@ class MangaSchemaTests(unittest.TestCase):
         self.assertIn("_schema_version_is_current", schema_source)
         self.assertIn("db.metadata.create_all(bind=connection)", schema_source)
         self.assertNotIn("db.create_all()", schema_source)
-        self.assertIn(
-            'required_facet_types = {"genre", "tag", "studio", "streaming_service"}',
-            schema_source,
-        )
+        self.assertIn('"author",', schema_source)
         self.assertIn(
             "constraint_facet_types != required_facet_types",
             schema_source,

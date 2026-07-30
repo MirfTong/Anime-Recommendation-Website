@@ -22,14 +22,18 @@ approach:
 - `streaming_service` stores each provider once.
 - `anime_streaming_service` connects Anime to providers and stores the
   title-specific external URL on that relationship.
+- `author` stores each Manga or Manhwa author once using a normalized name and
+  optional MAL person ID.
+- `manga_author` connects readable titles to authors and stores the credited
+  role when the provider supplies one.
 
 Frequently filtered score, year, type, season, status, episode, chapter,
-volume, genre, tag, studio, and streaming-service fields and linking tables
+volume, genre, tag, studio, streaming-service, and author fields and linking tables
 have PostgreSQL indexes. The schema enables PostgreSQL's trusted `pg_trgm`
 extension for indexed partial-title searches. The ETL maintains an indexed
 `is_adult` flag so public queries do not repeatedly scan genre arrays. It also
-rebuilds the indexed `catalogue_facet` table for genre, tag, studio, and
-streaming-service options. Five-minute process caches reuse facet results,
+rebuilds the indexed `catalogue_facet` table for genre, tag, studio,
+streaming-service, and author options. Five-minute process caches reuse facet results,
 numeric slider bounds, and exact pagination totals. Hentai and Erotica records
 are rejected during discovery and detail refresh, removed during cleanup, and
 excluded from public API queries.
@@ -70,6 +74,7 @@ The canonical endpoints are:
 - `GET /api/v1/tags` searches detailed tags.
 - `GET /api/v1/studios` searches normalized Anime studios.
 - `GET /api/v1/streaming-services` searches normalized streaming providers.
+- `GET /api/v1/authors` searches normalized Manga and Manhwa authors.
 - `GET /api/v1/filter-ranges` returns cached numeric bounds for the current
   content scope.
 
@@ -78,7 +83,7 @@ Use `content_type=ANIME`, `MANGA`, `MANHWA`, or `ALL`. Common list filters are
 `per_page`. Anime also supports `type`, `season`, `status`, `min_episodes`,
 `max_episodes`, repeatable `studio`, and repeatable `streaming_service`
 parameters. Manga and Manhwa support `status`, `min_chapters`, `max_chapters`,
-`min_volumes`, and `max_volumes`.
+`min_volumes`, `max_volumes`, and repeatable `author`.
 
 The React range controls keep using these explicit minimum and maximum API
 parameters, so filtered URLs remain bookmarkable and Browser Back/Forward can
@@ -87,10 +92,12 @@ values remain eligible. Applying a range excludes unknown values because they
 cannot be confirmed to satisfy it. Adaptive slider scales keep common episode,
 chapter, and volume values precise while retaining the catalogue's full
 extrema. The `ALL` view intentionally shows only filters that apply across the
-whole catalogue: search, genres/tags, score, and year. Media-specific filters
-remain available in the Anime, Manga, and Manhwa views.
+whole catalogue: search, genres/tags, score, and year, plus authors when the
+user intentionally wants only Manga and Manhwa matches. Other media-specific
+filters remain available in the Anime, Manga, and Manhwa views.
 
 Multiple Studio or Streaming Service selections use match-any semantics.
+Multiple Author selections also use match-any semantics.
 Streaming links are provider-supplied hints rather than guaranteed regional
 availability, and availability may change.
 
@@ -147,6 +154,13 @@ Only HTTP(S) streaming URLs are stored. GitHub Actions summaries include
 relationship payloads processed, links created or removed, changed URLs,
 malformed entries, reconciliation failures, and cursor progress.
 
+Manga and Manhwa author credits are reconciled during catalogue discovery and
+detail refreshes. Missing or malformed author fields preserve known links,
+valid empty arrays clear stale credits, and partially malformed arrays remain
+additive-only. Action summaries report authors processed, author records and
+links created or removed, role changes, malformed entries, and reconciliation
+failures.
+
 Useful focused commands are:
 
 ```powershell
@@ -173,6 +187,7 @@ records inserted and updated, adult records removed, and each independent next
 page cursor, alongside the existing Anime metrics. It also reports Anime with
 studio or streaming changes, relationships created and removed, streaming URLs
 updated, and malformed provider entries skipped.
+Manga and Manhwa summaries include the equivalent author relationship metrics.
 
 Add the external PostgreSQL URL as a repository Actions secret named
 `DATABASE_URL` before running the workflow.

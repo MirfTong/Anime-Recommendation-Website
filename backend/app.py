@@ -19,9 +19,11 @@ from sqlalchemy.orm import selectinload
 from backend.models import (
     Anime,
     AnimeStreamingService,
+    Author,
     CatalogueFacet,
     Genre,
     Manga,
+    MangaAuthor,
     StreamingService,
     Studio,
     db,
@@ -129,6 +131,7 @@ class AnimeFilters:
 @dataclass(frozen=True)
 class MangaFilters:
     statuses: tuple[str, ...]
+    authors: tuple[str, ...]
     min_chapters: int | None
     max_chapters: int | None
     min_volumes: int | None
@@ -138,6 +141,7 @@ class MangaFilters:
     def active(self) -> bool:
         return bool(
             self.statuses
+            or self.authors
             or self.min_chapters
             or self.max_chapters
             or self.min_volumes
@@ -398,6 +402,10 @@ def _manga_filter_values(*, include_status: bool = True) -> MangaFilters:
             if include_status
             else ()
         ),
+        authors=tuple(
+            _normalized_entity_name(value)
+            for value in _list_argument("author")
+        ),
         min_chapters=min_chapters,
         max_chapters=max_chapters,
         min_volumes=min_volumes,
@@ -467,6 +475,20 @@ def _serialize_manga(manga: Manga, *, detailed: bool = False) -> dict[str, Any]:
         "image_url": manga.image_url,
         "mal_url": manga.mal_url,
         "genres": [genre.name for genre in manga.genre_entries],
+        "authors": [
+            {
+                "mal_id": link.author.mal_id,
+                "name": link.author.name,
+                "role": link.role,
+            }
+            for link in sorted(
+                manga.author_links,
+                key=lambda entry: (
+                    entry.author.name.casefold(),
+                    entry.role or "",
+                ),
+            )
+        ],
     }
     if detailed:
         payload["synopsis"] = manga.synopsis
@@ -490,6 +512,10 @@ def _public_statement(model):
             selectinload(Anime.streaming_links).selectinload(
                 AnimeStreamingService.streaming_service
             ),
+        )
+    elif model is Manga:
+        statement = statement.options(
+            selectinload(Manga.author_links).selectinload(MangaAuthor.author)
         )
     return statement
 
@@ -601,6 +627,14 @@ def _filtered_manga_statement(
         statement = statement.where(
             func.lower(func.trim(Manga.status)).in_(
                 manga_filters.statuses
+            )
+        )
+    if manga_filters.authors:
+        statement = statement.where(
+            Manga.author_links.any(
+                MangaAuthor.author.has(
+                    Author.normalized_name.in_(manga_filters.authors)
+                )
             )
         )
     if manga_filters.min_chapters is not None:
@@ -1264,6 +1298,12 @@ def list_studios():
 def list_streaming_services():
     """Search precomputed anime streaming-service filter options."""
     return _searched_facet_response("streaming_service")
+
+
+@app.get(f"{API_PREFIX}/authors")
+def list_authors():
+    """Search precomputed public Manga and Manhwa author options."""
+    return _searched_facet_response("author", default_scope="ALL")
 
 
 @app.get(f"{API_PREFIX}/filter-ranges")

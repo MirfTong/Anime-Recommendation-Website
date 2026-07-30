@@ -24,7 +24,9 @@ from backend.app import (
 from backend.models import (
     Anime,
     AnimeStreamingService,
+    Author,
     Manga,
+    MangaAuthor,
     StreamingService,
     Studio,
     db,
@@ -658,6 +660,16 @@ class AppTests(unittest.TestCase):
             legacy_genres=[],
             genres_detailed=["school"],
         )
+        manga.author_links.append(
+            MangaAuthor(
+                author=Author(
+                    mal_id=123,
+                    name="Example Author",
+                    normalized_name="example author",
+                ),
+                role="Story & Art",
+            )
+        )
 
         item = _serialize_manga(manga, detailed=True)
 
@@ -667,6 +679,16 @@ class AppTests(unittest.TestCase):
         self.assertEqual(item["volumes"], 5)
         self.assertEqual(item["synopsis"], "A synopsis.")
         self.assertEqual(item["genres_detailed"], ["school"])
+        self.assertEqual(
+            item["authors"],
+            [
+                {
+                    "mal_id": 123,
+                    "name": "Example Author",
+                    "role": "Story & Art",
+                }
+            ],
+        )
 
     def test_canonical_catalogue_supports_all_content(self):
         response = self.client.get(
@@ -682,6 +704,13 @@ class AppTests(unittest.TestCase):
             all(
                 item["content_type"] in {"ANIME", "MANGA", "MANHWA"}
                 for item in body["items"]
+            )
+        )
+        self.assertTrue(
+            all(
+                "authors" in item
+                for item in body["items"]
+                if item["content_type"] in {"MANGA", "MANHWA"}
             )
         )
 
@@ -705,15 +734,38 @@ class AppTests(unittest.TestCase):
                 alias_response = self.client.get(
                     f"/api/v1/{alias}", query_string={"per_page": 1}
                 )
+                random_response = self.client.get(
+                    f"/api/v1/{alias}/random", query_string={"limit": 1}
+                )
 
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(alias_response.status_code, 200)
+                self.assertEqual(random_response.status_code, 200)
                 self.assertTrue(
                     all(
                         item["content_type"] == content_type
                         for item in response.get_json()["items"]
                     )
                 )
+                self.assertTrue(
+                    all(
+                        "authors" in item
+                        for item in alias_response.get_json()["items"]
+                    )
+                )
+                self.assertTrue(
+                    all(
+                        "authors" in item
+                        for item in random_response.get_json()["items"]
+                    )
+                )
+                alias_items = alias_response.get_json()["items"]
+                if alias_items:
+                    detail_response = self.client.get(
+                        f"/api/v1/{alias}/{alias_items[0]['mal_id']}"
+                    )
+                    self.assertEqual(detail_response.status_code, 200)
+                    self.assertIn("authors", detail_response.get_json()["item"])
 
     def test_manhwa_filter_query_contains_every_requested_predicate(self):
         with app.test_request_context(
@@ -721,6 +773,7 @@ class AppTests(unittest.TestCase):
             "&min_chapters=25&max_chapters=250"
             "&min_volumes=3&max_volumes=30&min_score=7&min_year=2000"
             "&max_year=2030&genre=Action&tag=school"
+            "&author=SIU&author=Lee%20Jong-hui"
         ):
             statement = _filtered_manga_statement({"MANHWA"})
         sql = str(
@@ -741,6 +794,38 @@ class AppTests(unittest.TestCase):
         self.assertIn("manga.publication_year <= 2030", sql)
         self.assertIn("genre.name = 'action'", sql)
         self.assertIn("manga.genres_detailed @> array['school']", sql)
+        self.assertIn("author.normalized_name in ('siu', 'lee jong-hui')", sql)
+
+    def test_author_filter_on_all_content_excludes_anime(self):
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ALL&author=SIU"
+        ):
+            catalogue_rows = _catalogue_rows_subquery(
+                {"ANIME", "MANGA", "MANHWA"}
+            )
+        sql = str(
+            catalogue_rows.select().compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).lower()
+
+        self.assertIn("manga_author", sql)
+        self.assertNotIn("from anime", sql)
+
+    def test_author_facets_are_searchable_and_content_scoped(self):
+        with patch(
+            "backend.app._load_facet_names",
+            return_value=("Hiromu Arakawa", "SIU"),
+        ) as load_options:
+            response = self.client.get(
+                "/api/v1/authors",
+                query_string={"content_type": "MANHWA", "q": "siu"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["items"], ["SIU"])
+        load_options.assert_called_once_with(frozenset({"MANHWA"}), "author")
 
     def test_manga_range_filters_reject_reversed_bounds(self):
         chapters = self.client.get(
