@@ -548,6 +548,28 @@ class AppTests(unittest.TestCase):
         self.assertEqual(school.get_json()["items"], ["school"])
         load_tags.assert_called_once()
 
+    def test_unlimited_tag_and_studio_dropdowns_return_every_cached_option(self):
+        with (
+            patch(
+                "backend.app._load_detailed_tag_names",
+                return_value=("action", "school", "space"),
+            ),
+            patch(
+                "backend.app._load_facet_names",
+                return_value=("Bones", "MAPPA", "Studio Pierrot"),
+            ),
+        ):
+            tags = self.client.get("/api/v1/tags")
+            studios = self.client.get("/api/v1/studios")
+            limited_tags = self.client.get("/api/v1/tags?limit=1")
+
+        self.assertEqual(tags.get_json()["items"], ["action", "school", "space"])
+        self.assertEqual(
+            studios.get_json()["items"],
+            ["Bones", "MAPPA", "Studio Pierrot"],
+        )
+        self.assertEqual(limited_tags.get_json()["items"], ["action"])
+
     def test_studio_and_streaming_searches_reuse_precomputed_facets(self):
         def load_facets(_content_types, facet_type):
             if facet_type == "studio":
