@@ -77,6 +77,15 @@ class Anime(db.Model):
     genre_entries: Mapped[list["Genre"]] = relationship(
         secondary="anime_genre", viewonly=True, lazy="selectin"
     )
+    studio_links: Mapped[list["AnimeStudio"]] = relationship(
+        back_populates="anime", cascade="all, delete-orphan", lazy="selectin"
+    )
+    studio_entries: Mapped[list["Studio"]] = relationship(
+        secondary="anime_studio", viewonly=True, lazy="selectin"
+    )
+    streaming_links: Mapped[list["AnimeStreamingService"]] = relationship(
+        back_populates="anime", cascade="all, delete-orphan", lazy="selectin"
+    )
 
     @property
     def genres(self) -> list[str]:
@@ -119,6 +128,87 @@ class AnimeGenre(db.Model):
 
     anime: Mapped[Anime] = relationship(back_populates="genre_links")
     genre: Mapped[Genre] = relationship(back_populates="anime_links")
+
+
+class Studio(db.Model):
+    """One normalized animation studio referenced by many anime."""
+
+    __tablename__ = "studio"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mal_id: Mapped[int | None] = mapped_column(unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(150))
+    normalized_name: Mapped[str] = mapped_column(
+        String(150), unique=True, index=True
+    )
+
+    anime_links: Mapped[list["AnimeStudio"]] = relationship(
+        back_populates="studio", cascade="all, delete-orphan"
+    )
+    anime_entries: Mapped[list[Anime]] = relationship(
+        secondary="anime_studio", viewonly=True
+    )
+
+
+class AnimeStudio(db.Model):
+    """Many-to-many connection between anime and animation studios."""
+
+    __tablename__ = "anime_studio"
+    __table_args__ = (
+        Index("ix_anime_studio_studio_anime", "studio_id", "anime_id"),
+    )
+
+    anime_id: Mapped[int] = mapped_column(
+        ForeignKey("anime.anime_id", ondelete="CASCADE"), primary_key=True
+    )
+    studio_id: Mapped[int] = mapped_column(
+        ForeignKey("studio.id", ondelete="CASCADE"), primary_key=True
+    )
+
+    anime: Mapped[Anime] = relationship(back_populates="studio_links")
+    studio: Mapped[Studio] = relationship(back_populates="anime_links")
+
+
+class StreamingService(db.Model):
+    """A normalized streaming provider linked to anime availability URLs."""
+
+    __tablename__ = "streaming_service"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(150))
+    normalized_name: Mapped[str] = mapped_column(
+        String(150), unique=True, index=True
+    )
+
+    anime_links: Mapped[list["AnimeStreamingService"]] = relationship(
+        back_populates="streaming_service", cascade="all, delete-orphan"
+    )
+
+
+class AnimeStreamingService(db.Model):
+    """One provider link for one anime and normalized streaming service."""
+
+    __tablename__ = "anime_streaming_service"
+    __table_args__ = (
+        Index(
+            "ix_anime_streaming_service_service_anime",
+            "streaming_service_id",
+            "anime_id",
+        ),
+    )
+
+    anime_id: Mapped[int] = mapped_column(
+        ForeignKey("anime.anime_id", ondelete="CASCADE"), primary_key=True
+    )
+    streaming_service_id: Mapped[int] = mapped_column(
+        ForeignKey("streaming_service.id", ondelete="CASCADE"), primary_key=True
+    )
+    url: Mapped[str | None]
+
+    anime: Mapped[Anime] = relationship(back_populates="streaming_links")
+    streaming_service: Mapped[StreamingService] = relationship(
+        back_populates="anime_links"
+    )
 
 
 class Manga(db.Model):
@@ -222,7 +312,7 @@ class MangaGenre(db.Model):
 
 
 class CatalogueFacet(db.Model):
-    """Precomputed genre and tag options for one public content type."""
+    """Precomputed public filter options for one catalogue content type."""
 
     __tablename__ = "catalogue_facet"
     __table_args__ = (
@@ -231,13 +321,13 @@ class CatalogueFacet(db.Model):
             name="ck_catalogue_facet_content_type",
         ),
         CheckConstraint(
-            "facet_type IN ('genre', 'tag')",
+            "facet_type IN ('genre', 'tag', 'studio', 'streaming_service')",
             name="ck_catalogue_facet_type",
         ),
     )
 
     content_type: Mapped[str] = mapped_column(String(10), primary_key=True)
-    facet_type: Mapped[str] = mapped_column(String(10), primary_key=True)
+    facet_type: Mapped[str] = mapped_column(String(30), primary_key=True)
     value: Mapped[str] = mapped_column(String(255), primary_key=True)
 
 

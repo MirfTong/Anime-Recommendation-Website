@@ -14,14 +14,30 @@ Genres are normalized across all three content types:
 - `genres_detailed` arrays retain searchable themes, demographics, explicit
   categories, and other detailed tags.
 
-Frequently filtered score, year, type, season, status, chapter, volume, genre,
-and tag columns have PostgreSQL indexes. The schema enables PostgreSQL's trusted
-`pg_trgm` extension for indexed partial-title searches. The ETL maintains an
-indexed `is_adult` flag so public queries do not repeatedly scan genre arrays.
-It also rebuilds the indexed `catalogue_facet` table for genre/tag options.
-Five-minute process caches reuse facet results and exact pagination totals.
-Hentai and Erotica records are rejected during discovery and detail refresh,
-removed during cleanup, and excluded from public API queries.
+Anime studios and streaming providers use the same normalized relational
+approach:
+
+- `studio` stores each studio once, with a normalized name and optional MAL ID.
+- `anime_studio` connects an Anime to any number of studios.
+- `streaming_service` stores each provider once.
+- `anime_streaming_service` connects Anime to providers and stores the
+  title-specific external URL on that relationship.
+
+Frequently filtered score, year, type, season, status, episode, chapter,
+volume, genre, tag, studio, and streaming-service fields and linking tables
+have PostgreSQL indexes. The schema enables PostgreSQL's trusted `pg_trgm`
+extension for indexed partial-title searches. The ETL maintains an indexed
+`is_adult` flag so public queries do not repeatedly scan genre arrays. It also
+rebuilds the indexed `catalogue_facet` table for genre, tag, studio, and
+streaming-service options. Five-minute process caches reuse facet results,
+numeric slider bounds, and exact pagination totals. Hentai and Erotica records
+are rejected during discovery and detail refresh, removed during cleanup, and
+excluded from public API queries.
+
+Schema upgrades are additive and versioned. A process lock plus PostgreSQL
+transaction advisory lock serializes the one-time migration across Render
+workers and GitHub Actions; later imports use the recorded schema version and
+skip repeated DDL.
 
 ## Local setup
 
@@ -52,11 +68,32 @@ The canonical endpoints are:
 - `GET /api/v1/catalogue/<content_type>/<mal_id>` returns full details.
 - `GET /api/v1/genres` lists normalized genres.
 - `GET /api/v1/tags` searches detailed tags.
+- `GET /api/v1/studios` searches normalized Anime studios.
+- `GET /api/v1/streaming-services` searches normalized streaming providers.
+- `GET /api/v1/filter-ranges` returns cached numeric bounds for the current
+  content scope.
 
 Use `content_type=ANIME`, `MANGA`, `MANHWA`, or `ALL`. Common list filters are
 `q`, `genre`, `tag`, `min_score`, `min_year`, `max_year`, `page`, and
-`per_page`. Anime also supports `type`, `season`, and `min_episodes`. Manga and
-Manhwa support `status`, `min_chapters`, and `min_volumes`.
+`per_page`. Anime also supports `type`, `season`, `status`, `min_episodes`,
+`max_episodes`, repeatable `studio`, and repeatable `streaming_service`
+parameters. Manga and Manhwa support `status`, `min_chapters`, `max_chapters`,
+`min_volumes`, and `max_volumes`.
+
+The React range controls keep using these explicit minimum and maximum API
+parameters, so filtered URLs remain bookmarkable and Browser Back/Forward can
+restore the complete state. When no range is selected, records with unknown
+values remain eligible. Applying a range excludes unknown values because they
+cannot be confirmed to satisfy it. Adaptive slider scales keep common episode,
+chapter, and volume values precise while retaining the catalogue's full
+extrema. In an `ALL` search, Episodes, Studio, and Streaming Service filters
+select Anime, while Chapters and Volumes select Manga and Manhwa. Combining
+both media-specific groups correctly produces no matching title and is
+explained in the interface.
+
+Multiple Studio or Streaming Service selections use match-any semantics.
+Streaming links are provider-supplied hints rather than guaranteed regional
+availability, and availability may change.
 
 The existing `/api/v1/anime`, `/api/v1/anime/random`,
 `/api/v1/anime/seasonal`, and `/api/v1/anime/<mal_id>` routes remain available.
@@ -86,7 +123,8 @@ Run all scheduled phases locally with:
 The scheduled orchestration:
 
 1. cleans stored adult-only records;
-2. discovers current and historical Anime, including OVA, ONA, and Specials;
+2. discovers current and historical Anime, including Movies, OVA, ONA, and
+   Specials;
 3. scans Manga and Manhwa catalogue pages independently;
 4. refreshes Anime detail and missing-season queues;
 5. refreshes the oldest-attempted Manga/Manhwa detail rows; and
@@ -98,6 +136,17 @@ pending for a later run. A completed scan wraps to page 1 so new provider
 records and changed listing metadata are discovered on future passes. Detail
 refresh uses `last_jikan_attempt` ordering so missing, invalid, or temporarily
 unavailable records are still marked attempted and cannot trap the queue.
+
+Studio metadata is available on Anime listing and detail payloads, so the
+shared Anime mapper updates it across seasonal, bulk, supplemental, and detail
+phases. Streaming data comes from the full Anime endpoint and is filled
+incrementally by detail refreshes. If a full request falls back to a sparse
+basic response, missing relationship fields preserve existing data. A valid
+empty relationship array clears stale links, while partially malformed arrays
+only add or update valid entries and do not destructively remove known links.
+Only HTTP(S) streaming URLs are stored. GitHub Actions summaries include
+relationship payloads processed, links created or removed, changed URLs,
+malformed entries, reconciliation failures, and cursor progress.
 
 Useful focused commands are:
 
@@ -122,7 +171,9 @@ group so manual and scheduled jobs never write simultaneously. All phases run
 inside one Python process, which preserves the shared rate limiter. The GitHub
 Actions step summary reports Manga and Manhwa pages completed and failed,
 records inserted and updated, adult records removed, and each independent next
-page cursor, alongside the existing Anime metrics.
+page cursor, alongside the existing Anime metrics. It also reports Anime with
+studio or streaming changes, relationships created and removed, streaming URLs
+updated, and malformed provider entries skipped.
 
 Add the external PostgreSQL URL as a repository Actions secret named
 `DATABASE_URL` before running the workflow.
@@ -149,9 +200,14 @@ npm --prefix frontend test
 npm --prefix frontend run build
 ```
 
-The regression suite covers provider URLs and fallbacks, Manga/Manhwa mapping,
-adult-content exclusion, duplicate-safe page application, independent cursors,
-refresh-queue progression, API filtering, and workflow configuration.
+The regression suite covers provider URLs and fallbacks, Movie discovery,
+Manga/Manhwa mapping, normalized Anime studios and streaming services,
+non-destructive sparse-payload reconciliation, adult-content exclusion,
+duplicate-safe page application, independent cursors, refresh-queue
+progression, API filtering and numeric ranges, and workflow configuration.
+Rendered React interaction tests additionally cover touch and keyboard slider
+behavior, searchable multi-select navigation, mobile disclosure, clear
+behavior, and mixed-content filter guidance.
 
 ## Tech stack
 

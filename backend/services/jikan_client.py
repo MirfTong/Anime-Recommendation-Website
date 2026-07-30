@@ -28,7 +28,9 @@ MAX_TRANSIENT_RETRY_BUDGET = 100
 PRIMARY_429_COOLDOWN_SECONDS = 60
 REQUEST_TIMEOUT_SECONDS = 20
 SERVER_ERROR_STATUS_CODES = frozenset({500, 502, 503, 504})
-CATALOGUE_ANIME_TYPES = frozenset({"tv", "ova", "ona", "special", "tv_special"})
+CATALOGUE_ANIME_TYPES = frozenset(
+    {"tv", "movie", "ova", "ona", "special", "tv_special"}
+)
 CATALOGUE_MANGA_TYPES = frozenset({"manga", "manhwa"})
 USER_AGENT = "KyoQuan/1.0 (+https://github.com/MirfTong/Anime-Recommendation-Website)"
 
@@ -504,7 +506,9 @@ class JikanClient:
             raise ValueError("anime_type must be a supported anime type")
         normalized = anime_type.strip().lower()
         if normalized not in CATALOGUE_ANIME_TYPES:
-            raise ValueError("anime_type must be tv, ova, ona, special, or tv_special")
+            raise ValueError(
+                "anime_type must be tv, movie, ova, ona, special, or tv_special"
+            )
         return normalized
 
     @staticmethod

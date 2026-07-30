@@ -17,4 +17,61 @@
   .filter-input {
     @apply w-full rounded-xl border border-white/10 bg-slate-950/70 px-3 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-violet-400;
   }
+
+  .dual-range {
+    @apply relative h-11 w-full cursor-pointer touch-none select-none;
+  }
+
+  .dual-range-track {
+    @apply absolute left-0 right-0 top-1/2 h-1.5 -translate-y-1/2 overflow-hidden rounded-full bg-slate-700;
+  }
+
+  .dual-range-selection {
+    @apply absolute inset-y-0 rounded-full bg-violet-500;
+  }
+
+  .dual-range-input {
+    @apply pointer-events-none absolute inset-0 h-11 w-full cursor-pointer appearance-none bg-transparent outline-none;
+  }
+
+  .single-range {
+    @apply h-11 w-full cursor-pointer appearance-none bg-transparent outline-none;
+  }
+
+  .single-range::-webkit-slider-runnable-track {
+    @apply h-1.5 rounded-full bg-slate-700;
+  }
+
+  .single-range::-moz-range-track {
+    @apply h-1.5 rounded-full bg-slate-700;
+  }
+
+  .dual-range-input::-webkit-slider-runnable-track {
+    @apply h-1.5 bg-transparent;
+  }
+
+  .dual-range-input::-moz-range-track {
+    @apply h-1.5 bg-transparent;
+  }
+
+  .dual-range-input::-webkit-slider-thumb,
+  .single-range::-webkit-slider-thumb {
+    @apply h-6 w-6 appearance-none rounded-full border-2 border-slate-950 bg-violet-400 shadow-lg;
+    margin-top: -0.5625rem;
+  }
+
+  .dual-range-input::-moz-range-thumb,
+  .single-range::-moz-range-thumb {
+    @apply h-6 w-6 rounded-full border-2 border-slate-950 bg-violet-400 shadow-lg;
+  }
+
+  .dual-range-input:focus-visible::-webkit-slider-thumb,
+  .single-range:focus-visible::-webkit-slider-thumb {
+    @apply ring-2 ring-violet-300 ring-offset-2 ring-offset-slate-950;
+  }
+
+  .dual-range-input:focus-visible::-moz-range-thumb,
+  .single-range:focus-visible::-moz-range-thumb {
+    @apply ring-2 ring-violet-300 ring-offset-2 ring-offset-slate-950;
+  }
 }

@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import {
   CONTENT_TYPES,
   DEFAULT_SORT,
@@ -7,6 +13,7 @@ import {
   catalogueStateFromSearch,
   catalogueUrlSearch,
   contentTypeDetails,
+  discreteRangeValues,
   filtersFor,
   filtersFromPreset,
   filtersMatch,
@@ -14,15 +21,63 @@ import {
   formatFreshness,
   itemContentType,
   itemMetadata,
+  namedValues,
+  nearestRangeIndex,
   presetsFor,
   queryString,
+  randomQueryString,
+  rangeSelectionLabel,
   responsiveFilterPanelClasses,
   scoreLabel,
   sortOptionsFor,
+  streamingServiceEntries,
   usesTopRatedAnimeHomepage,
   validatedPage,
   visiblePageNumbers,
 } from "./catalogue.js";
+
+const DEFAULT_FILTER_RANGES = {
+  year: { min: 1900, max: new Date().getFullYear() + 2, step: 1 },
+  score: { min: 0, max: 10, step: 0.1 },
+  episodes: { min: 1, max: 1000, step: 1 },
+  chapters: { min: 1, max: 1000, step: 1 },
+  volumes: { min: 1, max: 100, step: 1 },
+};
+
+function normalizedFilterRanges(payload) {
+  const source = payload?.ranges ?? payload ?? {};
+  return Object.fromEntries(
+    Object.entries(DEFAULT_FILTER_RANGES).map(([key, fallback]) => {
+      if (key === "score") return [key, fallback];
+      const values = source[key] ?? {};
+      const minimum = Number(
+        values.min ?? values.minimum ?? source[`min_${key}`],
+      );
+      const maximum = Number(
+        values.max ?? values.maximum ?? source[`max_${key}`],
+      );
+      const min = Number.isFinite(minimum) ? minimum : fallback.min;
+      const maxCandidate = Number.isFinite(maximum) ? maximum : fallback.max;
+      return [
+        key,
+        {
+          min,
+          max: Math.max(min, maxCandidate),
+          step: fallback.step,
+        },
+      ];
+    }),
+  );
+}
+
+function copiedFilters(filters) {
+  return Object.fromEntries(
+    Object.entries(filters).map(([key, value]) => [
+      key,
+      Array.isArray(value) ? [...value] : value,
+    ]),
+  );
+}
 
 function Score({ value }) {
   return (
@@ -52,6 +107,7 @@ function ContentBadge({ contentType }) {
 function CatalogueCard({ item, onSelect, showContentBadge = false }) {
   const metadata = itemMetadata(item).join(" · ");
   const cardContentType = itemContentType(item);
+  const studios = cardContentType === "ANIME" ? namedValues(item.studios) : [];
 
   return (
     <button
@@ -83,6 +139,14 @@ function CatalogueCard({ item, onSelect, showContentBadge = false }) {
         >
           {metadata}
         </p>
+        {studios.length > 0 && (
+          <p
+            className="overflow-hidden text-ellipsis whitespace-nowrap text-xs text-violet-200"
+            title={studios.join(", ")}
+          >
+            {studios.length === 1 ? "Studio" : "Studios"}: {studios.join(", ")}
+          </p>
+        )}
         <div className="mt-auto flex min-h-7 flex-wrap gap-1.5">
           {(item.genres ?? []).slice(0, 3).map((genre) => (
             <span
@@ -104,6 +168,10 @@ function DetailModal({ item, loading, onClose }) {
   const contentType = itemContentType(item);
   const tags = item.genres_detailed ?? item.tags ?? [];
   const freshness = formatFreshness(item.last_jikan_sync);
+  const studios = contentType === "ANIME" ? namedValues(item.studios) : [];
+  const streamingServices = contentType === "ANIME"
+    ? streamingServiceEntries(item.streaming_services ?? item.streaming)
+    : [];
 
   return (
     <div
@@ -152,6 +220,14 @@ function DetailModal({ item, loading, onClose }) {
                 </span>
               ))}
             </div>
+            {studios.length > 0 && (
+              <p className="text-sm leading-6 text-slate-300">
+                <span className="font-semibold text-violet-200">
+                  {studios.length === 1 ? "Studio:" : "Studios:"}
+                </span>{" "}
+                {studios.join(", ")}
+              </p>
+            )}
             {loading && (
               <p className="text-sm text-violet-200" role="status">
                 Loading full details…
@@ -170,6 +246,38 @@ function DetailModal({ item, loading, onClose }) {
             {tags.length > 0 && (
               <p className="text-sm leading-6 text-slate-400">Tags: {tags.join(", ")}</p>
             )}
+            {streamingServices.length > 0 && (
+              <section>
+                <h3 className="text-sm font-semibold uppercase tracking-widest text-violet-300">
+                  Streaming services
+                </h3>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {streamingServices.map(({ name, url }) => (
+                    url ? (
+                      <a
+                        key={name}
+                        className="rounded-full border border-violet-400/30 bg-violet-400/10 px-3 py-1.5 text-sm font-semibold text-violet-100 transition hover:border-violet-300 hover:bg-violet-400/20"
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {name} ↗
+                      </a>
+                    ) : (
+                      <span
+                        key={name}
+                        className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-slate-300"
+                      >
+                        {name}
+                      </span>
+                    )
+                  ))}
+                </div>
+                <p className="mt-2 text-xs leading-5 text-slate-500">
+                  Availability varies by region and may change.
+                </p>
+              </section>
+            )}
             {freshness && (
               <p
                 className="text-xs text-slate-500"
@@ -183,7 +291,7 @@ function DetailModal({ item, loading, onClose }) {
                 className="inline-flex rounded-xl bg-violet-500 px-4 py-2 font-bold text-white transition hover:bg-violet-400"
                 href={item.mal_url}
                 target="_blank"
-                rel="noreferrer"
+                rel="noopener noreferrer"
               >
                 View on MyAnimeList ↗
               </a>
@@ -233,7 +341,7 @@ function GenreTagPicker({
             <span>
               {filters.genre.length + filters.tag.length
                 ? `${filters.genre.length + filters.tag.length} selected`
-                : "All genres & tags"}
+                : "Genres & Tags"}
             </span>
           )}
           <span className="text-violet-300 transition group-open:rotate-180">⌄</span>
@@ -288,6 +396,425 @@ function GenreTagPicker({
   );
 }
 
+export function SearchableMultiSelect({
+  label,
+  selected,
+  options,
+  query,
+  loading,
+  open,
+  dropdownRef,
+  onOpenChange,
+  onQueryChange,
+  onToggle,
+}) {
+  const listId = useId();
+  const statusId = useId();
+  const triggerRef = useRef(null);
+  const restoreFocusRef = useRef(false);
+  const wasOpenRef = useRef(open);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const matchingOptions = options.filter((option) => (
+    option.toLocaleLowerCase().includes(normalizedQuery)
+  ));
+  const safeActiveIndex = Math.min(
+    activeIndex,
+    Math.max(0, matchingOptions.length - 1),
+  );
+  const hasNavigableOptions = !loading && matchingOptions.length > 0;
+  const activeOptionId = matchingOptions.length > 0
+    ? `${listId}-option-${safeActiveIndex}`
+    : undefined;
+
+  useEffect(() => {
+    if (!open) return;
+    setActiveIndex(0);
+  }, [open, query]);
+
+  useEffect(() => {
+    if (wasOpenRef.current && !open && restoreFocusRef.current) {
+      window.setTimeout(() => triggerRef.current?.focus(), 0);
+    }
+    if (!open) restoreFocusRef.current = false;
+    wasOpenRef.current = open;
+  }, [open]);
+
+  const closeAndRestoreFocus = () => {
+    restoreFocusRef.current = true;
+    onOpenChange(false);
+  };
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      {open ? (
+        <div className="filter-input flex items-center gap-2">
+          <input
+            className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-slate-400"
+            value={query}
+            onChange={(event) => onQueryChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown" && hasNavigableOptions) {
+                event.preventDefault();
+                setActiveIndex((current) => (
+                  (current + 1) % matchingOptions.length
+                ));
+              } else if (event.key === "ArrowUp" && hasNavigableOptions) {
+                event.preventDefault();
+                setActiveIndex((current) => (
+                  (current - 1 + matchingOptions.length) % matchingOptions.length
+                ));
+              } else if (event.key === "Home" && hasNavigableOptions) {
+                event.preventDefault();
+                setActiveIndex(0);
+              } else if (event.key === "End" && hasNavigableOptions) {
+                event.preventDefault();
+                setActiveIndex(matchingOptions.length - 1);
+              } else if (event.key === "Enter") {
+                event.preventDefault();
+                if (hasNavigableOptions) {
+                  onToggle(
+                    matchingOptions[safeActiveIndex],
+                  );
+                }
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                closeAndRestoreFocus();
+              }
+            }}
+            placeholder={`Search ${label.toLocaleLowerCase()}`}
+            aria-label={`Search ${label.toLocaleLowerCase()}`}
+            role="combobox"
+            aria-expanded="true"
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={!loading ? activeOptionId : undefined}
+            aria-describedby={statusId}
+            autoFocus
+          />
+          <button
+            className="shrink-0 text-violet-300"
+            type="button"
+            aria-label={`Close ${label.toLocaleLowerCase()}`}
+            onClick={closeAndRestoreFocus}
+          >
+            ⌃
+          </button>
+        </div>
+      ) : (
+        <button
+          className="filter-input flex items-center justify-between text-left"
+          ref={triggerRef}
+          type="button"
+          aria-haspopup="listbox"
+          aria-expanded="false"
+          aria-controls={listId}
+          onClick={() => {
+            restoreFocusRef.current = false;
+            onOpenChange(true);
+          }}
+        >
+          <span>{selected.length ? `${label} (${selected.length})` : label}</span>
+          <span className="text-violet-300" aria-hidden="true">⌄</span>
+        </button>
+      )}
+      {open && (
+        <p id={statusId} className="sr-only" aria-live="polite">
+          {loading
+            ? "Loading options"
+            : `${matchingOptions.length} option${
+              matchingOptions.length === 1 ? "" : "s"
+            } available`}
+        </p>
+      )}
+      {open && (
+        <div
+          id={listId}
+          className="absolute z-40 mt-2 max-h-72 w-full min-w-64 overflow-y-auto rounded-xl border border-white/10 bg-slate-950 p-1 shadow-2xl"
+          role="listbox"
+          aria-label={label}
+          aria-multiselectable="true"
+        >
+          {loading ? (
+            <p className="px-3 py-2 text-sm text-slate-400" role="status">
+              Loading options…
+            </p>
+          ) : matchingOptions.length > 0 ? matchingOptions.map((option, index) => (
+            <button
+              key={option}
+              id={`${listId}-option-${index}`}
+              className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${
+                selected.includes(option)
+                  ? "bg-violet-500 text-white"
+                  : "text-slate-300 hover:bg-violet-400/10"
+              } ${index === safeActiveIndex ? "ring-1 ring-inset ring-violet-300" : ""}`}
+              type="button"
+              role="option"
+              aria-selected={selected.includes(option)}
+              tabIndex={-1}
+              onPointerMove={() => setActiveIndex(index)}
+              onClick={() => onToggle(option)}
+            >
+              {option}
+            </button>
+          )) : (
+            <p className="px-3 py-2 text-sm text-slate-400">
+              No matching options.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function DualRangeSlider({
+  label,
+  minName,
+  maxName,
+  minValue,
+  maxValue,
+  bounds,
+  scale = "linear",
+  onValueChange,
+}) {
+  const outputId = useId();
+  const minimumInputRef = useRef(null);
+  const maximumInputRef = useRef(null);
+  const activePointerHandleRef = useRef(null);
+  const parsedMinimum = Number(minValue);
+  const parsedMaximum = Number(maxValue);
+  const selectedMinimum = minValue !== "" && Number.isFinite(parsedMinimum)
+    ? parsedMinimum
+    : bounds.min;
+  const selectedMaximum = maxValue !== "" && Number.isFinite(parsedMaximum)
+    ? parsedMaximum
+    : bounds.max;
+  const floor = Math.min(
+    bounds.min,
+    selectedMinimum,
+    selectedMaximum,
+  );
+  const ceiling = Math.max(
+    bounds.max,
+    selectedMinimum,
+    selectedMaximum,
+  );
+  const scaleValues = discreteRangeValues(
+    floor,
+    ceiling,
+    scale,
+    [selectedMinimum, selectedMaximum],
+  );
+  const selectedMinimumIndex = nearestRangeIndex(scaleValues, selectedMinimum);
+  const selectedMaximumIndex = nearestRangeIndex(scaleValues, selectedMaximum);
+  const safeMinimumIndex = Math.min(
+    selectedMinimumIndex,
+    selectedMaximumIndex,
+  );
+  const safeMaximumIndex = Math.max(
+    selectedMinimumIndex,
+    selectedMaximumIndex,
+  );
+  const safeMinimum = scaleValues[safeMinimumIndex];
+  const safeMaximum = scaleValues[safeMaximumIndex];
+  const scaleMaximumIndex = Math.max(0, scaleValues.length - 1);
+  const span = Math.max(1, scaleMaximumIndex);
+  const left = (safeMinimumIndex / span) * 100;
+  const right = (safeMaximumIndex / span) * 100;
+  const inactive = minValue === "" && maxValue === "";
+
+  const updateHandle = (handle, index) => {
+    const safeIndex = Math.max(
+      0,
+      Math.min(scaleMaximumIndex, Math.round(index)),
+    );
+    if (handle === "minimum") {
+      const clampedIndex = Math.min(safeIndex, safeMaximumIndex);
+      onValueChange(minName, String(scaleValues[clampedIndex]));
+    } else {
+      const clampedIndex = Math.max(safeIndex, safeMinimumIndex);
+      onValueChange(maxName, String(scaleValues[clampedIndex]));
+    }
+  };
+
+  const indexFromPointer = (event) => {
+    const boundsRect = event.currentTarget.getBoundingClientRect();
+    if (boundsRect.width <= 0) return safeMinimumIndex;
+    const position = Math.max(
+      0,
+      Math.min(1, (event.clientX - boundsRect.left) / boundsRect.width),
+    );
+    return Math.round(position * scaleMaximumIndex);
+  };
+
+  const pointerDown = (event) => {
+    event.preventDefault();
+    const pointerIndex = indexFromPointer(event);
+    let handle;
+    if (safeMinimumIndex === safeMaximumIndex) {
+      handle = pointerIndex >= safeMaximumIndex ? "maximum" : "minimum";
+    } else {
+      const minimumDistance = Math.abs(pointerIndex - safeMinimumIndex);
+      const maximumDistance = Math.abs(pointerIndex - safeMaximumIndex);
+      handle = minimumDistance < maximumDistance ? "minimum" : "maximum";
+    }
+    activePointerHandleRef.current = handle;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    (handle === "minimum" ? minimumInputRef : maximumInputRef).current?.focus();
+    updateHandle(handle, pointerIndex);
+  };
+
+  const pointerMove = (event) => {
+    if (!activePointerHandleRef.current) return;
+    event.preventDefault();
+    updateHandle(activePointerHandleRef.current, indexFromPointer(event));
+  };
+
+  const endPointer = (event) => {
+    if (!activePointerHandleRef.current) return;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    activePointerHandleRef.current = null;
+  };
+
+  return (
+    <fieldset className="range-filter rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2.5">
+      <legend className="sr-only">{label}</legend>
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm font-semibold text-slate-200">{label}</span>
+        <div className="flex items-center gap-2">
+          <output
+            id={outputId}
+            className="text-xs font-semibold tabular-nums text-violet-200"
+          >
+            {rangeSelectionLabel(minValue, maxValue)}
+          </output>
+          <button
+            className="text-xs font-semibold text-slate-400 underline-offset-2 hover:text-white hover:underline disabled:cursor-not-allowed disabled:opacity-40"
+            type="button"
+            disabled={inactive}
+            onClick={() => {
+              onValueChange(minName, "");
+              onValueChange(maxName, "");
+            }}
+            aria-label={`Clear ${label.toLocaleLowerCase()} range`}
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+      <div
+        className="dual-range mt-2"
+        data-testid={`${minName}-${maxName}-track`}
+        onPointerDown={pointerDown}
+        onPointerMove={pointerMove}
+        onPointerUp={endPointer}
+        onPointerCancel={endPointer}
+      >
+        <div className="dual-range-track" aria-hidden="true">
+          <span
+            className="dual-range-selection"
+            style={{ left: `${left}%`, width: `${Math.max(0, right - left)}%` }}
+          />
+        </div>
+        <input
+          ref={minimumInputRef}
+          className="dual-range-input"
+          type="range"
+          name={minName}
+          min="0"
+          max={scaleMaximumIndex}
+          step="1"
+          value={safeMinimumIndex}
+          aria-label={`Minimum ${label.toLocaleLowerCase()}`}
+          aria-describedby={outputId}
+          aria-valuemin={scaleValues[0]}
+          aria-valuemax={scaleValues[scaleMaximumIndex]}
+          aria-valuenow={safeMinimum}
+          aria-valuetext={String(safeMinimum)}
+          onChange={(event) => {
+            updateHandle("minimum", Number(event.target.value));
+          }}
+        />
+        <input
+          ref={maximumInputRef}
+          className="dual-range-input"
+          type="range"
+          name={maxName}
+          min="0"
+          max={scaleMaximumIndex}
+          step="1"
+          value={safeMaximumIndex}
+          aria-label={`Maximum ${label.toLocaleLowerCase()}`}
+          aria-describedby={outputId}
+          aria-valuemin={scaleValues[0]}
+          aria-valuemax={scaleValues[scaleMaximumIndex]}
+          aria-valuenow={safeMaximum}
+          aria-valuetext={String(safeMaximum)}
+          onChange={(event) => {
+            updateHandle("maximum", Number(event.target.value));
+          }}
+        />
+      </div>
+    </fieldset>
+  );
+}
+
+export function MinimumSlider({
+  label,
+  name,
+  value,
+  bounds,
+  onValueChange,
+}) {
+  const outputId = useId();
+  const parsedValue = Number(value);
+  const selectedValue = value !== "" && Number.isFinite(parsedValue)
+    ? parsedValue
+    : bounds.min;
+  const floor = Math.min(bounds.min, selectedValue);
+  const ceiling = Math.max(bounds.max, selectedValue);
+
+  return (
+    <fieldset className="range-filter rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2.5">
+      <legend className="sr-only">{label}</legend>
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm font-semibold text-slate-200">{label}</span>
+        <div className="flex items-center gap-2">
+          <output
+            id={outputId}
+            className="text-xs font-semibold tabular-nums text-violet-200"
+          >
+            {value === "" ? "Any" : `${value}+`}
+          </output>
+          <button
+            className="text-xs font-semibold text-slate-400 underline-offset-2 hover:text-white hover:underline disabled:cursor-not-allowed disabled:opacity-40"
+            type="button"
+            disabled={value === ""}
+            onClick={() => onValueChange(name, "")}
+            aria-label={`Clear ${label.toLocaleLowerCase()}`}
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+      <input
+        className="single-range mt-2"
+        type="range"
+        name={name}
+        min={floor}
+        max={ceiling}
+        step={bounds.step}
+        value={selectedValue}
+        aria-label={`Minimum ${label.toLocaleLowerCase()}`}
+        aria-describedby={outputId}
+        onChange={(event) => onValueChange(name, event.target.value)}
+      />
+    </fieldset>
+  );
+}
+
 export default function App() {
   const initialStateRef = useRef(catalogueStateFromSearch(window.location.search));
   const initialState = initialStateRef.current;
@@ -303,10 +830,19 @@ export default function App() {
     initialState.view === "results" && initialState.contentType === "ANIME",
   );
   const [genres, setGenres] = useState([]);
+  const [studios, setStudios] = useState([]);
+  const [streamingServices, setStreamingServices] = useState([]);
+  const [filterRanges, setFilterRanges] = useState(DEFAULT_FILTER_RANGES);
   const [tagOptions, setTagOptions] = useState([]);
   const [tagQuery, setTagQuery] = useState("");
+  const [studioQuery, setStudioQuery] = useState("");
+  const [streamingQuery, setStreamingQuery] = useState("");
   const [tagsLoading, setTagsLoading] = useState(false);
+  const [studiosLoading, setStudiosLoading] = useState(false);
+  const [streamingServicesLoading, setStreamingServicesLoading] = useState(false);
   const [genreDropdownOpen, setGenreDropdownOpen] = useState(false);
+  const [studioDropdownOpen, setStudioDropdownOpen] = useState(false);
+  const [streamingDropdownOpen, setStreamingDropdownOpen] = useState(false);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [activePreset, setActivePreset] = useState("");
@@ -332,9 +868,14 @@ export default function App() {
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(null);
   const genreDropdownRef = useRef(null);
+  const studioDropdownRef = useRef(null);
+  const streamingDropdownRef = useRef(null);
   const catalogueRequestRef = useRef(0);
   const genreRequestRef = useRef(0);
   const tagRequestRef = useRef(0);
+  const studioRequestRef = useRef(0);
+  const streamingRequestRef = useRef(0);
+  const rangeRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
 
   const loadCatalogue = useCallback(async (
@@ -452,6 +993,77 @@ export default function App() {
     }
   }, []);
 
+  const loadStudios = useCallback(async (
+    query = "",
+    activeContentType = "ANIME",
+  ) => {
+    const requestId = ++studioRequestRef.current;
+    setStudiosLoading(true);
+    try {
+      const params = new URLSearchParams({ content_type: activeContentType });
+      if (query) params.set("q", query);
+      const response = await fetch(`/api/v1/studios?${params}`);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error?.message || "Could not load studios.");
+      if (requestId === studioRequestRef.current) {
+        setStudios(
+          namedValues(body.items).sort((left, right) => left.localeCompare(right)),
+        );
+      }
+    } catch {
+      if (requestId === studioRequestRef.current) setStudios([]);
+    } finally {
+      if (requestId === studioRequestRef.current) setStudiosLoading(false);
+    }
+  }, []);
+
+  const loadStreamingServices = useCallback(async (
+    query = "",
+    activeContentType = "ANIME",
+  ) => {
+    const requestId = ++streamingRequestRef.current;
+    setStreamingServicesLoading(true);
+    try {
+      const params = new URLSearchParams({ content_type: activeContentType });
+      if (query) params.set("q", query);
+      const response = await fetch(`/api/v1/streaming-services?${params}`);
+      const body = await response.json();
+      if (!response.ok) {
+        throw new Error(body.error?.message || "Could not load streaming services.");
+      }
+      if (requestId === streamingRequestRef.current) {
+        setStreamingServices(
+          namedValues(body.items).sort((left, right) => left.localeCompare(right)),
+        );
+      }
+    } catch {
+      if (requestId === streamingRequestRef.current) setStreamingServices([]);
+    } finally {
+      if (requestId === streamingRequestRef.current) {
+        setStreamingServicesLoading(false);
+      }
+    }
+  }, []);
+
+  const loadFilterRanges = useCallback(async (activeContentType = "ANIME") => {
+    const requestId = ++rangeRequestRef.current;
+    try {
+      const params = new URLSearchParams({ content_type: activeContentType });
+      const response = await fetch(`/api/v1/filter-ranges?${params}`);
+      const body = await response.json();
+      if (!response.ok) {
+        throw new Error(body.error?.message || "Could not load filter ranges.");
+      }
+      if (requestId === rangeRequestRef.current) {
+        setFilterRanges(normalizedFilterRanges(body));
+      }
+    } catch {
+      if (requestId === rangeRequestRef.current) {
+        setFilterRanges(DEFAULT_FILTER_RANGES);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     loadCatalogue(
       initialState.page,
@@ -487,6 +1099,13 @@ export default function App() {
       setActivePreset("");
       setSelected(null);
       setDetailLoading(false);
+      setTagQuery("");
+      setStudioQuery("");
+      setStreamingQuery("");
+      setGenreDropdownOpen(false);
+      setStudioDropdownOpen(false);
+      setStreamingDropdownOpen(false);
+      genreDropdownRef.current?.removeAttribute("open");
       setJumpPage("");
       setPageError("");
       loadCatalogue(
@@ -503,16 +1122,45 @@ export default function App() {
   useEffect(() => {
     setGenres([]);
     loadGenres(contentType);
-  }, [contentType, loadGenres]);
+    setFilterRanges(DEFAULT_FILTER_RANGES);
+    loadFilterRanges(contentType);
+    if (contentType === "ANIME" || contentType === "ALL") {
+      setStudios([]);
+      setStreamingServices([]);
+      loadStudios("", contentType);
+      loadStreamingServices("", contentType);
+    } else {
+      ++studioRequestRef.current;
+      ++streamingRequestRef.current;
+      setStudios([]);
+      setStreamingServices([]);
+      setStudiosLoading(false);
+      setStreamingServicesLoading(false);
+    }
+  }, [
+    contentType,
+    loadFilterRanges,
+    loadGenres,
+    loadStreamingServices,
+    loadStudios,
+  ]);
 
   useEffect(() => {
-    const closeGenreDropdown = (event) => {
+    const closeFilterDropdowns = (event) => {
       if (!genreDropdownRef.current?.contains(event.target)) {
         genreDropdownRef.current?.removeAttribute("open");
       }
+      if (!studioDropdownRef.current?.contains(event.target)) {
+        setStudioDropdownOpen(false);
+        setStudioQuery("");
+      }
+      if (!streamingDropdownRef.current?.contains(event.target)) {
+        setStreamingDropdownOpen(false);
+        setStreamingQuery("");
+      }
     };
-    document.addEventListener("pointerdown", closeGenreDropdown);
-    return () => document.removeEventListener("pointerdown", closeGenreDropdown);
+    document.addEventListener("pointerdown", closeFilterDropdowns);
+    return () => document.removeEventListener("pointerdown", closeFilterDropdowns);
   }, []);
 
   useEffect(() => {
@@ -524,24 +1172,81 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [contentType, genreDropdownOpen, loadTags, tagQuery]);
 
+  useEffect(() => {
+    if (!studioDropdownOpen) return undefined;
+    const timer = window.setTimeout(
+      () => loadStudios(studioQuery.trim(), contentType),
+      200,
+    );
+    return () => window.clearTimeout(timer);
+  }, [
+    contentType,
+    loadStudios,
+    studioDropdownOpen,
+    studioQuery,
+  ]);
+
+  useEffect(() => {
+    if (!streamingDropdownOpen) return undefined;
+    const timer = window.setTimeout(
+      () => loadStreamingServices(streamingQuery.trim(), contentType),
+      200,
+    );
+    return () => window.clearTimeout(timer);
+  }, [
+    contentType,
+    loadStreamingServices,
+    streamingDropdownOpen,
+    streamingQuery,
+  ]);
+
   const defaultFilters = filtersFor();
   const hasSelections = !filtersMatch(filters, defaultFilters);
   const defaultViewMode = contentType === "ANIME" ? "home" : "results";
   const showHomepageSections = contentType === "ANIME" && viewMode === "home";
+  const hasAppliedSelections = !showHomepageSections
+    && !filtersMatch(appliedFilters, defaultFilters);
   const contentDetails = contentTypeDetails(contentType);
   const chips = showHomepageSections
     ? []
     : activeFilterChips(appliedFilters, contentType);
   const freshness = formatFreshness(updatedAt);
   const filterPresets = presetsFor(contentType);
+  const hasAnimeOnlyAllFilters = contentType === "ALL" && Boolean(
+    filters.min_episodes
+    || filters.max_episodes
+    || filters.studio.length
+    || filters.streaming_service.length
+  );
+  const hasPrintOnlyAllFilters = contentType === "ALL" && Boolean(
+    filters.min_chapters
+    || filters.max_chapters
+    || filters.min_volumes
+    || filters.max_volumes
+  );
+  const hasAppliedAnimeOnlyAllFilters = contentType === "ALL" && Boolean(
+    appliedFilters.min_episodes
+    || appliedFilters.max_episodes
+    || appliedFilters.studio.length
+    || appliedFilters.streaming_service.length
+  );
+  const hasAppliedPrintOnlyAllFilters = contentType === "ALL" && Boolean(
+    appliedFilters.min_chapters
+    || appliedFilters.max_chapters
+    || appliedFilters.min_volumes
+    || appliedFilters.max_volumes
+  );
+  const hasIncompatibleAllFilters = (
+    (hasAnimeOnlyAllFilters && hasPrintOnlyAllFilters)
+    || (
+      hasAppliedAnimeOnlyAllFilters
+      && hasAppliedPrintOnlyAllFilters
+    )
+  );
 
   const submitFilters = (event) => {
     event.preventDefault();
-    const submittedFilters = {
-      ...filters,
-      genre: [...filters.genre],
-      tag: [...filters.tag],
-    };
+    const submittedFilters = copiedFilters(filters);
     const returnsHome = usesTopRatedAnimeHomepage(
       contentType,
       filters,
@@ -580,17 +1285,21 @@ export default function App() {
     setAllTypesExplicitlySelected(false);
     setSelected(null);
     setDetailLoading(false);
-    setTagQuery("");
     setTagOptions([]);
     setTagsLoading(false);
     setActivePreset("");
     setMobileFiltersOpen(false);
     setMoreFiltersOpen(false);
+    setTagQuery("");
+    setStudioQuery("");
+    setStreamingQuery("");
+    setGenreDropdownOpen(false);
+    setStudioDropdownOpen(false);
+    setStreamingDropdownOpen(false);
+    genreDropdownRef.current?.removeAttribute("open");
     setJumpPage("");
     setPageError("");
     ++tagRequestRef.current;
-    setGenreDropdownOpen(false);
-    genreDropdownRef.current?.removeAttribute("open");
     setViewMode(nextView);
     navigateCatalogue({
       page: 1,
@@ -603,13 +1312,20 @@ export default function App() {
 
   const showRandom = async () => {
     const requestId = ++catalogueRequestRef.current;
+    const randomFilters = copiedFilters(filters);
     setViewMode("random");
+    setAppliedFilters(randomFilters);
     setLoading(true);
     setError("");
     setActivePreset("");
     try {
-      const params = new URLSearchParams({ content_type: contentType, limit: "6" });
-      const response = await fetch(`/api/v1/catalogue/random?${params}`);
+      const response = await fetch(
+        `/api/v1/catalogue/random?${randomQueryString(
+          randomFilters,
+          contentType,
+          6,
+        )}`,
+      );
       const body = await response.json();
       if (!response.ok) {
         throw new Error(
@@ -676,6 +1392,24 @@ export default function App() {
     }));
   };
 
+  const changeFilterValue = (name, value) => {
+    setActivePreset("");
+    setFilters((current) => ({
+      ...current,
+      [name]: value,
+    }));
+  };
+
+  const toggleMultiFilter = (name, value) => {
+    setActivePreset("");
+    setFilters((current) => ({
+      ...current,
+      [name]: current[name].includes(value)
+        ? current[name].filter((selectedValue) => selectedValue !== value)
+        : [...current[name], value],
+    }));
+  };
+
   const toggleGenre = (genre) => {
     setActivePreset("");
     setFilters((current) => ({
@@ -687,14 +1421,14 @@ export default function App() {
   };
 
   const toggleTag = (tag) => {
-    setActivePreset("");
-    setFilters((current) => ({
-      ...current,
-      tag: current.tag.includes(tag)
-        ? current.tag.filter((selectedTag) => selectedTag !== tag)
-        : [...current.tag, tag],
-    }));
+    toggleMultiFilter("tag", tag);
   };
+
+  const toggleStudio = (studio) => toggleMultiFilter("studio", studio);
+
+  const toggleStreamingService = (service) => (
+    toggleMultiFilter("streaming_service", service)
+  );
 
   const clearSelections = () => {
     const clearedFilters = filtersFor();
@@ -709,6 +1443,13 @@ export default function App() {
     setSort(DEFAULT_SORT);
     setMobileFiltersOpen(false);
     setMoreFiltersOpen(false);
+    setTagQuery("");
+    setStudioQuery("");
+    setStreamingQuery("");
+    setGenreDropdownOpen(false);
+    setStudioDropdownOpen(false);
+    setStreamingDropdownOpen(false);
+    genreDropdownRef.current?.removeAttribute("open");
     setJumpPage("");
     setPageError("");
     setViewMode(nextView);
@@ -872,6 +1613,12 @@ export default function App() {
             dropdownRef={genreDropdownRef}
             onDropdownToggle={(isOpen) => {
               setGenreDropdownOpen(isOpen);
+              if (isOpen) {
+                setStudioDropdownOpen(false);
+                setStreamingDropdownOpen(false);
+                setStudioQuery("");
+                setStreamingQuery("");
+              }
               if (!isOpen) setTagQuery("");
             }}
             onQueryChange={setTagQuery}
@@ -894,7 +1641,7 @@ export default function App() {
               onFocus={() => setAllTypesExplicitlySelected(true)}
               style={{ colorScheme: "dark" }}
             >
-              <option className="bg-slate-950" value="">All types</option>
+              <option className="bg-slate-950" value="">Type</option>
               <option className="bg-slate-950" value="TV">TV</option>
               <option className="bg-slate-950" value="MOVIE">Movie</option>
               <option className="bg-slate-950" value="OVA">OVA</option>
@@ -917,7 +1664,7 @@ export default function App() {
               onChange={changeFilter}
               style={{ colorScheme: "dark" }}
             >
-              <option className="bg-slate-950" value="">All statuses</option>
+              <option className="bg-slate-950" value="">Status</option>
               <option className="bg-slate-950" value="CURRENTLY_AIRING">
                 Currently Airing
               </option>
@@ -944,7 +1691,7 @@ export default function App() {
               onChange={changeFilter}
               style={{ colorScheme: "dark" }}
             >
-              <option className="bg-slate-950" value="">All statuses</option>
+              <option className="bg-slate-950" value="">Status</option>
               <option className="bg-slate-950" value="PUBLISHING">Publishing</option>
               <option className="bg-slate-950" value="FINISHED">Finished</option>
               <option className="bg-slate-950" value="ON_HIATUS">On hiatus</option>
@@ -984,6 +1731,13 @@ export default function App() {
           id="mobile-more-filters"
           className={responsiveFilterPanelClasses(mobileFiltersOpen, moreFiltersOpen)}
         >
+          {contentType === "ALL" && (
+            <p className="rounded-xl border border-sky-400/20 bg-sky-400/10 px-3 py-2 text-xs leading-5 text-sky-100 sm:col-span-2 lg:col-span-6">
+              Episodes, Studio, and Streaming Service show Anime only.
+              Chapters and Volumes show Manga and Manhwa only.
+            </p>
+          )}
+
           {contentType === "ANIME" && (
             <label>
               <span className="sr-only">Season</span>
@@ -994,7 +1748,7 @@ export default function App() {
                 onChange={changeFilter}
                 style={{ colorScheme: "dark" }}
               >
-                <option className="bg-slate-950" value="">All seasons</option>
+                <option className="bg-slate-950" value="">Season</option>
                 <option className="bg-slate-950" value="winter">Winter</option>
                 <option className="bg-slate-950" value="spring">Spring</option>
                 <option className="bg-slate-950" value="summer">Summer</option>
@@ -1002,101 +1756,143 @@ export default function App() {
               </select>
             </label>
           )}
-          <label>
-            <span className="sr-only">Minimum score</span>
-            <input
-              className="filter-input"
-              name="min_score"
-              inputMode="decimal"
-              min="0"
-              max="10"
-              step="0.1"
-              placeholder="Minimum score"
-              value={filters.min_score}
-              onChange={changeFilter}
-            />
-          </label>
-          <label>
-            <span className="sr-only">From year</span>
-            <input
-              className="filter-input"
-              name="min_year"
-              inputMode="numeric"
-              placeholder="From year"
-              value={filters.min_year}
-              onChange={changeFilter}
-            />
-          </label>
-          <label>
-            <span className="sr-only">To year</span>
-            <input
-              className="filter-input"
-              name="max_year"
-              inputMode="numeric"
-              placeholder="To year"
-              value={filters.max_year}
-              onChange={changeFilter}
-            />
-          </label>
 
-          {contentType === "ANIME" && (
-            <>
-              <label>
-                <span className="sr-only">Minimum episodes</span>
-                <input
-                  className="filter-input"
-                  name="min_episodes"
-                  inputMode="numeric"
-                  min="1"
-                  placeholder="Minimum episodes"
-                  value={filters.min_episodes}
-                  onChange={changeFilter}
-                />
-              </label>
-              <label>
-                <span className="sr-only">Maximum episodes</span>
-                <input
-                  className="filter-input"
-                  name="max_episodes"
-                  inputMode="numeric"
-                  min="1"
-                  placeholder="Maximum episodes"
-                  value={filters.max_episodes}
-                  onChange={changeFilter}
-                />
-              </label>
-            </>
+          {(contentType === "ANIME" || contentType === "ALL") && (
+            <div id="studio-filter" className="sm:col-span-2 lg:col-span-2">
+              <SearchableMultiSelect
+                label="Studio"
+                selected={filters.studio}
+                options={studios}
+                query={studioQuery}
+                loading={studiosLoading}
+                open={studioDropdownOpen}
+                dropdownRef={studioDropdownRef}
+                onOpenChange={(isOpen) => {
+                  setStudioDropdownOpen(isOpen);
+                  if (isOpen) {
+                    genreDropdownRef.current?.removeAttribute("open");
+                    setGenreDropdownOpen(false);
+                    setStreamingDropdownOpen(false);
+                    setStreamingQuery("");
+                  } else {
+                    setStudioQuery("");
+                  }
+                }}
+                onQueryChange={setStudioQuery}
+                onToggle={toggleStudio}
+              />
+            </div>
           )}
 
-          {(contentType === "MANGA" || contentType === "MANHWA") && (
+          {(contentType === "ANIME" || contentType === "ALL") && (
+            <div
+              id="streaming-service-filter"
+              className="sm:col-span-2 lg:col-span-2"
+            >
+              <SearchableMultiSelect
+                label="Streaming Service"
+                selected={filters.streaming_service}
+                options={streamingServices}
+                query={streamingQuery}
+                loading={streamingServicesLoading}
+                open={streamingDropdownOpen}
+                dropdownRef={streamingDropdownRef}
+                onOpenChange={(isOpen) => {
+                  setStreamingDropdownOpen(isOpen);
+                  if (isOpen) {
+                    genreDropdownRef.current?.removeAttribute("open");
+                    setGenreDropdownOpen(false);
+                    setStudioDropdownOpen(false);
+                    setStudioQuery("");
+                  } else {
+                    setStreamingQuery("");
+                  }
+                }}
+                onQueryChange={setStreamingQuery}
+                onToggle={toggleStreamingService}
+              />
+            </div>
+          )}
+
+          <div className="sm:col-span-2 lg:col-span-2">
+            <MinimumSlider
+              label="Score"
+              name="min_score"
+              value={filters.min_score}
+              bounds={filterRanges.score}
+              onValueChange={changeFilterValue}
+            />
+          </div>
+
+          <div className="sm:col-span-2 lg:col-span-2">
+            <DualRangeSlider
+              label="Year"
+              minName="min_year"
+              maxName="max_year"
+              minValue={filters.min_year}
+              maxValue={filters.max_year}
+              bounds={filterRanges.year}
+              onValueChange={changeFilterValue}
+            />
+          </div>
+
+          {(contentType === "ANIME" || contentType === "ALL") && (
+            <div className="sm:col-span-2 lg:col-span-2">
+              <DualRangeSlider
+                label="Episodes"
+                minName="min_episodes"
+                maxName="max_episodes"
+                minValue={filters.min_episodes}
+                maxValue={filters.max_episodes}
+                bounds={filterRanges.episodes}
+                scale="episodes"
+                onValueChange={changeFilterValue}
+              />
+            </div>
+          )}
+
+          {(contentType === "MANGA"
+            || contentType === "MANHWA"
+            || contentType === "ALL") && (
             <>
-              <label>
-                <span className="sr-only">Minimum chapters</span>
-                <input
-                  className="filter-input"
-                  name="min_chapters"
-                  inputMode="numeric"
-                  min="1"
-                  placeholder="Minimum chapters"
-                  value={filters.min_chapters}
-                  onChange={changeFilter}
+              <div className="sm:col-span-2 lg:col-span-2">
+                <DualRangeSlider
+                  label="Chapters"
+                  minName="min_chapters"
+                  maxName="max_chapters"
+                  minValue={filters.min_chapters}
+                  maxValue={filters.max_chapters}
+                  bounds={filterRanges.chapters}
+                  scale="chapters"
+                  onValueChange={changeFilterValue}
                 />
-              </label>
-              <label>
-                <span className="sr-only">Minimum volumes</span>
-                <input
-                  className="filter-input"
-                  name="min_volumes"
-                  inputMode="numeric"
-                  min="1"
-                  placeholder="Minimum volumes"
-                  value={filters.min_volumes}
-                  onChange={changeFilter}
+              </div>
+              <div className="sm:col-span-2 lg:col-span-2">
+                <DualRangeSlider
+                  label="Volumes"
+                  minName="min_volumes"
+                  maxName="max_volumes"
+                  minValue={filters.min_volumes}
+                  maxValue={filters.max_volumes}
+                  bounds={filterRanges.volumes}
+                  scale="volumes"
+                  onValueChange={changeFilterValue}
                 />
-              </label>
+              </div>
             </>
           )}
         </div>
+
+        {hasIncompatibleAllFilters && (
+          <p
+            className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-100 sm:col-span-2 lg:col-span-6"
+            role="alert"
+          >
+            Anime-only and print-only filters cannot match the same title.
+            Clear Episodes, Studio, and Streaming Service or clear Chapters
+            and Volumes before searching.
+          </p>
+        )}
 
         <div className="flex flex-wrap items-center justify-between gap-2 sm:col-span-2 lg:col-span-6">
           <button
@@ -1112,7 +1908,12 @@ export default function App() {
             className="rounded-lg border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-violet-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             type="button"
             onClick={clearSelections}
-            disabled={!hasSelections && viewMode === defaultViewMode && sort === DEFAULT_SORT}
+            disabled={
+              !hasSelections
+              && !hasAppliedSelections
+              && viewMode === defaultViewMode
+              && sort === DEFAULT_SORT
+            }
           >
             Clear selections
           </button>

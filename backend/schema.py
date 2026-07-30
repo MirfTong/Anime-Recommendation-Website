@@ -1,8 +1,19 @@
 """Small, additive database migrations required by the catalogue application."""
 
+import re
+from threading import Lock
+
 from sqlalchemy import text
 
 from backend.models import db
+
+
+CATALOGUE_SCHEMA_VERSION = 1
+CATALOGUE_SCHEMA_LOCK_ID = 5_423_769_101
+CATALOGUE_SCHEMA_VERSION_TABLE = "catalogue_schema_version"
+
+_catalogue_schema_ready = False
+_catalogue_schema_process_lock = Lock()
 
 
 def _column_exists(table_name: str, column_name: str) -> bool:
@@ -21,7 +32,27 @@ def _column_exists(table_name: str, column_name: str) -> bool:
     )
 
 
-def refresh_catalogue_facets() -> int:
+def _schema_version_is_current() -> bool:
+    version_table = db.session.scalar(
+        text("SELECT to_regclass(:table_name)"),
+        {"table_name": CATALOGUE_SCHEMA_VERSION_TABLE},
+    )
+    if version_table is None:
+        return False
+    return bool(
+        db.session.scalar(
+            text(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM catalogue_schema_version "
+                "WHERE version = :version"
+                ")"
+            ),
+            {"version": CATALOGUE_SCHEMA_VERSION},
+        )
+    )
+
+
+def refresh_catalogue_facets(*, commit: bool = True) -> int:
     """Rebuild indexed public genre/tag options from normalized catalogue data."""
     db.session.execute(text("DELETE FROM catalogue_facet"))
     db.session.execute(
@@ -51,7 +82,22 @@ def refresh_catalogue_facets() -> int:
             "SELECT manga.content_type, 'tag', detail.value "
             "FROM manga "
             "CROSS JOIN LATERAL unnest(manga.genres_detailed) AS detail(value) "
-            "WHERE manga.is_adult = FALSE"
+            "WHERE manga.is_adult = FALSE "
+            "UNION ALL "
+            "SELECT 'ANIME', 'studio', studio.name "
+            "FROM anime "
+            "JOIN anime_studio ON anime_studio.anime_id = anime.anime_id "
+            "JOIN studio ON studio.id = anime_studio.studio_id "
+            "WHERE anime.is_adult = FALSE "
+            "UNION ALL "
+            "SELECT 'ANIME', 'streaming_service', streaming_service.name "
+            "FROM anime "
+            "JOIN anime_streaming_service "
+            "ON anime_streaming_service.anime_id = anime.anime_id "
+            "JOIN streaming_service "
+            "ON streaming_service.id = "
+            "anime_streaming_service.streaming_service_id "
+            "WHERE anime.is_adult = FALSE"
             ") AS source "
             "WHERE source.value IS NOT NULL "
             "AND TRIM(source.value) <> '' "
@@ -62,22 +108,62 @@ def refresh_catalogue_facets() -> int:
     total = int(
         db.session.scalar(text("SELECT COUNT(*) FROM catalogue_facet")) or 0
     )
-    db.session.commit()
+    if commit:
+        db.session.commit()
     return total
 
 
-def ensure_catalogue_schema() -> None:
-    """Create anime/manga tables and apply safe additive catalogue migrations."""
+def _apply_catalogue_schema_migration(connection) -> None:
+    """Apply the current migration while the transaction advisory lock is held."""
     # pg_trgm makes the API's leading-wildcard title searches indexable. It is
     # a trusted PostgreSQL extension and must exist before ORM indexes are made.
     db.session.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
-    db.session.commit()
     missing_adult_flags = {
         table_name
         for table_name in ("anime", "manga")
         if not _column_exists(table_name, "is_adult")
     }
-    db.create_all()
+    # Use the session's locked transaction rather than opening another engine
+    # connection that would sit outside the advisory-lock boundary.
+    db.metadata.create_all(bind=connection)
+
+    # The original facet table allowed only genres and tags. Widen its value
+    # column and check constraint once so studio/service options can use the
+    # same precomputed, indexed lookup path.
+    db.session.execute(
+        text(
+            "ALTER TABLE catalogue_facet ALTER COLUMN facet_type "
+            "TYPE VARCHAR(30)"
+        )
+    )
+    facet_constraint = db.session.scalar(
+        text(
+            "SELECT pg_get_constraintdef(oid) "
+            "FROM pg_constraint "
+            "WHERE conrelid = 'catalogue_facet'::regclass "
+            "AND conname = 'ck_catalogue_facet_type'"
+        )
+    )
+    required_facet_types = {"genre", "tag", "studio", "streaming_service"}
+    constraint_facet_types = (
+        set(re.findall(r"'([^']+)'", facet_constraint))
+        if isinstance(facet_constraint, str)
+        else set()
+    )
+    if constraint_facet_types != required_facet_types:
+        db.session.execute(
+            text(
+                "ALTER TABLE catalogue_facet DROP CONSTRAINT IF EXISTS "
+                "ck_catalogue_facet_type"
+            )
+        )
+        db.session.execute(
+            text(
+                "ALTER TABLE catalogue_facet ADD CONSTRAINT "
+                "ck_catalogue_facet_type CHECK (facet_type IN "
+                "('genre', 'tag', 'studio', 'streaming_service'))"
+            )
+        )
 
     # Older CSV imports required these fields, but Jikan can legitimately omit
     # them for unreleased or currently airing titles.
@@ -226,6 +312,17 @@ def ensure_catalogue_schema() -> None:
         "ON anime (is_adult, score)",
         "CREATE INDEX IF NOT EXISTS ix_anime_status_score "
         "ON anime (status, score DESC)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_studio_normalized_name "
+        "ON studio (normalized_name)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_studio_mal_id "
+        "ON studio (mal_id)",
+        "CREATE INDEX IF NOT EXISTS ix_anime_studio_studio_anime "
+        "ON anime_studio (studio_id, anime_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_streaming_service_normalized_name "
+        "ON streaming_service (normalized_name)",
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_anime_streaming_service_service_anime "
+        "ON anime_streaming_service (streaming_service_id, anime_id)",
         "CREATE INDEX IF NOT EXISTS ix_manga_title_trgm "
         "ON manga USING GIN (title gin_trgm_ops)",
         "CREATE INDEX IF NOT EXISTS ix_manga_alternative_title_trgm "
@@ -238,12 +335,65 @@ def ensure_catalogue_schema() -> None:
         "ON manga (content_type, LOWER(BTRIM(status)), score DESC)",
     ):
         db.session.execute(text(index_sql))
-    db.session.commit()
     has_facets = db.session.scalar(
         text("SELECT EXISTS (SELECT 1 FROM catalogue_facet LIMIT 1)")
     )
     if not has_facets:
-        refresh_catalogue_facets()
+        refresh_catalogue_facets(commit=False)
+
+
+def ensure_catalogue_schema() -> None:
+    """Apply each catalogue schema version once with cross-process locking."""
+    global _catalogue_schema_ready
+
+    if _catalogue_schema_ready:
+        return
+
+    with _catalogue_schema_process_lock:
+        if _catalogue_schema_ready:
+            return
+        try:
+            # The common path is read-only and avoids PostgreSQL DDL and
+            # advisory locks after this schema version has been recorded.
+            if _schema_version_is_current():
+                db.session.commit()
+                _catalogue_schema_ready = True
+                return
+
+            db.session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_id)"),
+                {"lock_id": CATALOGUE_SCHEMA_LOCK_ID},
+            )
+            # Another Render worker or GitHub Action may have completed the
+            # migration while this process waited for the transaction lock.
+            if _schema_version_is_current():
+                db.session.commit()
+                _catalogue_schema_ready = True
+                return
+
+            db.session.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS catalogue_schema_version ("
+                    "version INTEGER PRIMARY KEY, "
+                    "applied_at TIMESTAMP WITH TIME ZONE NOT NULL "
+                    "DEFAULT CURRENT_TIMESTAMP"
+                    ")"
+                )
+            )
+            connection = db.session.connection()
+            _apply_catalogue_schema_migration(connection)
+            db.session.execute(
+                text(
+                    "INSERT INTO catalogue_schema_version (version) "
+                    "VALUES (:version) ON CONFLICT (version) DO NOTHING"
+                ),
+                {"version": CATALOGUE_SCHEMA_VERSION},
+            )
+            db.session.commit()
+            _catalogue_schema_ready = True
+        except BaseException:
+            db.session.rollback()
+            raise
 
 
 def ensure_anime_schema() -> None:
