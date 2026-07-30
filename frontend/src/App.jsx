@@ -1717,6 +1717,38 @@ export default function App() {
           />
         </div>
 
+        {(contentType === "MANGA" || contentType === "MANHWA") && (
+          <div
+            id="author-filter"
+            className={`${mobileFiltersOpen ? "block" : "hidden"} sm:block`}
+          >
+            <SearchableMultiSelect
+              label="Author"
+              selected={filters.author}
+              options={authors}
+              query={authorQuery}
+              loading={authorsLoading}
+              open={authorDropdownOpen}
+              dropdownRef={authorDropdownRef}
+              onOpenChange={(isOpen) => {
+                setAuthorDropdownOpen(isOpen);
+                if (isOpen) {
+                  genreDropdownRef.current?.removeAttribute("open");
+                  setGenreDropdownOpen(false);
+                  setStudioDropdownOpen(false);
+                  setStreamingDropdownOpen(false);
+                  setStudioQuery("");
+                  setStreamingQuery("");
+                } else {
+                  setAuthorQuery("");
+                }
+              }}
+              onQueryChange={setAuthorQuery}
+              onToggle={toggleAuthor}
+            />
+          </div>
+        )}
+
         {contentType === "ANIME" && (
           <label
             id="anime-type-filter"
@@ -1899,35 +1931,6 @@ export default function App() {
                 }}
                 onQueryChange={setStreamingQuery}
                 onToggle={toggleStreamingService}
-              />
-            </div>
-          )}
-
-          {(contentType === "MANGA" || contentType === "MANHWA") && (
-            <div id="author-filter" className="sm:col-span-1 lg:col-span-1">
-              <SearchableMultiSelect
-                label="Author"
-                selected={filters.author}
-                options={authors}
-                query={authorQuery}
-                loading={authorsLoading}
-                open={authorDropdownOpen}
-                dropdownRef={authorDropdownRef}
-                onOpenChange={(isOpen) => {
-                  setAuthorDropdownOpen(isOpen);
-                  if (isOpen) {
-                    genreDropdownRef.current?.removeAttribute("open");
-                    setGenreDropdownOpen(false);
-                    setStudioDropdownOpen(false);
-                    setStreamingDropdownOpen(false);
-                    setStudioQuery("");
-                    setStreamingQuery("");
-                  } else {
-                    setAuthorQuery("");
-                  }
-                }}
-                onQueryChange={setAuthorQuery}
-                onToggle={toggleAuthor}
               />
             </div>
           )}
