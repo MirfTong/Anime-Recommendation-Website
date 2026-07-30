@@ -48,18 +48,22 @@ const FILTER_LAYOUTS = {
   ANIME: {
     grid: "sm:grid-cols-2 lg:grid-cols-5",
     panelSpan: "lg:col-span-5",
+    panelGrid: "lg:grid-cols-5",
   },
   MANGA: {
-    grid: "sm:grid-cols-2 lg:grid-cols-3",
-    panelSpan: "lg:col-span-3",
+    grid: "sm:grid-cols-2 lg:grid-cols-5",
+    panelSpan: "lg:col-span-5",
+    panelGrid: "lg:grid-cols-5",
   },
   MANHWA: {
-    grid: "sm:grid-cols-2 lg:grid-cols-3",
-    panelSpan: "lg:col-span-3",
+    grid: "sm:grid-cols-2 lg:grid-cols-5",
+    panelSpan: "lg:col-span-5",
+    panelGrid: "lg:grid-cols-5",
   },
   ALL: {
-    grid: "sm:grid-cols-2 lg:grid-cols-2",
-    panelSpan: "lg:col-span-2",
+    grid: "sm:grid-cols-2 lg:grid-cols-5",
+    panelSpan: "lg:col-span-5",
+    panelGrid: "lg:grid-cols-5",
   },
 };
 
@@ -1792,17 +1796,18 @@ export default function App() {
             mobileFiltersOpen,
             moreFiltersOpen,
             filterLayout.panelSpan,
+            filterLayout.panelGrid,
           )}
         >
           {contentType === "ALL" && (
-            <p className="rounded-xl border border-sky-400/20 bg-sky-400/10 px-3 py-2 text-xs leading-5 text-sky-100 sm:col-span-2 lg:col-span-6">
+            <p className={`rounded-xl border border-sky-400/20 bg-sky-400/10 px-3 py-2 text-xs leading-5 text-sky-100 sm:col-span-2 ${filterLayout.panelSpan}`}>
               Episodes, Studio, and Streaming Service show Anime only.
               Chapters and Volumes show Manga and Manhwa only.
             </p>
           )}
 
           {(contentType === "ANIME" || contentType === "ALL") && (
-            <div id="studio-filter" className="sm:col-span-2 lg:col-span-2">
+            <div id="studio-filter" className="sm:col-span-1 lg:col-span-1">
               <SearchableMultiSelect
                 label="Studio"
                 selected={filters.studio}
@@ -1831,7 +1836,7 @@ export default function App() {
           {(contentType === "ANIME" || contentType === "ALL") && (
             <div
               id="streaming-service-filter"
-              className="sm:col-span-2 lg:col-span-2"
+              className="sm:col-span-1 lg:col-span-1"
             >
               <SearchableMultiSelect
                 label="Streaming Service"
@@ -1858,30 +1863,24 @@ export default function App() {
             </div>
           )}
 
-          <div className="sm:col-span-2 lg:col-span-2">
-            <MinimumSlider
-              label="Score"
-              name="min_score"
-              value={filters.min_score}
-              bounds={filterRanges.score}
-              onValueChange={changeFilterValue}
-            />
-          </div>
-
-          <div className="sm:col-span-2 lg:col-span-2">
-            <DualRangeSlider
-              label="Year"
-              minName="min_year"
-              maxName="max_year"
-              minValue={filters.min_year}
-              maxValue={filters.max_year}
-              bounds={filterRanges.year}
-              onValueChange={changeFilterValue}
-            />
-          </div>
-
-          {(contentType === "ANIME" || contentType === "ALL") && (
-            <div className="sm:col-span-2 lg:col-span-2">
+          {contentType === "ANIME" ? (
+            <div className="grid gap-3 sm:col-span-2 sm:grid-cols-2 lg:col-span-5 lg:grid-cols-3">
+              <MinimumSlider
+                label="Score"
+                name="min_score"
+                value={filters.min_score}
+                bounds={filterRanges.score}
+                onValueChange={changeFilterValue}
+              />
+              <DualRangeSlider
+                label="Year"
+                minName="min_year"
+                maxName="max_year"
+                minValue={filters.min_year}
+                maxValue={filters.max_year}
+                bounds={filterRanges.year}
+                onValueChange={changeFilterValue}
+              />
               <DualRangeSlider
                 label="Episodes"
                 minName="min_episodes"
@@ -1893,37 +1892,57 @@ export default function App() {
                 onValueChange={changeFilterValue}
               />
             </div>
-          )}
-
-          {(contentType === "MANGA"
-            || contentType === "MANHWA"
-            || contentType === "ALL") && (
-            <>
-              <div className="sm:col-span-2 lg:col-span-2">
+          ) : (
+            <div className="grid gap-3 sm:col-span-2 sm:grid-cols-2 lg:col-span-5 lg:grid-cols-5">
+              <MinimumSlider
+                label="Score"
+                name="min_score"
+                value={filters.min_score}
+                bounds={filterRanges.score}
+                onValueChange={changeFilterValue}
+              />
+              <DualRangeSlider
+                label="Year"
+                minName="min_year"
+                maxName="max_year"
+                minValue={filters.min_year}
+                maxValue={filters.max_year}
+                bounds={filterRanges.year}
+                onValueChange={changeFilterValue}
+              />
+              {contentType === "ALL" && (
                 <DualRangeSlider
-                  label="Chapters"
-                  minName="min_chapters"
-                  maxName="max_chapters"
-                  minValue={filters.min_chapters}
-                  maxValue={filters.max_chapters}
-                  bounds={filterRanges.chapters}
-                  scale="chapters"
+                  label="Episodes"
+                  minName="min_episodes"
+                  maxName="max_episodes"
+                  minValue={filters.min_episodes}
+                  maxValue={filters.max_episodes}
+                  bounds={filterRanges.episodes}
+                  scale="episodes"
                   onValueChange={changeFilterValue}
                 />
-              </div>
-              <div className="sm:col-span-2 lg:col-span-2">
-                <DualRangeSlider
-                  label="Volumes"
-                  minName="min_volumes"
-                  maxName="max_volumes"
-                  minValue={filters.min_volumes}
-                  maxValue={filters.max_volumes}
-                  bounds={filterRanges.volumes}
-                  scale="volumes"
-                  onValueChange={changeFilterValue}
-                />
-              </div>
-            </>
+              )}
+              <DualRangeSlider
+                label="Chapters"
+                minName="min_chapters"
+                maxName="max_chapters"
+                minValue={filters.min_chapters}
+                maxValue={filters.max_chapters}
+                bounds={filterRanges.chapters}
+                scale="chapters"
+                onValueChange={changeFilterValue}
+              />
+              <DualRangeSlider
+                label="Volumes"
+                minName="min_volumes"
+                maxName="max_volumes"
+                minValue={filters.min_volumes}
+                maxValue={filters.max_volumes}
+                bounds={filterRanges.volumes}
+                scale="volumes"
+                onValueChange={changeFilterValue}
+              />
+            </div>
           )}
         </div>
 
