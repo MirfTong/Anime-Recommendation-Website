@@ -355,6 +355,9 @@ test("presets create clean, media-relevant filter state", () => {
   const completedManga = presetsFor("MANGA").find(
     ({ id }) => id === "completed-manga",
   );
+  const completedManhwa = presetsFor("MANHWA").find(
+    ({ id }) => id === "completed-manhwa",
+  );
 
   assert.deepEqual(
     {
@@ -373,6 +376,7 @@ test("presets create clean, media-relevant filter state", () => {
   assert.equal(filtersFromPreset(shortSeries).max_episodes, "13");
   assert.equal(filtersFromPreset(completedManga).status, "FINISHED");
   assert.equal(filtersFromPreset(completedManga).genre.length, 0);
+  assert.equal(filtersFromPreset(completedManhwa).status, "FINISHED");
 });
 
 test("active chips represent each removable catalogue filter", () => {

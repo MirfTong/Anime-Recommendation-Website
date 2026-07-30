@@ -210,6 +210,9 @@ describe("rendered filter controls", () => {
 
     fireEvent.change(score, { target: { value: "7" } });
     expect(screen.getByText("7+")).toBeInTheDocument();
+    expect(screen.getByTestId("min_score-progress")).toHaveStyle({
+      width: "70%",
+    });
     await user.click(screen.getByRole("button", { name: "Clear score" }));
     expect(screen.getByText("Any")).toBeInTheDocument();
   });
