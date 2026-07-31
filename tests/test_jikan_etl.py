@@ -19,6 +19,7 @@ from backend.jobs.jikan_etl import (
     SeasonPageApplyResult,
     SeasonBackfillResult,
     SeasonCoverage,
+    StreamingBackfillResult,
     SupplementalCatalogueSyncResult,
     _apply_season_page,
     _anime_status,
@@ -39,6 +40,7 @@ from backend.jobs.jikan_etl import (
     _update_anime,
     _valid_score,
     backfill_missing_seasons,
+    backfill_streaming_services,
     refresh_catalogue,
     remove_hentai_anime,
     run_scheduled_sync,
@@ -429,6 +431,73 @@ class JikanEtlTests(unittest.TestCase):
             "https://www.crunchyroll.com/watch/example",
         )
 
+    def test_streaming_backfill_retries_unlinked_anime_and_records_attempts(self):
+        anime = anime_record()
+        payload = {
+            "data": {
+                "mal_id": anime.mal_id,
+                "title": anime.title,
+                "genres": [],
+                "streaming": [
+                    {
+                        "name": "Crunchyroll",
+                        "url": "https://www.crunchyroll.com/watch/example",
+                    }
+                ],
+            }
+        }
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            # Selected Anime, genres, studios, and streaming services.
+            mock_db.session.scalars.side_effect = [[anime], [], [], []]
+            result = backfill_streaming_services(
+                limit=1,
+                fetch_anime=lambda _mal_id: payload,
+            )
+
+        self.assertEqual(result.selected, 1)
+        self.assertEqual(result.updated, 1)
+        self.assertEqual(result.associations.streaming_links_created, 1)
+        self.assertIsNotNone(anime.last_streaming_attempt)
+        self.assertEqual(
+            anime.streaming_links[0].streaming_service.name,
+            "Crunchyroll",
+        )
+
+    def test_streaming_backfill_counts_empty_or_sparse_provider_responses(self):
+        empty_anime = anime_record()
+        sparse_anime = anime_record()
+        sparse_anime.animeID = 2
+        sparse_anime.mal_id = 2
+        responses = iter(
+            [
+                {"data": {"mal_id": 1, "genres": [], "streaming": []}},
+                {"data": {"mal_id": 2, "genres": []}},
+            ]
+        )
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [
+                [empty_anime, sparse_anime],
+                [],
+                [],
+                [],
+            ]
+            result = backfill_streaming_services(
+                limit=2,
+                fetch_anime=lambda _mal_id: next(responses),
+            )
+
+        self.assertEqual(result.updated, 2)
+        self.assertEqual(result.empty_streaming_payloads, 1)
+        self.assertEqual(result.missing_streaming_payloads, 1)
+        self.assertIsNotNone(empty_anime.last_streaming_attempt)
+        self.assertIsNotNone(sparse_anime.last_streaming_attempt)
+
     def test_preserves_existing_detailed_tags_and_adds_jikan_categories(self):
         data = {
             "genres": [{"name": "Action"}],
@@ -706,6 +775,7 @@ class JikanEtlTests(unittest.TestCase):
         )
         backfill = SeasonBackfillResult(removed_hentai=4)
         catalogue = CatalogueRefreshResult(removed_hentai=5)
+        streaming_backfill = StreamingBackfillResult(removed_hentai=6)
         manga_catalogue = MangaCatalogueSyncResult(
             scans={"manga": MangaTypeSyncResult(removed_adult=2)}
         )
@@ -748,6 +818,12 @@ class JikanEtlTests(unittest.TestCase):
                     return_value=catalogue,
                 )
             )
+            streaming_backfill_sync = stack.enter_context(
+                patch(
+                    "backend.jobs.jikan_etl.backfill_streaming_services",
+                    return_value=streaming_backfill,
+                )
+            )
             manga_sync = stack.enter_context(
                 patch(
                     "backend.jobs.jikan_etl.sync_manga_catalogue",
@@ -778,6 +854,7 @@ class JikanEtlTests(unittest.TestCase):
                 "_report_supplemental_catalogue",
                 "_report_season_backfill",
                 "_report_catalogue",
+                "_report_streaming_backfill",
                 "_report_anime_associations",
                 "report_manga_catalogue",
                 "report_manga_cleanup",
@@ -789,20 +866,27 @@ class JikanEtlTests(unittest.TestCase):
                 stack.enter_context(
                     patch(f"backend.jobs.jikan_etl.{report_name}")
                 )
-            result = run_scheduled_sync(limit=7, batch_size=2, page_limit=3)
+            result = run_scheduled_sync(
+                limit=7,
+                streaming_limit=11,
+                batch_size=2,
+                page_limit=3,
+            )
 
         bulk_sync.assert_called_once_with(max_pages=3)
         supplemental_sync.assert_called_once_with(max_pages=3)
         backfill_sync.assert_called_once_with(limit=7, batch_size=2)
         catalogue_sync.assert_called_once_with(limit=7, batch_size=2)
+        streaming_backfill_sync.assert_called_once_with(limit=11, batch_size=2)
         manga_sync.assert_called_once_with(max_pages=3)
         manga_refresh_sync.assert_called_once_with(limit=7, batch_size=2)
         facet_sync.assert_called_once_with()
         self.assertEqual(result.supplemental_catalogue, supplemental)
         self.assertEqual(result.manga_catalogue, manga_catalogue)
         self.assertEqual(result.manga_refresh, manga_refresh)
+        self.assertEqual(result.streaming_backfill, streaming_backfill)
         self.assertEqual(result.removed_adult_manga, 12)
-        self.assertEqual(result.removed_hentai, 21)
+        self.assertEqual(result.removed_hentai, 27)
         self.assertEqual(result.coverage, coverage)
         self.assertEqual(coverage.rate, 0.75)
 
@@ -813,6 +897,9 @@ class JikanEtlTests(unittest.TestCase):
         ):
             run_scheduled_sync(limit=0)
         current_sync.assert_not_called()
+
+        with self.assertRaises(ValueError):
+            run_scheduled_sync(streaming_limit=0)
 
     def test_season_sync_reuses_and_forces_listing_data(self):
         anime = SimpleNamespace(mal_id=1)

@@ -73,6 +73,7 @@ SUPPLEMENTAL_STATE_KEYS = {
 }
 CURRENT_SEASON_MAX_PAGES_PER_RUN = 10
 DEFAULT_SEASON_BACKFILL_LIMIT = 1000
+DEFAULT_STREAMING_BACKFILL_LIMIT = 2000
 BULK_SEASON_MAX_PAGES_PER_RUN = 40
 BULK_SEASON_MAX_CONSECUTIVE_FAILURES = 3
 BULK_SEASON_STATE_KEY = "bulk:tv-catalogue-seasons:v2"
@@ -140,6 +141,28 @@ class CatalogueRefreshResult:
             + self.temporary_errors
             + self.invalid_payloads
         )
+
+    @property
+    def success_rate(self) -> float:
+        successful = self.updated + self.removed_hentai
+        return successful / self.selected if self.selected else 0.0
+
+
+@dataclass
+class StreamingBackfillResult:
+    """Results from the dedicated no-streaming-service enrichment queue."""
+
+    selected: int = 0
+    updated: int = 0
+    removed_hentai: int = 0
+    not_found: int = 0
+    temporary_errors: int = 0
+    invalid_payloads: int = 0
+    missing_streaming_payloads: int = 0
+    empty_streaming_payloads: int = 0
+    associations: AnimeAssociationStats = field(
+        default_factory=AnimeAssociationStats
+    )
 
     @property
     def success_rate(self) -> float:
@@ -260,6 +283,7 @@ class ScheduledSyncResult:
     supplemental_catalogue: SupplementalCatalogueSyncResult
     season_backfill: SeasonBackfillResult
     catalogue: CatalogueRefreshResult
+    streaming_backfill: StreamingBackfillResult
     manga_catalogue: MangaCatalogueSyncResult
     manga_refresh: MangaRefreshResult
     coverage: SeasonCoverage
@@ -981,6 +1005,9 @@ def refresh_catalogue(
 
         for attempted, anime in enumerate(anime_rows, start=1):
             _mark_jikan_attempt(anime)
+            # Keep the dedicated streaming queue from immediately selecting
+            # the same title later in this scheduled process.
+            anime.last_streaming_attempt = datetime.now(timezone.utc)
             if anime.mal_id is None:
                 result.missing_mal_id += 1
             else:
@@ -1004,6 +1031,77 @@ def refresh_catalogue(
                     result.temporary_errors += 1
                 else:
                     result.invalid_payloads += 1
+            _commit_completed_batch(attempted, batch_size)
+
+        db.session.commit()
+        return result
+
+
+def backfill_streaming_services(
+    *,
+    limit: int = DEFAULT_STREAMING_BACKFILL_LIMIT,
+    batch_size: int = 25,
+    fetch_anime: Callable[[int], dict[str, Any]] = get_anime_full,
+) -> StreamingBackfillResult:
+    """Retry Anime with no saved streaming links on an independent queue.
+
+    A valid provider response may be temporarily empty even for a title that
+    later receives streaming links. This queue covers every unlinked Anime
+    before revisiting the oldest empty result, independently of ratings and
+    other catalogue metadata refreshes.
+    """
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    with app.app_context():
+        _ensure_schema()
+        anime_rows = list(
+            db.session.scalars(
+                select(Anime)
+                .where(
+                    Anime.is_adult.is_(False),
+                    ~Anime.streaming_links.any(),
+                )
+                .options(*_anime_etl_load_options())
+                .order_by(
+                    Anime.last_streaming_attempt.asc().nulls_first(),
+                    Anime.animeID,
+                )
+                .limit(limit)
+            )
+        )
+        genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
+        association_caches = None
+        result = StreamingBackfillResult(selected=len(anime_rows))
+
+        for attempted, anime in enumerate(anime_rows, start=1):
+            anime.last_streaming_attempt = datetime.now(timezone.utc)
+            fetched = _fetch_anime_data(anime.mal_id, fetch_anime)
+            if fetched.data is not None:
+                if _is_hentai(fetched.data):
+                    db.session.delete(anime)
+                    result.removed_hentai += 1
+                else:
+                    if "streaming" not in fetched.data:
+                        result.missing_streaming_payloads += 1
+                    elif fetched.data.get("streaming") == []:
+                        result.empty_streaming_payloads += 1
+                    association_caches = _update_anime_with_associations(
+                        anime,
+                        fetched.data,
+                        genres,
+                        association_caches,
+                        result.associations,
+                    )
+                    result.updated += 1
+            elif fetched.failure == "not_found":
+                result.not_found += 1
+            elif fetched.failure == "temporary":
+                result.temporary_errors += 1
+            else:
+                result.invalid_payloads += 1
             _commit_completed_batch(attempted, batch_size)
 
         db.session.commit()
@@ -1684,6 +1782,45 @@ def _report_catalogue(result: CatalogueRefreshResult) -> None:
         )
 
 
+def _report_streaming_backfill(result: StreamingBackfillResult) -> None:
+    print(
+        "Streaming service backfill: "
+        f"selected={result.selected}, updated={result.updated}, "
+        f"removed_hentai={result.removed_hentai}, "
+        f"missing_streaming_payloads={result.missing_streaming_payloads}, "
+        f"empty_streaming_payloads={result.empty_streaming_payloads}, "
+        f"links_created={result.associations.streaming_links_created}, "
+        f"temporary={result.temporary_errors}, "
+        f"not_found={result.not_found}, invalid={result.invalid_payloads}, "
+        f"success_rate={result.success_rate:.1%}."
+    )
+    _append_step_summary(
+        "Streaming-service backfill",
+        [
+            ("Anime selected without saved services", result.selected),
+            ("Anime refreshed", result.updated),
+            ("Hentai records removed", result.removed_hentai),
+            ("Responses missing the streaming field", result.missing_streaming_payloads),
+            ("Explicitly empty streaming responses", result.empty_streaming_payloads),
+            (
+                "Streaming relationships created",
+                result.associations.streaming_links_created,
+            ),
+            ("Temporary API failures", result.temporary_errors),
+            ("Not found", result.not_found),
+            ("Invalid payloads", result.invalid_payloads),
+        ],
+    )
+    if result.selected >= 100 and result.success_rate < DEGRADED_SUCCESS_RATE:
+        _workflow_warning(
+            "Streaming-service backfill degraded",
+            (
+                f"Only {result.updated + result.removed_hentai}/{result.selected} "
+                "unlinked Anime were handled; the next run will continue the queue."
+            ),
+        )
+
+
 def _report_hentai_cleanup(removed: int) -> None:
     print(f"Adult anime cleanup: removed={removed}.")
     _append_step_summary(
@@ -1795,12 +1932,15 @@ def _report_season_coverage(coverage: SeasonCoverage) -> None:
 def run_scheduled_sync(
     *,
     limit: int = DEFAULT_SEASON_BACKFILL_LIMIT,
+    streaming_limit: int = DEFAULT_STREAMING_BACKFILL_LIMIT,
     batch_size: int = 25,
     page_limit: int = BULK_SEASON_MAX_PAGES_PER_RUN,
 ) -> ScheduledSyncResult:
     """Run every scheduled phase in one process with one shared rate limiter."""
     if limit <= 0:
         raise ValueError("limit must be positive")
+    if streaming_limit <= 0:
+        raise ValueError("streaming_limit must be positive")
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if page_limit <= 0:
@@ -1823,6 +1963,12 @@ def run_scheduled_sync(
     catalogue_result = refresh_catalogue(limit=limit, batch_size=batch_size)
     _report_catalogue(catalogue_result)
 
+    streaming_backfill_result = backfill_streaming_services(
+        limit=streaming_limit,
+        batch_size=batch_size,
+    )
+    _report_streaming_backfill(streaming_backfill_result)
+
     # Preserve the established Anime pipeline even if a new readable-title
     # provider phase fails unexpectedly.
     removed_adult_manga = remove_adult_manga()
@@ -1843,6 +1989,7 @@ def run_scheduled_sync(
         + supplemental_result.removed_hentai
         + backfill_result.removed_hentai
         + catalogue_result.removed_hentai
+        + streaming_backfill_result.removed_hentai
     )
     _report_hentai_cleanup(removed_hentai)
 
@@ -1853,6 +2000,7 @@ def run_scheduled_sync(
         supplemental_result.associations,
         backfill_result.associations,
         catalogue_result.associations,
+        streaming_backfill_result.associations,
     ):
         association_stats.add(phase_stats)
     _report_anime_associations(association_stats)
@@ -1869,6 +2017,7 @@ def run_scheduled_sync(
         supplemental_catalogue=supplemental_result,
         season_backfill=backfill_result,
         catalogue=catalogue_result,
+        streaming_backfill=streaming_backfill_result,
         manga_catalogue=manga_result,
         manga_refresh=manga_refresh_result,
         coverage=coverage,
@@ -1922,6 +2071,11 @@ def main() -> None:
         type=int,
         help="Maximum bulk catalogue pages to process.",
     )
+    parser.add_argument(
+        "--streaming-limit",
+        type=int,
+        help="Maximum unlinked Anime to enrich during --scheduled-sync.",
+    )
     args = parser.parse_args()
 
     if args.limit is not None and args.limit <= 0:
@@ -1930,6 +2084,8 @@ def main() -> None:
         parser.error("--batch-size must be positive")
     if args.page_limit is not None and args.page_limit <= 0:
         parser.error("--page-limit must be positive")
+    if args.streaming_limit is not None and args.streaming_limit <= 0:
+        parser.error("--streaming-limit must be positive")
     if args.year is not None and args.season in (None, "current"):
         parser.error("--year requires --season winter, spring, summer, or fall")
     if args.season and args.anime_id:
@@ -1941,6 +2097,8 @@ def main() -> None:
             "--page-limit requires --bulk-seasons, --manga-catalogue, "
             "or --scheduled-sync"
         )
+    if args.streaming_limit is not None and not args.scheduled_sync:
+        parser.error("--streaming-limit requires --scheduled-sync")
     if args.bulk_seasons and args.limit is not None:
         parser.error("--limit is not used with --bulk-seasons")
     page_limit = args.page_limit or BULK_SEASON_MAX_PAGES_PER_RUN
@@ -1959,6 +2117,7 @@ def main() -> None:
             )
         run_scheduled_sync(
             limit=args.limit or DEFAULT_SEASON_BACKFILL_LIMIT,
+            streaming_limit=args.streaming_limit or DEFAULT_STREAMING_BACKFILL_LIMIT,
             batch_size=args.batch_size,
             page_limit=page_limit,
         )

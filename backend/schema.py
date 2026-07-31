@@ -8,7 +8,7 @@ from sqlalchemy import text
 from backend.models import db
 
 
-CATALOGUE_SCHEMA_VERSION = 2
+CATALOGUE_SCHEMA_VERSION = 3
 CATALOGUE_SCHEMA_LOCK_ID = 5_423_769_101
 CATALOGUE_SCHEMA_VERSION_TABLE = "catalogue_schema_version"
 
@@ -187,6 +187,7 @@ def _apply_catalogue_schema_migration(connection) -> None:
     for definition in (
         "last_jikan_sync TIMESTAMP WITH TIME ZONE",
         "last_jikan_attempt TIMESTAMP WITH TIME ZONE",
+        "last_streaming_attempt TIMESTAMP WITH TIME ZONE",
         "last_season_attempt TIMESTAMP WITH TIME ZONE",
         "mal_id INTEGER",
         "season VARCHAR(6)",
@@ -223,6 +224,12 @@ def _apply_catalogue_schema_migration(connection) -> None:
         text(
             "CREATE INDEX IF NOT EXISTS ix_anime_last_jikan_attempt "
             "ON anime (last_jikan_attempt)"
+        )
+    )
+    db.session.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_anime_last_streaming_attempt "
+            "ON anime (last_streaming_attempt)"
         )
     )
     db.session.execute(

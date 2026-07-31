@@ -20,7 +20,8 @@ class JikanWorkflowTests(unittest.TestCase):
 
         command = (
             "python -m backend.jobs.jikan_etl "
-            "--scheduled-sync --page-limit 40 --limit 1000"
+            "--scheduled-sync --page-limit 40 --limit 1000 "
+            "--streaming-limit 2000"
         )
         self.assertIn(command, workflow)
         self.assertEqual(workflow.count("python -m backend.jobs.jikan_etl"), 1)
