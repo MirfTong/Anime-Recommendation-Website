@@ -40,6 +40,19 @@ class MangaSchemaTests(unittest.TestCase):
             schema_source,
         )
 
+    def test_anime_streaming_backfill_uses_a_separate_indexed_timestamp(self):
+        self.assertIn("last_streaming_attempt", Anime.__table__.columns)
+        self.assertIn(
+            "ix_anime_last_streaming_attempt",
+            {index.name for index in Anime.__table__.indexes},
+        )
+        schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
+        self.assertIn('"last_streaming_attempt TIMESTAMP WITH TIME ZONE"', schema_source)
+        self.assertIn(
+            "CREATE INDEX IF NOT EXISTS ix_anime_last_streaming_attempt",
+            schema_source,
+        )
+
     def test_manga_table_contains_the_complete_catalogue_shape(self):
         columns = set(Manga.__table__.columns.keys())
 

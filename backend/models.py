@@ -61,6 +61,9 @@ class Anime(db.Model):
     )
     episodes: Mapped[int | None] = mapped_column(index=True)
     last_jikan_sync: Mapped[datetime | None] = mapped_column(index=True)
+    # A separate queue timestamp lets the ETL retry missing service links
+    # without waiting for a complete metadata-refresh cycle.
+    last_streaming_attempt: Mapped[datetime | None] = mapped_column(index=True)
     last_season_attempt: Mapped[datetime | None] = mapped_column(index=True)
     mal_url: Mapped[str]
     sequel: Mapped[bool]

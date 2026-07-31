@@ -144,14 +144,17 @@ unavailable records are still marked attempted and cannot trap the queue.
 
 Studio metadata is available on Anime listing and detail payloads, so the
 shared Anime mapper updates it across seasonal, bulk, supplemental, and detail
-phases. Streaming data comes from the full Anime endpoint and is filled
-incrementally by detail refreshes. If a full request falls back to a sparse
-basic response, missing relationship fields preserve existing data. A valid
-empty relationship array clears stale links, while partially malformed arrays
-only add or update valid entries and do not destructively remove known links.
-Only HTTP(S) streaming URLs are stored. GitHub Actions summaries include
-relationship payloads processed, links created or removed, changed URLs,
-malformed entries, reconciliation failures, and cursor progress.
+phases. Streaming data comes from the full Anime endpoint. In addition to the
+normal detail refresh, each scheduled run checks 2,000 Anime with no saved
+service links through a separate, indexed streaming-attempt queue. This lets
+missing links be retried without waiting for rating and season refresh cycles.
+If a full request falls back to a sparse basic response, missing relationship
+fields preserve existing data. A valid empty relationship array clears stale
+links, while partially malformed arrays only add or update valid entries and
+do not destructively remove known links. Only HTTP(S) streaming URLs are
+stored. GitHub Actions summaries include relationship payloads processed,
+links created or removed, changed URLs, malformed entries, reconciliation
+failures, sparse/empty streaming responses, and cursor progress.
 
 Manga and Manhwa author credits are reconciled during catalogue discovery and
 detail refreshes. Missing or malformed author fields preserve known links,
@@ -183,9 +186,10 @@ group so manual and scheduled jobs never write simultaneously. All phases run
 inside one Python process, which preserves the shared rate limiter. The GitHub
 Actions step summary reports Manga and Manhwa pages completed and failed,
 records inserted and updated, adult records removed, and each independent next
-page cursor, alongside the existing Anime metrics. It also reports Anime with
-studio or streaming changes, relationships created and removed, streaming URLs
-updated, and malformed provider entries skipped.
+page cursor, alongside the existing Anime metrics. It also reports the 2,000
+Anime streaming-service backfill selections, created relationships, and empty
+or sparse provider responses, plus Anime studio or streaming changes,
+relationships removed, changed URLs, and malformed provider entries skipped.
 Manga and Manhwa summaries include the equivalent author relationship metrics.
 
 Add the external PostgreSQL URL as a repository Actions secret named

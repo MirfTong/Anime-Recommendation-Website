@@ -29,4 +29,4 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Sync Anime, Manga, and Manhwa
-        run: python -m backend.jobs.jikan_etl --scheduled-sync --page-limit 40 --limit 1000
+        run: python -m backend.jobs.jikan_etl --scheduled-sync --page-limit 40 --limit 1000 --streaming-limit 2000
