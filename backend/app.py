@@ -58,7 +58,9 @@ ANIME_STATUS_ALIASES = {
     "NOT_YET_AIRED": "NOT_YET_AIRED",
     "NOT_YET_AIRING": "NOT_YET_AIRED",
 }
-COMMON_SORTS = frozenset({"top_rated", "newest", "oldest", "title"})
+COMMON_SORTS = frozenset(
+    {"top_rated", "newest", "oldest", "title", "most_popular", "most_members"}
+)
 ANIME_SORTS = COMMON_SORTS | {"most_episodes"}
 PRINT_SORTS = COMMON_SORTS | {"most_chapters"}
 TYPE_ALIASES = {"TV SPECIAL": "SPECIAL"}
@@ -537,6 +539,8 @@ def _serialize_anime(
         "season": anime.season,
         "year": anime.year,
         "score": anime.score,
+        "popularity": anime.popularity,
+        "members": anime.members,
         "episodes": anime.episodes,
         "image_url": anime.image_url,
         "genres": [genre.name for genre in anime.genre_entries],
@@ -592,6 +596,8 @@ def _serialize_manga(
         "year": manga.publication_year,
         "publication_year": manga.publication_year,
         "score": manga.score,
+        "popularity": manga.popularity,
+        "members": manga.members,
         "chapters": manga.chapters,
         "volumes": manga.volumes,
         "image_url": manga.image_url,
@@ -645,6 +651,8 @@ def _public_statement(model, *, preview: bool = False, detailed: bool = False):
                 Anime.season,
                 Anime.year,
                 Anime.score,
+                Anime.popularity,
+                Anime.members,
                 Anime.episodes,
                 Anime.image_url,
             ]
@@ -667,6 +675,8 @@ def _public_statement(model, *, preview: bool = False, detailed: bool = False):
                 Manga.manga_type,
                 Manga.publication_year,
                 Manga.score,
+                Manga.popularity,
+                Manga.members,
                 Manga.chapters,
                 Manga.volumes,
                 Manga.image_url,
@@ -900,6 +910,8 @@ def _catalogue_rows_subquery(
                 Anime.animeID.label("record_id"),
                 Anime.mal_id.label("mal_id"),
                 Anime.score.label("score"),
+                Anime.popularity.label("popularity"),
+                Anime.members.label("members"),
                 Anime.title.label("title"),
                 Anime.year.label("year"),
                 Anime.episodes.label("length"),
@@ -923,6 +935,8 @@ def _catalogue_rows_subquery(
                 Manga.mangaID.label("record_id"),
                 Manga.mal_id.label("mal_id"),
                 Manga.score.label("score"),
+                Manga.popularity.label("popularity"),
+                Manga.members.label("members"),
                 Manga.title.label("title"),
                 Manga.publication_year.label("year"),
                 Manga.chapters.label("length"),
@@ -942,6 +956,8 @@ def _catalogue_rows_subquery(
                     branch_rows.c.record_id,
                     branch_rows.c.mal_id,
                     branch_rows.c.score,
+                    branch_rows.c.popularity,
+                    branch_rows.c.members,
                     branch_rows.c.title,
                     branch_rows.c.year,
                     branch_rows.c.length,
@@ -974,6 +990,18 @@ def _catalogue_order_clauses(catalogue_rows, sort: str):
         )
     elif sort == "title":
         primary_order = (*title_order, score_order)
+    elif sort == "most_popular":
+        primary_order = (
+            catalogue_rows.c.popularity.asc().nullslast(),
+            score_order,
+            *title_order,
+        )
+    elif sort == "most_members":
+        primary_order = (
+            catalogue_rows.c.members.desc().nullslast(),
+            score_order,
+            *title_order,
+        )
     elif sort in {"most_episodes", "most_chapters"}:
         primary_order = (
             catalogue_rows.c.length.desc().nullslast(),
@@ -1109,6 +1137,18 @@ def _ordered_anime_statement(statement, sort: str):
     elif sort == "most_episodes":
         order = (
             Anime.episodes.desc().nullslast(),
+            score_order,
+            *title_order,
+        )
+    elif sort == "most_popular":
+        order = (
+            Anime.popularity.asc().nullslast(),
+            score_order,
+            *title_order,
+        )
+    elif sort == "most_members":
+        order = (
+            Anime.members.desc().nullslast(),
             score_order,
             *title_order,
         )

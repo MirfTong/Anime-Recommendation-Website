@@ -12,6 +12,7 @@ from backend.jobs.jikan_etl import (
     AnimeAssociationCaches,
     AnimeAssociationStats,
     BulkSeasonSyncResult,
+    CatalogueMetricCoverage,
     CatalogueRefreshResult,
     CurrentSeasonSyncResult,
     SUPPLEMENTAL_PROVIDER_TYPES,
@@ -39,6 +40,7 @@ from backend.jobs.jikan_etl import (
     _season_from_air_date,
     _studio_for_value,
     _update_anime,
+    _valid_catalogue_metric,
     _valid_score,
     backfill_missing_seasons,
     backfill_streaming_services,
@@ -687,6 +689,30 @@ class JikanEtlTests(unittest.TestCase):
         self.assertIsNone(anime.score)
         self.assertIsNone(anime.episodes)
 
+    def test_popularity_and_member_updates_preserve_existing_values_on_bad_data(self):
+        anime = anime_record()
+        anime.popularity = 900
+        anime.members = 1200
+
+        _update_anime(
+            anime,
+            {"popularity": 42, "members": 250000, "genres": []},
+            {},
+        )
+        self.assertEqual(anime.popularity, 42)
+        self.assertEqual(anime.members, 250000)
+
+        _update_anime(
+            anime,
+            {"popularity": "bad", "members": None, "genres": []},
+            {},
+        )
+        self.assertEqual(anime.popularity, 42)
+        self.assertEqual(anime.members, 250000)
+        self.assertEqual(_valid_catalogue_metric(0), 0)
+        self.assertIsNone(_valid_catalogue_metric(-1))
+        self.assertIsNone(_valid_catalogue_metric(True))
+
     def test_update_tolerates_malformed_nested_provider_fields(self):
         anime = anime_record()
         _update_anime(
@@ -840,6 +866,17 @@ class JikanEtlTests(unittest.TestCase):
         )
         manga_refresh = MangaRefreshResult(removed_adult=3)
         coverage = SeasonCoverage(total_tv=100, classified_tv=75)
+        metric_coverage = CatalogueMetricCoverage(
+            anime_total=100,
+            anime_with_popularity=90,
+            anime_with_members=85,
+            manga_total=50,
+            manga_with_popularity=45,
+            manga_with_members=40,
+            manhwa_total=25,
+            manhwa_with_popularity=20,
+            manhwa_with_members=18,
+        )
         with ExitStack() as stack:
             stack.enter_context(
                 patch("backend.jobs.jikan_etl.remove_hentai_anime", return_value=6)
@@ -907,6 +944,12 @@ class JikanEtlTests(unittest.TestCase):
                     return_value=coverage,
                 )
             )
+            stack.enter_context(
+                patch(
+                    "backend.jobs.jikan_etl.get_catalogue_metric_coverage",
+                    return_value=metric_coverage,
+                )
+            )
             for report_name in (
                 "_report_current_season",
                 "_report_bulk_seasons",
@@ -921,6 +964,7 @@ class JikanEtlTests(unittest.TestCase):
                 "_report_hentai_cleanup",
                 "_report_catalogue_facets",
                 "_report_season_coverage",
+                "_report_catalogue_metric_coverage",
             ):
                 stack.enter_context(
                     patch(f"backend.jobs.jikan_etl.{report_name}")
@@ -947,6 +991,7 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(result.removed_adult_manga, 12)
         self.assertEqual(result.removed_hentai, 27)
         self.assertEqual(result.coverage, coverage)
+        self.assertEqual(result.metric_coverage, metric_coverage)
         self.assertEqual(coverage.rate, 0.75)
 
     def test_scheduled_sync_rejects_invalid_limits_before_running(self):

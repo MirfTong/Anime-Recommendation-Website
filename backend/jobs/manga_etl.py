@@ -191,6 +191,13 @@ def _valid_score(value: Any) -> float | None:
     return float(value)
 
 
+def _valid_catalogue_metric(value: Any) -> int | None:
+    """Return a non-negative provider count/rank, or preserve old data."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _normalized_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -448,6 +455,11 @@ def _update_manga(
         manga.status = _normalized_text(data.get("status"))
     if "score" in data:
         manga.score = _valid_score(data.get("score"))
+    for field_name in ("popularity", "members"):
+        if field_name in data:
+            metric = _valid_catalogue_metric(data.get(field_name))
+            if metric is not None:
+                setattr(manga, field_name, metric)
     if "chapters" in data:
         manga.chapters = data.get("chapters")
     if "volumes" in data:
@@ -514,6 +526,8 @@ def _new_manga(
         publication_year=None,
         status=None,
         score=None,
+        popularity=_valid_catalogue_metric(data.get("popularity")),
+        members=_valid_catalogue_metric(data.get("members")),
         is_adult=is_adult_content(data),
         chapters=None,
         volumes=None,

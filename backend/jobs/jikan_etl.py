@@ -36,6 +36,7 @@ from backend.models import (
     AnimeStudio,
     Genre,
     JikanSyncState,
+    Manga,
     StreamingService,
     Studio,
     db,
@@ -278,6 +279,21 @@ class SeasonCoverage:
 
 
 @dataclass(frozen=True)
+class CatalogueMetricCoverage:
+    """Provider popularity/member coverage after an incremental ETL pass."""
+
+    anime_total: int
+    anime_with_popularity: int
+    anime_with_members: int
+    manga_total: int
+    manga_with_popularity: int
+    manga_with_members: int
+    manhwa_total: int
+    manhwa_with_popularity: int
+    manhwa_with_members: int
+
+
+@dataclass(frozen=True)
 class ScheduledSyncResult:
     current_season: CurrentSeasonSyncResult
     bulk_seasons: BulkSeasonSyncResult
@@ -288,6 +304,7 @@ class ScheduledSyncResult:
     manga_catalogue: MangaCatalogueSyncResult
     manga_refresh: MangaRefreshResult
     coverage: SeasonCoverage
+    metric_coverage: CatalogueMetricCoverage
     removed_hentai: int
     removed_adult_manga: int
 
@@ -718,6 +735,13 @@ def _valid_score(value: Any) -> float | None:
     return float(value)
 
 
+def _valid_catalogue_metric(value: Any) -> int | None:
+    """Return a provider integer while preserving existing data on bad input."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _anime_type(value: Any, *, fallback: str = "UNKNOWN") -> str:
     """Map provider and legacy type labels onto one canonical value."""
     if not isinstance(value, str) or not value.strip():
@@ -828,6 +852,11 @@ def _update_anime(
         # An explicit null/zero means MAL does not currently publish a score.
         # Clear stale CSV ratings instead of presenting them as authoritative.
         anime.score = _valid_score(data.get("score"))
+    for field_name in ("popularity", "members"):
+        if field_name in data:
+            metric = _valid_catalogue_metric(data.get(field_name))
+            if metric is not None:
+                setattr(anime, field_name, metric)
     if "episodes" in data:
         anime.episodes = data.get("episodes")
     anime.mal_url = data.get("url") or anime.mal_url
@@ -901,6 +930,8 @@ def _new_anime(data: dict[str, Any]) -> Anime:
         status=_anime_status(data.get("status")),
         year=data.get("year"),
         score=_valid_score(data.get("score")),
+        popularity=_valid_catalogue_metric(data.get("popularity")),
+        members=_valid_catalogue_metric(data.get("members")),
         is_adult=_is_hentai(data),
         episodes=data.get("episodes"),
         mal_url=data.get("url") or f"https://myanimelist.net/anime/{mal_id}",
@@ -1934,6 +1965,42 @@ def get_season_coverage() -> SeasonCoverage:
     )
 
 
+def get_catalogue_metric_coverage() -> CatalogueMetricCoverage:
+    """Count public titles with usable provider popularity/member metadata."""
+    with app.app_context():
+        anime_counts = db.session.execute(
+            select(
+                func.count(Anime.animeID),
+                func.count(Anime.popularity),
+                func.count(Anime.members),
+            ).where(Anime.is_adult.is_(False))
+        ).one()
+        print_counts = {
+            content_type: db.session.execute(
+                select(
+                    func.count(Manga.mangaID),
+                    func.count(Manga.popularity),
+                    func.count(Manga.members),
+                ).where(
+                    Manga.is_adult.is_(False),
+                    Manga.content_type == content_type,
+                )
+            ).one()
+            for content_type in ("MANGA", "MANHWA")
+        }
+    return CatalogueMetricCoverage(
+        anime_total=int(anime_counts[0] or 0),
+        anime_with_popularity=int(anime_counts[1] or 0),
+        anime_with_members=int(anime_counts[2] or 0),
+        manga_total=int(print_counts["MANGA"][0] or 0),
+        manga_with_popularity=int(print_counts["MANGA"][1] or 0),
+        manga_with_members=int(print_counts["MANGA"][2] or 0),
+        manhwa_total=int(print_counts["MANHWA"][0] or 0),
+        manhwa_with_popularity=int(print_counts["MANHWA"][1] or 0),
+        manhwa_with_members=int(print_counts["MANHWA"][2] or 0),
+    )
+
+
 def _report_catalogue_facets(total: int) -> None:
     print(f"Catalogue facets: precomputed={total}.")
     _append_step_summary(
@@ -1962,6 +2029,52 @@ def _report_season_coverage(coverage: SeasonCoverage) -> None:
             ("TV anime with season", coverage.classified_tv),
             ("Total TV anime", coverage.total_tv),
             ("Coverage", f"{coverage.rate:.1%}"),
+        ],
+    )
+
+
+def _report_catalogue_metric_coverage(
+    coverage: CatalogueMetricCoverage,
+) -> None:
+    print(
+        "Popularity/member coverage: "
+        f"anime=popularity {coverage.anime_with_popularity}/{coverage.anime_total}, "
+        f"members {coverage.anime_with_members}/{coverage.anime_total}; "
+        f"manga=popularity {coverage.manga_with_popularity}/{coverage.manga_total}, "
+        f"members {coverage.manga_with_members}/{coverage.manga_total}; "
+        f"manhwa=popularity {coverage.manhwa_with_popularity}/{coverage.manhwa_total}, "
+        f"members {coverage.manhwa_with_members}/{coverage.manhwa_total}."
+    )
+    _append_step_summary(
+        "Popularity and member backfill coverage",
+        [
+            (
+                "Anime",
+                (
+                    f"{coverage.anime_with_popularity}/{coverage.anime_total} "
+                    "with popularity; "
+                    f"{coverage.anime_with_members}/{coverage.anime_total} "
+                    "with members"
+                ),
+            ),
+            (
+                "Manga",
+                (
+                    f"{coverage.manga_with_popularity}/{coverage.manga_total} "
+                    "with popularity; "
+                    f"{coverage.manga_with_members}/{coverage.manga_total} "
+                    "with members"
+                ),
+            ),
+            (
+                "Manhwa",
+                (
+                    f"{coverage.manhwa_with_popularity}/{coverage.manhwa_total} "
+                    "with popularity; "
+                    f"{coverage.manhwa_with_members}/{coverage.manhwa_total} "
+                    "with members"
+                ),
+            ),
         ],
     )
 
@@ -2046,6 +2159,8 @@ def run_scheduled_sync(
 
     coverage = get_season_coverage()
     _report_season_coverage(coverage)
+    metric_coverage = get_catalogue_metric_coverage()
+    _report_catalogue_metric_coverage(metric_coverage)
     return ScheduledSyncResult(
         current_season=current_result,
         bulk_seasons=bulk_result,
@@ -2056,6 +2171,7 @@ def run_scheduled_sync(
         manga_catalogue=manga_result,
         manga_refresh=manga_refresh_result,
         coverage=coverage,
+        metric_coverage=metric_coverage,
         removed_hentai=removed_hentai,
         removed_adult_manga=removed_adult_manga,
     )

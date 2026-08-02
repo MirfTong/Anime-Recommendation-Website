@@ -90,6 +90,8 @@ class MangaMappingTests(unittest.TestCase):
             },
             "status": "Finished",
             "score": 8.75,
+            "popularity": 45,
+            "members": 1500000,
             "chapters": 42,
             "volumes": 7,
             "url": "https://myanimelist.net/manga/1/Mapped",
@@ -120,6 +122,8 @@ class MangaMappingTests(unittest.TestCase):
         self.assertEqual(manga.publication_year, 2006)
         self.assertEqual(manga.status, "Finished")
         self.assertEqual(manga.score, 8.75)
+        self.assertEqual(manga.popularity, 45)
+        self.assertEqual(manga.members, 1500000)
         self.assertFalse(manga.is_adult)
         self.assertEqual(manga.chapters, 42)
         self.assertEqual(manga.volumes, 7)
@@ -166,6 +170,34 @@ class MangaMappingTests(unittest.TestCase):
             expected_content_type="MANGA",
         )
         self.assertFalse(manga.is_adult)
+
+    def test_manga_metric_mapping_preserves_values_for_sparse_or_bad_payloads(self):
+        manga = manga_record()
+        manga.popularity = 500
+        manga.members = 1000
+
+        _update_manga(
+            manga,
+            {"mal_id": 1, "type": "Manga", "popularity": 9, "members": 0},
+            {},
+            expected_content_type="MANGA",
+        )
+        self.assertEqual(manga.popularity, 9)
+        self.assertEqual(manga.members, 0)
+
+        _update_manga(
+            manga,
+            {
+                "mal_id": 1,
+                "type": "Manga",
+                "popularity": -1,
+                "members": "invalid",
+            },
+            {},
+            expected_content_type="MANGA",
+        )
+        self.assertEqual(manga.popularity, 9)
+        self.assertEqual(manga.members, 0)
 
     def test_publication_year_uses_nested_year_then_iso_fallback(self):
         self.assertEqual(
