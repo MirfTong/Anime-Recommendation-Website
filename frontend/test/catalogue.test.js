@@ -264,7 +264,7 @@ test("sort options remain relevant to the selected content type", () => {
   }
   assert.equal(
     sortOptionsFor("ANIME").some(({ value }) => value === "most_episodes"),
-    true,
+    false,
   );
   assert.equal(
     sortOptionsFor("MANGA").some(({ value }) => value === "most_chapters"),

@@ -27,6 +27,7 @@ from backend.jobs.jikan_etl import (
     _anime_type,
     _detailed_genres,
     _current_season_identity,
+    _next_season_identity,
     _fetch_anime_data,
     _is_hentai,
     _names,
@@ -50,6 +51,7 @@ from backend.jobs.jikan_etl import (
     run_scheduled_sync,
     sync_bulk_anime_seasons,
     sync_current_season,
+    sync_upcoming_season,
     sync_season,
     sync_supplemental_anime_types,
 )
@@ -820,6 +822,7 @@ class JikanEtlTests(unittest.TestCase):
             studio_links_created=3,
             malformed_studio_entries=1,
         )
+
         combined.add(
             AnimeAssociationStats(
                 streaming_payloads_processed=7,
@@ -852,8 +855,26 @@ class JikanEtlTests(unittest.TestCase):
         self.assertIn("**Provider/reconciliation failures:** 1", summary)
         self.assertIn("**Relationship metadata failures:** 3", summary)
 
+    def test_upcoming_season_uses_an_independent_next_season_cursor(self):
+        fetched_requests = []
+        season_page = JikanSeasonPage(entries=[], page=1, has_next_page=False)
+        with patch("backend.jobs.jikan_etl._ensure_schema"):
+            with patch("backend.jobs.jikan_etl._next_page", return_value=1):
+                with patch("backend.jobs.jikan_etl._apply_season_page") as apply_page:
+                    apply_page.return_value = SeasonPageApplyResult()
+                    result = sync_upcoming_season(
+                        now=datetime(2026, 12, 31, 14, tzinfo=timezone.utc),
+                        fetch_page=lambda year, season, *, page: (
+                            fetched_requests.append((year, season, page)) or season_page
+                        ),
+                    )
+
+        self.assertEqual(fetched_requests, [(2027, "winter", 1)])
+        self.assertTrue(result.complete)
+
     def test_scheduled_sync_runs_every_phase_and_reports_coverage(self):
         current = CurrentSeasonSyncResult(removed_hentai=1)
+        upcoming = CurrentSeasonSyncResult(removed_hentai=2)
         bulk = BulkSeasonSyncResult(removed_hentai=2)
         supplemental = SupplementalCatalogueSyncResult(
             scans={"ova": BulkSeasonSyncResult(removed_hentai=3)}
@@ -888,6 +909,12 @@ class JikanEtlTests(unittest.TestCase):
                 patch(
                     "backend.jobs.jikan_etl.sync_current_season",
                     return_value=current,
+                )
+            )
+            upcoming_sync = stack.enter_context(
+                patch(
+                    "backend.jobs.jikan_etl.sync_upcoming_season",
+                    return_value=upcoming,
                 )
             )
             bulk_sync = stack.enter_context(
@@ -952,6 +979,7 @@ class JikanEtlTests(unittest.TestCase):
             )
             for report_name in (
                 "_report_current_season",
+                "_report_upcoming_season",
                 "_report_bulk_seasons",
                 "_report_supplemental_catalogue",
                 "_report_season_backfill",
@@ -977,6 +1005,7 @@ class JikanEtlTests(unittest.TestCase):
             )
 
         bulk_sync.assert_called_once_with(max_pages=3)
+        upcoming_sync.assert_called_once_with()
         supplemental_sync.assert_called_once_with(max_pages=3)
         backfill_sync.assert_called_once_with(limit=7, batch_size=2)
         catalogue_sync.assert_called_once_with(limit=7, batch_size=2)
@@ -985,11 +1014,12 @@ class JikanEtlTests(unittest.TestCase):
         manga_refresh_sync.assert_called_once_with(limit=7, batch_size=2)
         facet_sync.assert_called_once_with()
         self.assertEqual(result.supplemental_catalogue, supplemental)
+        self.assertEqual(result.upcoming_season, upcoming)
         self.assertEqual(result.manga_catalogue, manga_catalogue)
         self.assertEqual(result.manga_refresh, manga_refresh)
         self.assertEqual(result.streaming_backfill, streaming_backfill)
         self.assertEqual(result.removed_adult_manga, 12)
-        self.assertEqual(result.removed_hentai, 27)
+        self.assertEqual(result.removed_hentai, 29)
         self.assertEqual(result.coverage, coverage)
         self.assertEqual(result.metric_coverage, metric_coverage)
         self.assertEqual(coverage.rate, 0.75)

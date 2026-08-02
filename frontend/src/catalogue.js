@@ -280,9 +280,7 @@ export function sortOptionsFor(contentType) {
     { value: "oldest", label: "Oldest release" },
     { value: "title", label: "A–Z" },
   ];
-  if (contentType === "ANIME") {
-    options.push({ value: "most_episodes", label: "Most episodes" });
-  } else if (contentType === "MANGA" || contentType === "MANHWA") {
+  if (contentType === "MANGA" || contentType === "MANHWA") {
     options.push({ value: "most_chapters", label: "Most chapters" });
   }
   return options;

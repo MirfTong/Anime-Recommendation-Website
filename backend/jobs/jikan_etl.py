@@ -74,6 +74,9 @@ SUPPLEMENTAL_STATE_KEYS = {
     for anime_type in SUPPLEMENTAL_PROVIDER_TYPES
 }
 CURRENT_SEASON_MAX_PAGES_PER_RUN = 10
+# One page is enough to keep the homepage's six-card upcoming carousel fresh
+# without materially extending every scheduled run.
+UPCOMING_SEASON_MAX_PAGES_PER_RUN = 1
 DEFAULT_SEASON_BACKFILL_LIMIT = 1000
 DEFAULT_STREAMING_BACKFILL_LIMIT = 2000
 BULK_SEASON_MAX_PAGES_PER_RUN = 40
@@ -296,6 +299,7 @@ class CatalogueMetricCoverage:
 @dataclass(frozen=True)
 class ScheduledSyncResult:
     current_season: CurrentSeasonSyncResult
+    upcoming_season: CurrentSeasonSyncResult
     bulk_seasons: BulkSeasonSyncResult
     supplemental_catalogue: SupplementalCatalogueSyncResult
     season_backfill: SeasonBackfillResult
@@ -1379,6 +1383,15 @@ def _current_season_identity(now: datetime | None = None) -> tuple[int, str]:
     return current.year, seasons[(current.month - 1) // 3]
 
 
+def _next_season_identity(now: datetime | None = None) -> tuple[int, str]:
+    year, season = _current_season_identity(now)
+    seasons = ("winter", "spring", "summer", "fall")
+    next_index = seasons.index(season) + 1
+    if next_index == len(seasons):
+        return year + 1, seasons[0]
+    return year, seasons[next_index]
+
+
 def sync_current_season(
     *,
     max_pages: int = CURRENT_SEASON_MAX_PAGES_PER_RUN,
@@ -1386,10 +1399,44 @@ def sync_current_season(
     now: datetime | None = None,
 ) -> CurrentSeasonSyncResult:
     """Resume the current season cursor and atomically save each fetched page."""
+    year, season = _current_season_identity(now)
+    return _sync_season_window(
+        year=year,
+        season=season,
+        state_key=f"current:{year}:{season}",
+        max_pages=max_pages,
+        fetch_page=fetch_page,
+    )
+
+
+def sync_upcoming_season(
+    *,
+    max_pages: int = UPCOMING_SEASON_MAX_PAGES_PER_RUN,
+    fetch_page: Callable[..., JikanSeasonPage] = get_season_page,
+    now: datetime | None = None,
+) -> CurrentSeasonSyncResult:
+    """Discover the next season with a cursor independent from the current one."""
+    year, season = _next_season_identity(now)
+    return _sync_season_window(
+        year=year,
+        season=season,
+        state_key=f"upcoming:{year}:{season}",
+        max_pages=max_pages,
+        fetch_page=fetch_page,
+    )
+
+
+def _sync_season_window(
+    *,
+    year: int,
+    season: str,
+    state_key: str,
+    max_pages: int,
+    fetch_page: Callable[..., JikanSeasonPage],
+) -> CurrentSeasonSyncResult:
+    """Resume one named seasonal provider cursor and atomically save each page."""
     if max_pages <= 0:
         raise ValueError("max_pages must be positive")
-    year, season = _current_season_identity(now)
-    state_key = f"current:{year}:{season}"
     with app.app_context():
         _ensure_schema()
     page = _next_page(state_key)
@@ -1397,7 +1444,7 @@ def sync_current_season(
 
     for _ in range(max_pages):
         try:
-            fetched = fetch_page(None, None, page=page)
+            fetched = fetch_page(year, season, page=page)
         except JikanTemporaryError as error:
             _record_page_error(state_key, page, error)
             result.pages_failed += 1
@@ -1684,6 +1731,34 @@ def _report_current_season(result: CurrentSeasonSyncResult) -> None:
     if result.pages_failed:
         _workflow_warning(
             "Current-season pagination paused",
+            f"Page {result.next_page} failed and will be resumed by the next run.",
+        )
+
+
+def _report_upcoming_season(result: CurrentSeasonSyncResult) -> None:
+    print(
+        "Upcoming season sync: "
+        f"saved={result.saved}, inserted={result.inserted}, "
+        f"removed_hentai={result.removed_hentai}, "
+        f"seasons_assigned={result.seasons_assigned}, "
+        f"pages={result.pages_completed}, failed_pages={result.pages_failed}, "
+        f"complete={result.complete}, next_page={result.next_page}."
+    )
+    _append_step_summary(
+        "Upcoming season sync",
+        [
+            ("Anime saved", result.saved),
+            ("Anime inserted", result.inserted),
+            ("Hentai records removed", result.removed_hentai),
+            ("Seasons assigned", result.seasons_assigned),
+            ("Pages committed", result.pages_completed),
+            ("Failed pages", result.pages_failed),
+            ("Next page", result.next_page),
+        ],
+    )
+    if result.pages_failed:
+        _workflow_warning(
+            "Upcoming-season pagination paused",
             f"Page {result.next_page} failed and will be resumed by the next run.",
         )
 
@@ -2100,6 +2175,8 @@ def run_scheduled_sync(
 
     current_result = sync_current_season()
     _report_current_season(current_result)
+    upcoming_result = sync_upcoming_season()
+    _report_upcoming_season(upcoming_result)
 
     bulk_result = sync_bulk_anime_seasons(max_pages=page_limit)
     _report_bulk_seasons(bulk_result)
@@ -2135,6 +2212,7 @@ def run_scheduled_sync(
     )
     removed_hentai += (
         current_result.removed_hentai
+        + upcoming_result.removed_hentai
         + bulk_result.removed_hentai
         + supplemental_result.removed_hentai
         + backfill_result.removed_hentai
@@ -2146,6 +2224,7 @@ def run_scheduled_sync(
     association_stats = AnimeAssociationStats()
     for phase_stats in (
         current_result.associations,
+        upcoming_result.associations,
         bulk_result.associations,
         supplemental_result.associations,
         backfill_result.associations,
@@ -2163,6 +2242,7 @@ def run_scheduled_sync(
     _report_catalogue_metric_coverage(metric_coverage)
     return ScheduledSyncResult(
         current_season=current_result,
+        upcoming_season=upcoming_result,
         bulk_seasons=bulk_result,
         supplemental_catalogue=supplemental_result,
         season_backfill=backfill_result,
