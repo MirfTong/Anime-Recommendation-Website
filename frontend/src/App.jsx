@@ -553,18 +553,19 @@ function GenreTagPicker({
   onTagToggle,
 }) {
   const [tagWindowStart, setTagWindowStart] = useState(0);
+  const [selectionMode, setSelectionMode] = useState("include");
   const tagPanelRef = useRef(null);
   const pendingTagAdvanceRef = useRef(null);
   const matchingGenres = useMemo(() => limitedMatchingOptions(
     genres,
-    filters.genre,
+    [...filters.genre, ...filters.exclude_genre],
     tagQuery,
-  ), [filters.genre, genres, tagQuery]);
+  ), [filters.exclude_genre, filters.genre, genres, tagQuery]);
   const allMatchingTags = useMemo(() => limitedMatchingOptions(
     tagOptions,
-    filters.tag,
+    [...filters.tag, ...filters.exclude_tag],
     tagQuery,
-  ), [filters.tag, tagOptions, tagQuery]);
+  ), [filters.exclude_tag, filters.tag, tagOptions, tagQuery]);
   const matchingTags = allMatchingTags.slice(
     tagWindowStart,
     tagWindowStart + FACET_OPTION_LIMIT,
@@ -574,9 +575,16 @@ function GenreTagPicker({
     tagWindowStart + FACET_OPTION_LIMIT < allMatchingTags.length
     || tagsHasMore
   );
+  const selectionCount = (
+    filters.genre.length
+    + filters.tag.length
+    + filters.exclude_genre.length
+    + filters.exclude_tag.length
+  );
   useEffect(() => {
     setTagWindowStart(0);
     pendingTagAdvanceRef.current = null;
+    if (!dropdownOpen) setSelectionMode("include");
     if (tagPanelRef.current) tagPanelRef.current.scrollTop = 0;
   }, [dropdownOpen, tagQuery]);
 
@@ -628,8 +636,8 @@ function GenreTagPicker({
             />
           ) : (
             <span>
-              {filters.genre.length + filters.tag.length
-                ? `Genres & Tags (${filters.genre.length + filters.tag.length})`
+              {selectionCount
+                ? `Genres & Tags (${selectionCount})`
                 : "Genres & Tags"}
             </span>
           )}
@@ -644,6 +652,36 @@ function GenreTagPicker({
             showNextTags();
           }}
         >
+          <div
+            className="sticky top-0 z-10 flex gap-1 border-b border-white/10 bg-slate-950 p-2"
+            role="group"
+            aria-label="Genre and tag selection mode"
+          >
+            <button
+              className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                selectionMode === "include"
+                  ? "bg-violet-500 text-white"
+                  : "text-slate-300 hover:bg-violet-400/10"
+              }`}
+              type="button"
+              aria-pressed={selectionMode === "include"}
+              onClick={() => setSelectionMode("include")}
+            >
+              Include
+            </button>
+            <button
+              className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                selectionMode === "exclude"
+                  ? "bg-rose-500 text-white"
+                  : "text-slate-300 hover:bg-rose-400/10"
+              }`}
+              type="button"
+              aria-pressed={selectionMode === "exclude"}
+              onClick={() => setSelectionMode("exclude")}
+            >
+              Exclude
+            </button>
+          </div>
           <p className="px-3 pb-1 pt-2 text-xs font-bold uppercase tracking-widest text-violet-300">
             Genres
           </p>
@@ -653,11 +691,16 @@ function GenreTagPicker({
               className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${
                 filters.genre.includes(genre)
                   ? "bg-violet-500 text-white"
+                  : filters.exclude_genre.includes(genre)
+                    ? "bg-rose-500/25 text-rose-100 line-through"
                   : "text-slate-300 hover:bg-violet-400/10"
               }`}
               type="button"
-              aria-pressed={filters.genre.includes(genre)}
-              onClick={() => onGenreToggle(genre)}
+              aria-pressed={selectionMode === "include"
+                ? filters.genre.includes(genre)
+                : filters.exclude_genre.includes(genre)}
+              aria-label={`${selectionMode === "include" ? "Include" : "Exclude"} ${genre}`}
+              onClick={() => onGenreToggle(genre, selectionMode)}
             >
               {genre}
             </button>
@@ -673,11 +716,16 @@ function GenreTagPicker({
               className={`block w-full rounded-lg px-3 py-2 text-left text-sm capitalize transition ${
                 filters.tag.includes(tag)
                   ? "bg-violet-500 text-white"
+                  : filters.exclude_tag.includes(tag)
+                    ? "bg-rose-500/25 text-rose-100 line-through"
                   : "text-slate-300 hover:bg-violet-400/10"
               }`}
               type="button"
-              aria-pressed={filters.tag.includes(tag)}
-              onClick={() => onTagToggle(tag)}
+              aria-pressed={selectionMode === "include"
+                ? filters.tag.includes(tag)
+                : filters.exclude_tag.includes(tag)}
+              aria-label={`${selectionMode === "include" ? "Include" : "Exclude"} ${tag}`}
+              onClick={() => onTagToggle(tag, selectionMode)}
             >
               {tag}
             </button>
@@ -2069,18 +2117,25 @@ export default function App() {
     });
   };
 
-  const toggleGenre = (genre) => {
+  const toggleGenreTag = (kind, value, mode = "include") => {
+    const selectedKey = mode === "exclude" ? `exclude_${kind}` : kind;
+    const oppositeKey = mode === "exclude" ? kind : `exclude_${kind}`;
+    const currentFilters = filtersRef.current;
+    const selectedValues = currentFilters[selectedKey];
     applyFilters({
-      ...filters,
-      genre: filters.genre.includes(genre)
-        ? filters.genre.filter((selectedGenre) => selectedGenre !== genre)
-        : [...filters.genre, genre],
+      ...currentFilters,
+      [selectedKey]: selectedValues.includes(value)
+        ? selectedValues.filter((selectedValue) => selectedValue !== value)
+        : [...selectedValues, value],
+      [oppositeKey]: currentFilters[oppositeKey].filter(
+        (selectedValue) => selectedValue !== value,
+      ),
     });
   };
 
-  const toggleTag = (tag) => {
-    toggleMultiFilter("tag", tag);
-  };
+  const toggleGenre = (genre, mode) => toggleGenreTag("genre", genre, mode);
+
+  const toggleTag = (tag, mode) => toggleGenreTag("tag", tag, mode);
 
   const toggleStudio = (studio) => toggleMultiFilter("studio", studio);
 

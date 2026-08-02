@@ -23,6 +23,8 @@ const EMPTY_FILTERS = {
   status: "",
   genre: [],
   tag: [],
+  exclude_genre: [],
+  exclude_tag: [],
   studio: [],
   streaming_service: [],
   author: [],
@@ -35,6 +37,8 @@ const COMMON_FILTER_KEYS = [
   "max_year",
   "genre",
   "tag",
+  "exclude_genre",
+  "exclude_tag",
 ];
 const ANIME_FILTER_KEYS = [
   ...COMMON_FILTER_KEYS,
@@ -63,6 +67,8 @@ export function filtersFor() {
     ...EMPTY_FILTERS,
     genre: [],
     tag: [],
+    exclude_genre: [],
+    exclude_tag: [],
     studio: [],
     streaming_service: [],
     author: [],
@@ -349,6 +355,20 @@ export function activeFilterChips(filters, contentType) {
   });
   filters.tag.forEach((value) => {
     chips.push({ key: "tag", value, label: `Tag: ${value}` });
+  });
+  filters.exclude_genre.forEach((value) => {
+    chips.push({
+      key: "exclude_genre",
+      value,
+      label: `Exclude genre: ${value}`,
+    });
+  });
+  filters.exclude_tag.forEach((value) => {
+    chips.push({
+      key: "exclude_tag",
+      value,
+      label: `Exclude tag: ${value}`,
+    });
   });
   if (activeKeys.includes("studio")) {
     filters.studio.forEach((value) => {
