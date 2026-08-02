@@ -12,7 +12,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import App, {
   CoverImage,
   DualRangeSlider,
+  memberCountLabel,
   MinimumSlider,
+  popularityLabel,
   SearchableMultiSelect,
   ServiceBrandIcon,
 } from "../src/App.jsx";
@@ -79,6 +81,13 @@ function MinimumSliderHarness() {
     />
   );
 }
+
+test("detail metrics format provider values and unknown values safely", () => {
+  expect(popularityLabel(245)).toBe("#245");
+  expect(popularityLabel(null)).toBe("Not available");
+  expect(memberCountLabel(1200000)).toMatch(/1\.2.?M/i);
+  expect(memberCountLabel(undefined)).toBe("Not available");
+});
 
 function mockCatalogueFetch() {
   return vi.fn(async (input) => {

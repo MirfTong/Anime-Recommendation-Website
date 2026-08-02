@@ -56,6 +56,10 @@ class Anime(db.Model):
     # Airing and unreleased anime may not have these values yet.
     year: Mapped[int | None] = mapped_column(index=True)
     score: Mapped[float | None] = mapped_column(index=True)
+    # MyAnimeList popularity rank (lower is more popular) and member count.
+    # They stay nullable until a provider response supplies trustworthy values.
+    popularity: Mapped[int | None]
+    members: Mapped[int | None]
     is_adult: Mapped[bool] = mapped_column(
         default=False, server_default="false", index=True
     )
@@ -263,6 +267,9 @@ class Manga(db.Model):
     publication_year: Mapped[int | None] = mapped_column(index=True)
     status: Mapped[str | None] = mapped_column(String(50), index=True)
     score: Mapped[float | None] = mapped_column(index=True)
+    # The same MyAnimeList discovery metadata is available for Manga/Manhwa.
+    popularity: Mapped[int | None]
+    members: Mapped[int | None]
     is_adult: Mapped[bool] = mapped_column(
         default=False, server_default="false", index=True
     )

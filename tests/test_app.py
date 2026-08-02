@@ -20,6 +20,7 @@ from backend.app import (
     _normalized_status,
     _normalized_type,
     _ordered_catalogue_rows,
+    _ordered_anime_statement,
     _random_catalogue,
     _random_window_statement,
     _request_filter_signature,
@@ -216,6 +217,48 @@ class AppTests(unittest.TestCase):
             ).lower()
         self.assertIn("order by lower(catalogue_rows.title)", title_sql)
 
+    def test_popularity_and_member_sorts_are_available_for_every_catalogue_scope(self):
+        for content_type in ("ANIME", "MANGA", "MANHWA", "ALL"):
+            for sort in ("most_popular", "most_members"):
+                with self.subTest(content_type=content_type, sort=sort):
+                    response = self.client.get(
+                        "/api/v1/catalogue",
+                        query_string={
+                            "content_type": content_type,
+                            "sort": sort,
+                            "per_page": 1,
+                        },
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    for item in response.get_json()["items"]:
+                        self.assertIn("popularity", item)
+                        self.assertIn("members", item)
+
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ALL&sort=most_popular"
+        ):
+            rows = _catalogue_rows_subquery({"ANIME", "MANGA", "MANHWA"})
+            popularity_sql = str(
+                _ordered_catalogue_rows(rows, "most_popular").compile(
+                    dialect=postgresql.dialect()
+                )
+            ).lower()
+            member_sql = str(
+                _ordered_catalogue_rows(rows, "most_members").compile(
+                    dialect=postgresql.dialect()
+                )
+            ).lower()
+        self.assertIn("catalogue_rows.popularity asc nulls last", popularity_sql)
+        self.assertIn("catalogue_rows.members desc nulls last", member_sql)
+
+        with app.test_request_context("/api/v1/anime?sort=most_popular"):
+            anime_sql = str(
+                _ordered_anime_statement(
+                    _filtered_anime_statement(), "most_popular"
+                ).compile(dialect=postgresql.dialect())
+            ).lower()
+        self.assertIn("anime.popularity asc nulls last", anime_sql)
+
     def test_sort_options_are_validated_for_the_selected_content(self):
         anime_response = self.client.get(
             "/api/v1/catalogue",
@@ -286,6 +329,8 @@ class AppTests(unittest.TestCase):
             status="CURRENTLY_AIRING",
             year=2026,
             score=8.0,
+            popularity=125,
+            members=500000,
             episodes=12,
             mal_url="https://myanimelist.net/anime/24",
             sequel=False,
@@ -297,6 +342,8 @@ class AppTests(unittest.TestCase):
         item = _serialize_anime(anime)
 
         self.assertEqual(item["status"], "CURRENTLY_AIRING")
+        self.assertEqual(item["popularity"], 125)
+        self.assertEqual(item["members"], 500000)
 
     def test_anime_serializer_exposes_sorted_studios_and_streaming_links(self):
         anime = Anime(
@@ -943,6 +990,8 @@ class AppTests(unittest.TestCase):
             publication_year=2024,
             status="Publishing",
             score=8.1,
+            popularity=45,
+            members=250000,
             chapters=50,
             volumes=5,
             mal_url="https://myanimelist.net/manga/42",
@@ -967,6 +1016,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(item["publication_year"], 2024)
         self.assertEqual(item["chapters"], 50)
         self.assertEqual(item["volumes"], 5)
+        self.assertEqual(item["popularity"], 45)
+        self.assertEqual(item["members"], 250000)
         self.assertEqual(item["synopsis"], "A synopsis.")
         self.assertEqual(item["genres_detailed"], ["school"])
         self.assertEqual(
@@ -1205,6 +1256,12 @@ class AppTests(unittest.TestCase):
         seasonal_body = seasonal.get_json()
         self.assertEqual(seasonal.status_code, 200)
         self.assertTrue(seasonal_body["items"])
+        self.assertTrue(
+            all(
+                "popularity" in item and "members" in item
+                for item in seasonal_body["items"]
+            )
+        )
         self.assertIn("studios", seasonal_body["items"][0])
         self.assertIn("streaming_services", seasonal_body["items"][0])
 

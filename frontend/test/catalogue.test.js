@@ -252,6 +252,16 @@ test("pagination keeps a stable eight-page window", () => {
 });
 
 test("sort options remain relevant to the selected content type", () => {
+  for (const contentType of ["ANIME", "MANGA", "MANHWA", "ALL"]) {
+    assert.equal(
+      sortOptionsFor(contentType).some(({ value }) => value === "most_popular"),
+      true,
+    );
+    assert.equal(
+      sortOptionsFor(contentType).some(({ value }) => value === "most_members"),
+      true,
+    );
+  }
   assert.equal(
     sortOptionsFor("ANIME").some(({ value }) => value === "most_episodes"),
     true,
@@ -260,10 +270,7 @@ test("sort options remain relevant to the selected content type", () => {
     sortOptionsFor("MANGA").some(({ value }) => value === "most_chapters"),
     true,
   );
-  assert.equal(
-    sortOptionsFor("ALL").some(({ value }) => value.startsWith("most_")),
-    false,
-  );
+  assert.equal(sortOptionsFor("ALL").some(({ value }) => value === "most_episodes"), false);
 });
 
 test("URL state round-trips filters, sorting, content type, and page", () => {
@@ -287,14 +294,14 @@ test("URL state round-trips filters, sorting, content type, and page", () => {
     contentType: "MANHWA",
     filters,
     page: 4,
-    sort: "newest",
+    sort: "most_popular",
     view: "results",
   });
   const restored = catalogueStateFromSearch(search);
 
   assert.equal(restored.contentType, "MANHWA");
   assert.equal(restored.page, 4);
-  assert.equal(restored.sort, "newest");
+  assert.equal(restored.sort, "most_popular");
   assert.equal(restored.filters.q, "tower");
   assert.equal(restored.filters.status, "PUBLISHING");
   assert.equal(restored.filters.max_year, "2025");

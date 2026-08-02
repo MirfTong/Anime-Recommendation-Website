@@ -274,6 +274,8 @@ export function itemMetadata(item, detailed = false) {
 export function sortOptionsFor(contentType) {
   const options = [
     { value: "top_rated", label: "Top rated" },
+    { value: "most_popular", label: "Most popular" },
+    { value: "most_members", label: "Most members" },
     { value: "newest", label: "Newest release" },
     { value: "oldest", label: "Oldest release" },
     { value: "title", label: "A–Z" },

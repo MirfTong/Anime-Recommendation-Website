@@ -53,6 +53,24 @@ class MangaSchemaTests(unittest.TestCase):
             schema_source,
         )
 
+    def test_popularity_and_member_fields_are_nullable_and_indexed(self):
+        self.assertTrue(Anime.__table__.c.popularity.nullable)
+        self.assertTrue(Anime.__table__.c.members.nullable)
+        self.assertTrue(Manga.__table__.c.popularity.nullable)
+        self.assertTrue(Manga.__table__.c.members.nullable)
+
+        schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("CATALOGUE_SCHEMA_VERSION = 5", schema_source)
+        self.assertIn('"popularity INTEGER"', schema_source)
+        self.assertIn('"members INTEGER"', schema_source)
+        for index_name in (
+            "ix_anime_public_popularity",
+            "ix_anime_public_members",
+            "ix_manga_public_popularity",
+            "ix_manga_public_members",
+        ):
+            self.assertIn(index_name, schema_source)
+
     def test_manga_table_contains_the_complete_catalogue_shape(self):
         columns = set(Manga.__table__.columns.keys())
 
@@ -227,7 +245,7 @@ class MangaSchemaTests(unittest.TestCase):
     def test_top_rated_indexes_are_applied_by_versioned_migration(self):
         schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("CATALOGUE_SCHEMA_VERSION = 4", schema_source)
+        self.assertIn("CATALOGUE_SCHEMA_VERSION = 5", schema_source)
         self.assertIn("ix_anime_public_top_rated", schema_source)
         self.assertIn("ix_manga_public_top_rated", schema_source)
         self.assertIn("score DESC NULLS LAST", schema_source)

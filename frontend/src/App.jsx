@@ -319,6 +319,28 @@ export function CoverImage({ item, className = "", loading = "lazy" }) {
   );
 }
 
+export function metricNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const numericValue = Number(value);
+  return Number.isInteger(numericValue) && numericValue >= 0
+    ? numericValue
+    : null;
+}
+
+export function memberCountLabel(value) {
+  const numericValue = metricNumber(value);
+  if (numericValue === null) return "Not available";
+  return new Intl.NumberFormat(undefined, {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(numericValue);
+}
+
+export function popularityLabel(value) {
+  const numericValue = metricNumber(value);
+  return numericValue === null ? "Not available" : `#${numericValue}`;
+}
+
 const CatalogueCard = memo(function CatalogueCard({
   item,
   onSelect,
@@ -429,6 +451,24 @@ function DetailModal({ item, loading, onClose }) {
               <Score value={item.score} />
               <span className="text-slate-300">{itemMetadata(item, true).join(" · ")}</span>
             </div>
+            <dl className="grid grid-cols-2 gap-2 text-sm text-slate-300 sm:max-w-md">
+              <div className="rounded-xl border border-white/10 bg-slate-950/40 px-3 py-2">
+                <dt className="text-xs font-semibold uppercase tracking-wider text-violet-200">
+                  Popularity rank
+                </dt>
+                <dd className="mt-1 font-bold text-white">
+                  {popularityLabel(item.popularity)}
+                </dd>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-slate-950/40 px-3 py-2">
+                <dt className="text-xs font-semibold uppercase tracking-wider text-violet-200">
+                  Members
+                </dt>
+                <dd className="mt-1 font-bold text-white">
+                  {memberCountLabel(item.members)}
+                </dd>
+              </div>
+            </dl>
             <div className="flex flex-wrap gap-2">
               {(item.genres ?? []).map((genre) => (
                 <span
