@@ -400,6 +400,21 @@ describe("catalogue filter integration", () => {
     expect(new URLSearchParams(window.location.search).get("view")).toBe("home");
   });
 
+  test("the anime homepage loads a popular upcoming-season carousel", async () => {
+    render(<App />);
+
+    expect(await screen.findByRole("heading", {
+      name: "UPCOMING NEXT SEASON",
+    })).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => {
+      const request = new URL(String(input), "https://kyoquan.test");
+      return request.pathname === "/api/v1/anime/seasonal"
+        && request.searchParams.get("period") === "next"
+        && request.searchParams.get("sort") === "most_popular"
+        && request.searchParams.get("limit") === "6";
+    })).toBe(true));
+  });
+
   test("print-only entry points skip seasonal anime and bound facet responses", async () => {
     const user = userEvent.setup();
     window.history.replaceState({}, "", "/?content_type=MANGA");

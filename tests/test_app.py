@@ -19,6 +19,7 @@ from backend.app import (
     _normalized_content_type,
     _normalized_status,
     _normalized_type,
+    _next_season_identity,
     _ordered_catalogue_rows,
     _ordered_anime_statement,
     _random_catalogue,
@@ -1330,6 +1331,26 @@ class AppTests(unittest.TestCase):
         self.assertTrue(
             all(item["season"] == "summer" and item["year"] == 2026 for item in body["items"])
         )
+
+    def test_upcoming_season_uses_the_next_window_and_popularity_order(self):
+        with patch("backend.app._next_season_identity", return_value=(2026, "summer")):
+            response = self.client.get(
+                "/api/v1/anime/seasonal",
+                query_string={"period": "next", "sort": "most_popular", "limit": 6},
+            )
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["period"], "next")
+        self.assertEqual(body["sort"], "most_popular")
+        self.assertEqual((body["year"], body["season"]), (2026, "summer"))
+        self.assertTrue(
+            all(item["season"] == "summer" and item["year"] == 2026 for item in body["items"])
+        )
+
+    def test_next_season_rolls_over_after_fall(self):
+        with patch("backend.app._current_season_identity", return_value=(2026, "fall")):
+            self.assertEqual(_next_season_identity(), (2027, "winter"))
 
     def test_popular_current_season_supports_pagination(self):
         with patch("backend.app._current_season_identity", return_value=(2026, "summer")):

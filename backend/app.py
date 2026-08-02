@@ -241,6 +241,16 @@ def _current_season_identity(now: datetime | None = None) -> tuple[int, str]:
     return current.year, seasons[(current.month - 1) // 3]
 
 
+def _next_season_identity(now: datetime | None = None) -> tuple[int, str]:
+    """Return the next anime season using Japan's calendar."""
+    year, season = _current_season_identity(now)
+    seasons = ("winter", "spring", "summer", "fall")
+    next_index = seasons.index(season) + 1
+    if next_index == len(seasons):
+        return year + 1, seasons[0]
+    return year, seasons[next_index]
+
+
 class ApiError(Exception):
     """A validation error that should be returned as JSON."""
 
@@ -1457,25 +1467,55 @@ def random_anime():
 
 @app.get(f"{API_PREFIX}/anime/seasonal")
 def popular_current_season():
-    """Return the highest-rated anime from the current Japan-season window."""
+    """Return a ranked current or upcoming Japan-season window."""
     limit = _integer_argument("limit", minimum=1, maximum=12) or 6
     page = _integer_argument("page", minimum=1) or 1
     preview = _preview_requested()
-    year, season = _current_season_identity()
+    period = request.args.get("period", "current").strip().lower()
+    if period not in {"current", "next"}:
+        raise ApiError("period must be current or next")
+    sort = request.args.get(
+        "sort", "most_popular" if period == "next" else "top_rated"
+    ).strip().lower()
+    if sort not in {"top_rated", "most_popular", "most_members"}:
+        raise ApiError("seasonal sort must be top_rated, most_popular, or most_members")
+
+    year, season = (
+        _next_season_identity() if period == "next" else _current_season_identity()
+    )
     common_filters = _common_filter_values()
-    filters = (
-        Anime.score.is_not(None),
+    filters = [
         Anime.year == year,
         Anime.season == season,
-    )
+    ]
+    if sort == "top_rated":
+        filters.append(Anime.score.is_not(None))
+    if sort == "most_popular":
+        order = (
+            Anime.popularity.asc().nullslast(),
+            Anime.members.desc().nullslast(),
+            Anime.score.desc().nullslast(),
+            Anime.title,
+        )
+    elif sort == "most_members":
+        order = (
+            Anime.members.desc().nullslast(),
+            Anime.popularity.asc().nullslast(),
+            Anime.score.desc().nullslast(),
+            Anime.title,
+        )
+    else:
+        order = (Anime.score.desc(), Anime.title)
     public_season = _apply_common_filters(
         _anime_statement(preview=True), Anime, Anime.year, common_filters
     ).where(*filters).order_by(None).subquery()
     total = _cached_scalar_count(
         (
             "seasonal-total",
+            period,
             year,
             season,
+            sort,
             _request_filter_signature(
                 exclude={"content_type", "limit", "page", "per_page", "preview", "sort"}
             ),
@@ -1487,7 +1527,7 @@ def popular_current_season():
             _anime_statement(preview=preview), Anime, Anime.year, common_filters
         )
         .where(*filters)
-        .order_by(Anime.score.desc(), Anime.title)
+        .order_by(*order)
         .offset((page - 1) * limit)
         .limit(limit)
     ).all()
@@ -1496,6 +1536,8 @@ def popular_current_season():
             "items": [
                 _serialize_anime(entry, preview=preview) for entry in anime
             ],
+            "period": period,
+            "sort": sort,
             "season": season,
             "year": year,
             "pagination": {

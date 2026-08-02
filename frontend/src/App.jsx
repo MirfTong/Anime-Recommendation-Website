@@ -393,6 +393,79 @@ const CatalogueCard = memo(function CatalogueCard({
   );
 });
 
+function SeasonalCarousel({
+  headingId,
+  title,
+  anime,
+  loading,
+  pagination,
+  onPrevious,
+  onNext,
+  onSelect,
+  loadingMessage,
+  emptyMessage,
+}) {
+  return (
+    <section className="mb-12" aria-labelledby={headingId} aria-busy={loading}>
+      <h2
+        id={headingId}
+        className="mb-5 text-3xl font-black tracking-tight text-white sm:text-4xl"
+      >
+        {title}
+      </h2>
+      {loading && anime.length === 0 ? (
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+          {Array.from({ length: 6 }, (_, index) => (
+            <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />
+          ))}
+        </div>
+      ) : anime.length > 0 ? (
+        <div className="relative">
+          {loading && (
+            <p
+              className="absolute right-2 top-2 z-20 rounded-full bg-slate-950/85 px-3 py-1 text-xs font-semibold text-violet-200"
+              role="status"
+            >
+              {loadingMessage}
+            </p>
+          )}
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+            {anime.map((entry) => (
+              <CatalogueCard
+                key={`ANIME:${entry.mal_id ?? entry.id}`}
+                item={entry}
+                onSelect={onSelect}
+              />
+            ))}
+          </div>
+          <button
+            className="absolute -left-3 top-1/2 z-10 -translate-y-1/2 rounded-full border border-white/15 bg-slate-900/90 px-3 py-4 text-2xl font-bold text-white shadow-lg transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30"
+            type="button"
+            aria-label={`Previous ${title.toLowerCase()} anime`}
+            disabled={pagination.page === 1}
+            onClick={onPrevious}
+          >
+            &lsaquo;
+          </button>
+          <button
+            className="absolute -right-3 top-1/2 z-10 -translate-y-1/2 rounded-full border border-white/15 bg-slate-900/90 px-3 py-4 text-2xl font-bold text-white shadow-lg transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30"
+            type="button"
+            aria-label={`Next ${title.toLowerCase()} anime`}
+            disabled={pagination.page === pagination.pages}
+            onClick={onNext}
+          >
+            &rsaquo;
+          </button>
+        </div>
+      ) : (
+        <p className="rounded-2xl border border-dashed border-slate-700 p-5 text-sm text-slate-400">
+          {emptyMessage}
+        </p>
+      )}
+    </section>
+  );
+}
+
 function DetailModal({ item, loading, onClose }) {
   if (!item) return null;
 
@@ -1365,6 +1438,7 @@ export default function App() {
   const [activePreset, setActivePreset] = useState("");
   const [items, setItems] = useState([]);
   const [seasonalAnime, setSeasonalAnime] = useState([]);
+  const [upcomingAnime, setUpcomingAnime] = useState([]);
   const [pagination, setPagination] = useState({
     page: initialState.page,
     pages: 1,
@@ -1375,11 +1449,17 @@ export default function App() {
     pages: 1,
     total: 0,
   });
+  const [upcomingPagination, setUpcomingPagination] = useState({
+    page: 1,
+    pages: 1,
+    total: 0,
+  });
   const [updatedAt, setUpdatedAt] = useState(null);
   const [jumpPage, setJumpPage] = useState("");
   const [pageError, setPageError] = useState("");
   const [loading, setLoading] = useState(true);
   const [seasonalLoading, setSeasonalLoading] = useState(true);
+  const [upcomingLoading, setUpcomingLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [viewMode, setViewMode] = useState(initialState.view);
   const [error, setError] = useState("");
@@ -1392,6 +1472,8 @@ export default function App() {
   const catalogueControllerRef = useRef(null);
   const seasonalRequestRef = useRef(0);
   const seasonalControllerRef = useRef(null);
+  const upcomingRequestRef = useRef(0);
+  const upcomingControllerRef = useRef(null);
   const genreRequestRef = useRef(0);
   const genreControllerRef = useRef(null);
   const tagRequestRef = useRef(0);
@@ -1485,13 +1567,30 @@ export default function App() {
     loadCatalogue(page, activeFilters, activeContentType, activeSort);
   }, [loadCatalogue, updateUrl]);
 
-  const loadSeasonalAnime = useCallback(async (page = 1) => {
-    const requestId = ++seasonalRequestRef.current;
-    const controller = nextRequestController(seasonalControllerRef);
-    setSeasonalLoading(true);
+  const loadSeasonalAnime = useCallback(async (page = 1, period = "current") => {
+    const isUpcoming = period === "next";
+    const requestRef = isUpcoming ? upcomingRequestRef : seasonalRequestRef;
+    const controllerRef = isUpcoming
+      ? upcomingControllerRef
+      : seasonalControllerRef;
+    const setLoading = isUpcoming ? setUpcomingLoading : setSeasonalLoading;
+    const setAnime = isUpcoming ? setUpcomingAnime : setSeasonalAnime;
+    const setPagination = isUpcoming
+      ? setUpcomingPagination
+      : setSeasonalPagination;
+    const requestId = ++requestRef.current;
+    const controller = nextRequestController(controllerRef);
+    setLoading(true);
     try {
+      const params = new URLSearchParams({
+        limit: "6",
+        page: String(page),
+        preview: "1",
+        period,
+        sort: isUpcoming ? "most_popular" : "top_rated",
+      });
       const { ok, body } = await getJson(
-        `/api/v1/anime/seasonal?limit=6&page=${page}&preview=1`,
+        `/api/v1/anime/seasonal?${params}`,
         {
           signal: controller.signal,
           ttlMs: CATALOGUE_CACHE_TTL_MS,
@@ -1500,18 +1599,18 @@ export default function App() {
       if (!ok) {
         throw new Error(body.error?.message || "Could not load seasonal anime.");
       }
-      if (requestId !== seasonalRequestRef.current) return;
-      setSeasonalAnime(body.items ?? []);
-      setSeasonalPagination(
+      if (requestId !== requestRef.current) return;
+      setAnime(body.items ?? []);
+      setPagination(
         body.pagination ?? { page: 1, pages: 1, total: body.items?.length ?? 0 },
       );
     } catch (requestError) {
       if (isAbortError(requestError)) return;
-      if (requestId !== seasonalRequestRef.current) return;
-      setSeasonalAnime([]);
-      setSeasonalPagination({ page: 1, pages: 1, total: 0 });
+      if (requestId !== requestRef.current) return;
+      setAnime([]);
+      setPagination({ page: 1, pages: 1, total: 0 });
     } finally {
-      if (requestId === seasonalRequestRef.current) setSeasonalLoading(false);
+      if (requestId === requestRef.current) setLoading(false);
     }
   }, []);
 
@@ -1747,11 +1846,15 @@ export default function App() {
   useEffect(() => {
     if (contentType === "ANIME" && viewMode === "home") {
       loadSeasonalAnime();
+      loadSeasonalAnime(1, "next");
       return undefined;
     }
     ++seasonalRequestRef.current;
     cancelRequest(seasonalControllerRef);
     setSeasonalLoading(false);
+    ++upcomingRequestRef.current;
+    cancelRequest(upcomingControllerRef);
+    setUpcomingLoading(false);
     return undefined;
   }, [contentType, loadSeasonalAnime, viewMode]);
 
@@ -1852,6 +1955,7 @@ export default function App() {
   useEffect(() => () => {
     ++catalogueRequestRef.current;
     ++seasonalRequestRef.current;
+    ++upcomingRequestRef.current;
     ++genreRequestRef.current;
     ++tagRequestRef.current;
     ++studioRequestRef.current;
@@ -1861,6 +1965,7 @@ export default function App() {
     ++detailRequestRef.current;
     cancelRequest(catalogueControllerRef);
     cancelRequest(seasonalControllerRef);
+    cancelRequest(upcomingControllerRef);
     cancelRequest(genreControllerRef);
     cancelRequest(tagControllerRef);
     cancelRequest(studioControllerRef);
@@ -2802,67 +2907,32 @@ export default function App() {
       )}
 
       {showHomepageSections && (
-        <section
-          className="mb-12"
-          aria-labelledby="popular-this-season"
-          aria-busy={seasonalLoading}
-        >
-          <h2
-            id="popular-this-season"
-            className="mb-5 text-3xl font-black tracking-tight text-white sm:text-4xl"
-          >
-            POPULAR THIS SEASON
-          </h2>
-          {seasonalLoading && seasonalAnime.length === 0 ? (
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-              {Array.from({ length: 6 }, (_, index) => (
-                <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />
-              ))}
-            </div>
-          ) : seasonalAnime.length > 0 ? (
-            <div className="relative">
-              {seasonalLoading && (
-                <p
-                  className="absolute right-2 top-2 z-20 rounded-full bg-slate-950/85 px-3 py-1 text-xs font-semibold text-violet-200"
-                  role="status"
-                >
-                  Refreshing seasonal anime...
-                </p>
-              )}
-              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-                {seasonalAnime.map((entry) => (
-                  <CatalogueCard
-                    key={`ANIME:${entry.mal_id ?? entry.id}`}
-                    item={entry}
-                    onSelect={openDetail}
-                  />
-                ))}
-              </div>
-              <button
-                className="absolute -left-3 top-1/2 z-10 -translate-y-1/2 rounded-full border border-white/15 bg-slate-900/90 px-3 py-4 text-2xl font-bold text-white shadow-lg transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30"
-                type="button"
-                aria-label="Previous popular seasonal anime"
-                disabled={seasonalPagination.page === 1}
-                onClick={() => loadSeasonalAnime(seasonalPagination.page - 1)}
-              >
-                &lsaquo;
-              </button>
-              <button
-                className="absolute -right-3 top-1/2 z-10 -translate-y-1/2 rounded-full border border-white/15 bg-slate-900/90 px-3 py-4 text-2xl font-bold text-white shadow-lg transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30"
-                type="button"
-                aria-label="Next popular seasonal anime"
-                disabled={seasonalPagination.page === seasonalPagination.pages}
-                onClick={() => loadSeasonalAnime(seasonalPagination.page + 1)}
-              >
-                &rsaquo;
-              </button>
-            </div>
-          ) : (
-            <p className="rounded-2xl border border-dashed border-slate-700 p-5 text-sm text-slate-400">
-              Seasonal anime are still being refreshed. Check back shortly.
-            </p>
-          )}
-        </section>
+        <>
+          <SeasonalCarousel
+            headingId="popular-this-season"
+            title="POPULAR THIS SEASON"
+            anime={seasonalAnime}
+            loading={seasonalLoading}
+            pagination={seasonalPagination}
+            onPrevious={() => loadSeasonalAnime(seasonalPagination.page - 1)}
+            onNext={() => loadSeasonalAnime(seasonalPagination.page + 1)}
+            onSelect={openDetail}
+            loadingMessage="Refreshing seasonal anime..."
+            emptyMessage="Seasonal anime are still being refreshed. Check back shortly."
+          />
+          <SeasonalCarousel
+            headingId="upcoming-next-season"
+            title="UPCOMING NEXT SEASON"
+            anime={upcomingAnime}
+            loading={upcomingLoading}
+            pagination={upcomingPagination}
+            onPrevious={() => loadSeasonalAnime(upcomingPagination.page - 1, "next")}
+            onNext={() => loadSeasonalAnime(upcomingPagination.page + 1, "next")}
+            onSelect={openDetail}
+            loadingMessage="Refreshing upcoming anime..."
+            emptyMessage="Upcoming anime are still being refreshed. Check back shortly."
+          />
+        </>
       )}
 
       <section
