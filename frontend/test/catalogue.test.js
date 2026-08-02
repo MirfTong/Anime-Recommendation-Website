@@ -259,7 +259,7 @@ test("sort options remain relevant to the selected content type", () => {
     );
     assert.equal(
       sortOptionsFor(contentType).some(({ value }) => value === "most_members"),
-      true,
+      false,
     );
   }
   assert.equal(
@@ -268,7 +268,11 @@ test("sort options remain relevant to the selected content type", () => {
   );
   assert.equal(
     sortOptionsFor("MANGA").some(({ value }) => value === "most_chapters"),
-    true,
+    false,
+  );
+  assert.equal(
+    sortOptionsFor("MANHWA").some(({ value }) => value === "most_chapters"),
+    false,
   );
   assert.equal(sortOptionsFor("ALL").some(({ value }) => value === "most_episodes"), false);
 });
