@@ -74,6 +74,8 @@ CACHE_GENERATION_POLL_SECONDS = 15
 MULTI_VALUE_FILTERS = frozenset(
     {
         "author",
+        "exclude_genre",
+        "exclude_tag",
         "genre",
         "season",
         "status",
@@ -84,7 +86,7 @@ MULTI_VALUE_FILTERS = frozenset(
     }
 )
 CASE_INSENSITIVE_MULTI_FILTERS = MULTI_VALUE_FILTERS.difference(
-    {"genre", "tag"}
+    {"exclude_genre", "exclude_tag", "genre", "tag"}
 )
 
 
@@ -181,6 +183,8 @@ class CommonFilters:
     max_year: int | None
     genres: tuple[str, ...]
     tags: tuple[str, ...]
+    excluded_genres: tuple[str, ...]
+    excluded_tags: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -425,6 +429,8 @@ def _common_filter_values() -> CommonFilters:
         max_year=max_year,
         genres=tuple(_list_argument("genre")),
         tags=tuple(_list_argument("tag")),
+        excluded_genres=tuple(_list_argument("exclude_genre")),
+        excluded_tags=tuple(_list_argument("exclude_tag")),
     )
 
 
@@ -747,6 +753,17 @@ def _apply_common_filters(
         )
     for tag in filters.tags:
         statement = statement.where(model.genres_detailed.contains([tag]))
+    # Relationship ``any`` compiles to an EXISTS subquery.  Negating it keeps
+    # exclusion filtering in PostgreSQL instead of loading genre links into
+    # Python, and makes an include/exclude conflict safely return no matches.
+    for genre in filters.excluded_genres:
+        statement = statement.where(
+            ~model.genre_entries.any(Genre.name == genre)
+        )
+    for tag in filters.excluded_tags:
+        statement = statement.where(
+            ~model.genres_detailed.contains([tag])
+        )
     return statement
 
 
@@ -1405,23 +1422,30 @@ def popular_current_season():
     page = _integer_argument("page", minimum=1) or 1
     preview = _preview_requested()
     year, season = _current_season_identity()
+    common_filters = _common_filter_values()
     filters = (
         Anime.score.is_not(None),
         Anime.year == year,
         Anime.season == season,
     )
-    public_season = (
-        _anime_statement(preview=True)
-        .where(*filters)
-        .order_by(None)
-        .subquery()
-    )
+    public_season = _apply_common_filters(
+        _anime_statement(preview=True), Anime, Anime.year, common_filters
+    ).where(*filters).order_by(None).subquery()
     total = _cached_scalar_count(
-        ("seasonal-total", year, season),
+        (
+            "seasonal-total",
+            year,
+            season,
+            _request_filter_signature(
+                exclude={"content_type", "limit", "page", "per_page", "preview", "sort"}
+            ),
+        ),
         select(func.count()).select_from(public_season),
     )
     anime = db.session.scalars(
-        _anime_statement(preview=preview)
+        _apply_common_filters(
+            _anime_statement(preview=preview), Anime, Anime.year, common_filters
+        )
         .where(*filters)
         .order_by(Anime.score.desc(), Anime.title)
         .offset((page - 1) * limit)

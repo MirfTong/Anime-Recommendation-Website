@@ -452,7 +452,7 @@ describe("catalogue filter integration", () => {
     render(<App />);
 
     await user.click(screen.getByText("Genres & Tags"));
-    expect(await screen.findByRole("button", { name: "tag 0" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Include tag 0" })).toBeInTheDocument();
     const optionPanel = screen.getByLabelText("Genre and tag options");
     Object.defineProperties(optionPanel, {
       scrollHeight: { configurable: true, value: 1000 },
@@ -466,8 +466,53 @@ describe("catalogue filter integration", () => {
       return request.pathname === "/api/v1/tags"
         && request.searchParams.get("offset") === "100";
     })).toBe(true));
-    expect(await screen.findByRole("button", { name: "tag 100" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Include tag 100" })).toBeInTheDocument();
     expect(optionPanel.scrollTop).toBe(0);
+  });
+
+  test("genre and tag exclusions update results, URL state, and selection mode", async () => {
+    const user = userEvent.setup();
+    fetchMock.mockImplementation(async (input) => {
+      const request = new URL(String(input), "https://kyoquan.test");
+      if (request.pathname === "/api/v1/genres") {
+        return { ok: true, json: async () => ({ items: ["Action", "Isekai"] }) };
+      }
+      if (request.pathname === "/api/v1/tags") {
+        return {
+          ok: true,
+          json: async () => ({
+            items: ["harem"],
+            pagination: { has_more: false },
+          }),
+        };
+      }
+      return mockCatalogueFetch()(input);
+    });
+    render(<App />);
+
+    await user.click(screen.getByText("Genres & Tags"));
+    await screen.findByRole("button", { name: "Include Isekai" });
+    await user.click(screen.getByRole("button", { name: "Exclude", exact: true }));
+    const excludedGenre = screen.getByRole("button", { name: "Exclude Isekai" });
+    await user.click(excludedGenre);
+
+    expect(await screen.findByText("Exclude genre: Isekai")).toBeInTheDocument();
+    expect(excludedGenre).toHaveClass("bg-rose-500/25");
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => {
+      const request = new URL(String(input), "https://kyoquan.test");
+      return request.pathname === "/api/v1/catalogue"
+        && request.searchParams.get("exclude_genre") === "Isekai";
+    })).toBe(true));
+    expect(new URLSearchParams(window.location.search).get("exclude_genre")).toBe("Isekai");
+
+    await user.click(screen.getByRole("button", { name: "Include", exact: true }));
+    await user.click(screen.getByRole("button", { name: "Include Isekai" }));
+
+    await waitFor(() => expect(
+      new URLSearchParams(window.location.search).get("genre"),
+    ).toBe("Isekai"));
+    expect(new URLSearchParams(window.location.search).has("exclude_genre")).toBe(false);
+    expect(screen.queryByText("Exclude genre: Isekai")).toBeNull();
   });
 
   test("filter refreshes retain cards and abort the superseded request", async () => {

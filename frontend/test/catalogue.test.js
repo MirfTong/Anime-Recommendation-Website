@@ -73,6 +73,8 @@ test("anime queries send anime filters and omit readable-title filters", () => {
     min_episodes: "12",
     min_chapters: "50",
     genre: ["Drama", "Mystery"],
+    exclude_genre: ["Isekai"],
+    exclude_tag: ["harem"],
     studio: ["Bones", "Madhouse"],
     streaming_service: ["Crunchyroll", "Netflix"],
     author: ["Hiromu Arakawa"],
@@ -87,6 +89,8 @@ test("anime queries send anime filters and omit readable-title filters", () => {
   assert.equal(params.get("status"), "CURRENTLY_AIRING");
   assert.equal(params.get("min_episodes"), "12");
   assert.equal(params.get("genre"), "Drama,Mystery");
+  assert.equal(params.get("exclude_genre"), "Isekai");
+  assert.equal(params.get("exclude_tag"), "harem");
   assert.equal(params.get("studio"), "Bones,Madhouse");
   assert.equal(params.get("streaming_service"), "Crunchyroll,Netflix");
   assert.equal(params.has("author"), false);
@@ -106,6 +110,8 @@ test("manga and manhwa queries send print filters and omit anime filters", () =>
       min_episodes: "12",
       type: "TV",
       tag: ["school"],
+      exclude_genre: ["Isekai"],
+      exclude_tag: ["harem"],
       studio: ["Bones"],
       streaming_service: ["Crunchyroll"],
       author: ["Hiromu Arakawa"],
@@ -119,6 +125,8 @@ test("manga and manhwa queries send print filters and omit anime filters", () =>
     assert.equal(params.get("min_volumes"), "3");
     assert.equal(params.get("max_volumes"), "20");
     assert.equal(params.get("tag"), "school");
+    assert.equal(params.get("exclude_genre"), "Isekai");
+    assert.equal(params.get("exclude_tag"), "harem");
     assert.equal(params.has("min_episodes"), false);
     assert.equal(params.has("type"), false);
     assert.equal(params.has("studio"), false);
@@ -145,6 +153,8 @@ test("all-content queries include only shared filters", () => {
     author: ["SIU"],
     type: "TV",
     status: "PUBLISHING",
+    exclude_genre: ["Isekai"],
+    exclude_tag: ["harem"],
   };
   const params = new URLSearchParams(queryString(filters, 1, "ALL"));
 
@@ -152,6 +162,8 @@ test("all-content queries include only shared filters", () => {
   assert.equal(params.get("min_score"), "7");
   assert.equal(params.get("min_year"), "2000");
   assert.equal(params.get("max_year"), "2026");
+  assert.equal(params.get("exclude_genre"), "Isekai");
+  assert.equal(params.get("exclude_tag"), "harem");
   assert.equal(params.has("min_episodes"), false);
   assert.equal(params.has("max_episodes"), false);
   assert.equal(params.has("min_chapters"), false);
@@ -171,6 +183,7 @@ test("random catalogue queries preserve compatible active filters", () => {
     min_score: "8",
     studio: ["Bones"],
     streaming_service: ["Crunchyroll"],
+    exclude_genre: ["Isekai"],
   }, "ANIME", 6));
 
   assert.equal(params.get("content_type"), "ANIME");
@@ -179,6 +192,7 @@ test("random catalogue queries preserve compatible active filters", () => {
   assert.equal(params.get("min_score"), "8");
   assert.equal(params.get("studio"), "Bones");
   assert.equal(params.get("streaming_service"), "Crunchyroll");
+  assert.equal(params.get("exclude_genre"), "Isekai");
   assert.equal(params.has("page"), false);
   assert.equal(params.has("sort"), false);
 });
@@ -266,6 +280,8 @@ test("URL state round-trips filters, sorting, content type, and page", () => {
     status: "PUBLISHING",
     genre: ["Action", "Fantasy"],
     tag: ["school"],
+    exclude_genre: ["Isekai"],
+    exclude_tag: ["harem"],
   };
   const search = catalogueUrlSearch({
     contentType: "MANHWA",
@@ -288,6 +304,8 @@ test("URL state round-trips filters, sorting, content type, and page", () => {
   assert.equal(restored.filters.max_volumes, "15");
   assert.deepEqual(restored.filters.genre, ["Action", "Fantasy"]);
   assert.deepEqual(restored.filters.tag, ["school"]);
+  assert.deepEqual(restored.filters.exclude_genre, ["Isekai"]);
+  assert.deepEqual(restored.filters.exclude_tag, ["harem"]);
 });
 
 test("direct URL state safely normalizes invalid navigation values", () => {
@@ -401,6 +419,8 @@ test("active chips represent each removable catalogue filter", () => {
     max_episodes: "24",
     genre: ["Drama"],
     tag: ["school"],
+    exclude_genre: ["Isekai"],
+    exclude_tag: ["harem"],
     studio: ["Bones"],
     streaming_service: ["Crunchyroll"],
   }, "ANIME");
@@ -410,6 +430,8 @@ test("active chips represent each removable catalogue filter", () => {
     [
       "genre",
       "tag",
+      "exclude_genre",
+      "exclude_tag",
       "studio",
       "streaming_service",
       "min_year:max_year",
@@ -450,6 +472,7 @@ test("removing a chip clears only its matching filter value", () => {
     type: "TV",
     genre: ["Action", "Drama"],
     tag: ["school"],
+    exclude_genre: ["Isekai"],
     studio: ["Bones", "Madhouse"],
     min_year: "2000",
     max_year: "2020",
@@ -478,6 +501,10 @@ test("removing a chip clears only its matching filter value", () => {
       value: "2000:2020",
     },
   );
+  const withoutExcludedGenre = filtersWithoutChip(
+    filters,
+    { key: "exclude_genre", value: "Isekai" },
+  );
 
   assert.deepEqual(withoutAction.genre, ["Drama"]);
   assert.deepEqual(withoutAction.tag, ["school"]);
@@ -485,6 +512,7 @@ test("removing a chip clears only its matching filter value", () => {
   assert.equal(withoutType.type, "");
   assert.equal(withoutStatus.status, "");
   assert.deepEqual(withoutStudio.studio, ["Madhouse"]);
+  assert.deepEqual(withoutExcludedGenre.exclude_genre, []);
   assert.equal(withoutYear.min_year, "");
   assert.equal(withoutYear.max_year, "");
   assert.deepEqual(filters.genre, ["Action", "Drama"]);

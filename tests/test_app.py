@@ -146,6 +146,19 @@ class AppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(all(item["season"] == "winter" for item in body["items"]))
 
+    def test_anime_random_endpoint_honors_genre_exclusions(self):
+        response = self.client.get(
+            "/api/v1/anime/random?exclude_genre=Action&limit=6"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            all(
+                "Action" not in item["genres"]
+                for item in response.get_json()["items"]
+            )
+        )
+
     def test_catalogue_supports_database_ordered_sort_options(self):
         expectations = {
             "top_rated": ("score", True),
@@ -620,15 +633,68 @@ class AppTests(unittest.TestCase):
 
     def test_count_cache_canonicalizes_reordered_multi_value_filters(self):
         with app.test_request_context(
-            "/api/v1/catalogue?genre=Action,Comedy&studio=MAPPA&studio=Bones"
+            "/api/v1/catalogue?genre=Action,Comedy&exclude_genre=Isekai,Harem"
+            "&exclude_tag=harem&studio=MAPPA&studio=Bones"
         ):
             first = _request_filter_signature(exclude=set())
         with app.test_request_context(
             "/api/v1/catalogue?studio=bones,mappa&genre=Comedy&genre=Action"
+            "&exclude_genre=Harem&exclude_genre=Isekai&exclude_tag=harem"
         ):
             second = _request_filter_signature(exclude=set())
 
         self.assertEqual(first, second)
+
+    def test_genre_and_tag_exclusions_use_database_side_predicates(self):
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ALL&genre=Action&tag=school"
+            "&exclude_genre=Isekai&exclude_tag=harem"
+        ):
+            anime_sql = str(
+                _filtered_anime_statement().compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            ).lower()
+            manga_sql = str(
+                _filtered_manga_statement({"MANGA", "MANHWA"}).compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            ).lower()
+            mixed_sql = str(
+                _catalogue_rows_subquery(
+                    {"ANIME", "MANGA", "MANHWA"}
+                ).select().compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            ).lower()
+
+        for sql, model_name in ((anime_sql, "anime"), (manga_sql, "manga")):
+            with self.subTest(model=model_name):
+                self.assertIn("genre.name = 'action'", sql)
+                self.assertIn("genre.name = 'isekai'", sql)
+                self.assertIn("not (exists", sql)
+                self.assertIn(f"{model_name}.genres_detailed @> array['school']", sql)
+                self.assertIn(
+                    f"not ({model_name}.genres_detailed @> array['harem'])",
+                    sql,
+                )
+                self.assertIn(f"{model_name}.is_adult is false", sql)
+        # The mixed catalogue keeps independent Anime, Manga, and Manhwa
+        # branches so its database predicates remain type-correct.
+        self.assertEqual(mixed_sql.count("genre.name = 'isekai'"), 3)
+        self.assertEqual(mixed_sql.count("not (exists"), 3)
+
+    def test_conflicting_included_and_excluded_genre_returns_no_matches(self):
+        response = self.client.get(
+            "/api/v1/catalogue?content_type=ALL&genre=Action"
+            "&exclude_genre=Action&per_page=2"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["pagination"]["total"], 0)
 
     def test_mixed_page_limits_each_media_branch_before_global_sort(self):
         with app.test_request_context(
