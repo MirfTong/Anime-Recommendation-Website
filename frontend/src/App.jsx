@@ -31,6 +31,7 @@ import {
   rangeSelectionLabel,
   responsiveFilterPanelClasses,
   scoreLabel,
+  serviceFaviconUrl,
   sortOptionsFor,
   streamingServiceBrand,
   streamingServiceEntries,
@@ -177,6 +178,9 @@ function ContentBadge({ contentType }) {
 
 export function ServiceBrandIcon({ name, url = "", brand: explicitBrand }) {
   const brand = explicitBrand ?? streamingServiceBrand(name, url);
+  const faviconUrl = brand === "external" ? serviceFaviconUrl(url) : null;
+  const [faviconFailed, setFaviconFailed] = useState(false);
+  useEffect(() => setFaviconFailed(false), [faviconUrl]);
   const styles = {
     "apple-tv": "bg-black text-white",
     crunchyroll: "bg-[#f47521] text-white",
@@ -185,6 +189,7 @@ export function ServiceBrandIcon({ name, url = "", brand: explicitBrand }) {
     funimation: "bg-[#5b23c8] text-white",
     hidive: "bg-[#00a8e1] text-slate-950",
     hulu: "bg-[#1ce783] text-slate-950",
+    hotstar: "bg-[#072a47] text-white",
     mal: "bg-[#2e51a2] text-white",
     max: "bg-[#002be7] text-white",
     myanimelist: "bg-[#2e51a2] text-white",
@@ -200,6 +205,7 @@ export function ServiceBrandIcon({ name, url = "", brand: explicitBrand }) {
     "disney-plus": "D+",
     hidive: "HD",
     hulu: "hulu",
+    hotstar: "★",
     mal: "MAL",
     max: "max",
     myanimelist: "MAL",
@@ -257,11 +263,28 @@ export function ServiceBrandIcon({ name, url = "", brand: explicitBrand }) {
         {labels[brand]}
       </span>
     );
-  } else {
+  } else if (faviconUrl && !faviconFailed) {
     glyph = (
-      <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
-        <path d="M8 16 16 8M10 8h6v6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
+      <img
+        className="h-full w-full object-contain p-0.5"
+        src={faviconUrl}
+        alt=""
+        referrerPolicy="no-referrer"
+        onError={() => setFaviconFailed(true)}
+      />
+    );
+  } else {
+    const initials = String(name ?? "")
+      .trim()
+      .split(/[\s+/-]+/)
+      .map((part) => part[0] ?? "")
+      .join("")
+      .slice(0, 2)
+      .toLocaleUpperCase() || "?";
+    glyph = (
+      <span className="text-[0.55rem] font-black leading-none" aria-hidden="true">
+        {initials}
+      </span>
     );
   }
   return (

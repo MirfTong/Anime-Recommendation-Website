@@ -23,6 +23,7 @@ import {
   rangeSelectionLabel,
   responsiveFilterPanelClasses,
   safeExternalUrl,
+  serviceFaviconUrl,
   scoreLabel,
   sortOptionsFor,
   streamingServiceBrand,
@@ -577,6 +578,11 @@ test("studio and streaming helpers normalize names and safe external links", () 
     "prime-video",
   );
   assert.equal(streamingServiceBrand("Unknown provider"), "external");
+  assert.equal(
+    serviceFaviconUrl("https://www.bilibili.tv/play/123"),
+    "https://www.bilibili.tv/favicon.ico",
+  );
+  assert.equal(serviceFaviconUrl("javascript:alert(1)"), null);
 });
 
 test("freshness text is omitted for missing data and humanized when present", () => {
