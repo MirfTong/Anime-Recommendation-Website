@@ -79,6 +79,7 @@ test("anime queries send anime filters and omit readable-title filters", () => {
 
   assert.equal(params.get("content_type"), "ANIME");
   assert.equal(params.get("page"), "3");
+  assert.equal(params.get("preview"), "1");
   assert.equal(params.get("type"), "TV");
   assert.equal(params.get("season"), "spring");
   assert.equal(params.get("status"), "CURRENTLY_AIRING");
@@ -172,6 +173,7 @@ test("random catalogue queries preserve compatible active filters", () => {
 
   assert.equal(params.get("content_type"), "ANIME");
   assert.equal(params.get("limit"), "6");
+  assert.equal(params.get("preview"), "1");
   assert.equal(params.get("min_score"), "8");
   assert.equal(params.get("studio"), "Bones");
   assert.equal(params.get("streaming_service"), "Crunchyroll");

@@ -32,6 +32,7 @@ from backend.jobs.jikan_etl import (
     _new_anime,
     _normalized_entity_name,
     _prepared_season_entry,
+    _refresh_and_report_catalogue_facets,
     _report_anime_associations,
     _safe_streaming_url,
     _season,
@@ -41,6 +42,7 @@ from backend.jobs.jikan_etl import (
     _valid_score,
     backfill_missing_seasons,
     backfill_streaming_services,
+    main,
     refresh_catalogue,
     remove_hentai_anime,
     run_scheduled_sync,
@@ -450,8 +452,8 @@ class JikanEtlTests(unittest.TestCase):
             patch("backend.jobs.jikan_etl._ensure_schema"),
             patch("backend.jobs.jikan_etl.db") as mock_db,
         ):
-            # Selected Anime, genres, studios, and streaming services.
-            mock_db.session.scalars.side_effect = [[anime], [], [], []]
+            # Selected Anime and normalized streaming services.
+            mock_db.session.scalars.side_effect = [[anime], []]
             result = backfill_streaming_services(
                 limit=1,
                 fetch_anime=lambda _mal_id: payload,
@@ -465,6 +467,40 @@ class JikanEtlTests(unittest.TestCase):
             anime.streaming_links[0].streaming_service.name,
             "Crunchyroll",
         )
+
+    def test_streaming_backfill_does_not_rewrite_unrelated_metadata(self):
+        anime = anime_record()
+        payload = {
+            "data": {
+                "mal_id": anime.mal_id,
+                "title": "Provider changed title",
+                "score": 9.9,
+                "genres": [{"name": "Drama"}],
+                "studios": [{"mal_id": 1, "name": "Provider Studio"}],
+                "streaming": [
+                    {
+                        "name": "Crunchyroll",
+                        "url": "https://www.crunchyroll.com/watch/example",
+                    }
+                ],
+            }
+        }
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [[anime], []]
+            result = backfill_streaming_services(
+                limit=1,
+                fetch_anime=lambda _mal_id: payload,
+            )
+
+        self.assertEqual(result.updated, 1)
+        self.assertEqual(anime.title, "Example")
+        self.assertEqual(anime.score, 8.0)
+        self.assertIsNone(anime.last_jikan_sync)
+        self.assertEqual(result.associations.studio_payloads_processed, 0)
+        self.assertEqual(result.associations.streaming_links_created, 1)
 
     def test_streaming_backfill_counts_empty_or_sparse_provider_responses(self):
         empty_anime = anime_record()
@@ -484,19 +520,42 @@ class JikanEtlTests(unittest.TestCase):
             mock_db.session.scalars.side_effect = [
                 [empty_anime, sparse_anime],
                 [],
-                [],
-                [],
             ]
             result = backfill_streaming_services(
                 limit=2,
                 fetch_anime=lambda _mal_id: next(responses),
             )
 
-        self.assertEqual(result.updated, 2)
+        self.assertEqual(result.updated, 0)
+        self.assertEqual(result.success_rate, 0.0)
         self.assertEqual(result.empty_streaming_payloads, 1)
         self.assertEqual(result.missing_streaming_payloads, 1)
         self.assertIsNotNone(empty_anime.last_streaming_attempt)
         self.assertIsNotNone(sparse_anime.last_streaming_attempt)
+
+        selection = mock_db.session.scalars.call_args_list[0].args[0]
+        selection_sql = str(selection)
+        self.assertIn("anime.mal_id IS NOT NULL", selection_sql)
+        self.assertIn("anime.mal_id >", selection_sql)
+
+    def test_streaming_backfill_does_not_count_malformed_payload_as_updated(self):
+        anime = anime_record()
+        with (
+            patch("backend.jobs.jikan_etl._ensure_schema"),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [[anime], []]
+            result = backfill_streaming_services(
+                limit=1,
+                fetch_anime=lambda _mal_id: {
+                    "data": {"mal_id": 1, "streaming": {"bad": "shape"}}
+                },
+            )
+
+        self.assertEqual(result.updated, 0)
+        self.assertEqual(result.success_rate, 0.0)
+        self.assertEqual(result.associations.streaming_payloads_processed, 1)
+        self.assertEqual(result.associations.reconciliation_failures, 1)
 
     def test_preserves_existing_detailed_tags_and_adds_jikan_categories(self):
         data = {
@@ -900,6 +959,114 @@ class JikanEtlTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             run_scheduled_sync(streaming_limit=0)
+
+    def test_facet_publication_rebuilds_and_reports_once(self):
+        with (
+            patch(
+                "backend.jobs.jikan_etl.refresh_catalogue_facets",
+                return_value=321,
+            ) as refresh,
+            patch(
+                "backend.jobs.jikan_etl._report_catalogue_facets"
+            ) as report,
+        ):
+            total = _refresh_and_report_catalogue_facets()
+
+        self.assertEqual(total, 321)
+        refresh.assert_called_once_with()
+        report.assert_called_once_with(321)
+
+    def test_every_standalone_cli_path_publishes_facets_once(self):
+        command_lines = (
+            ["jikan_etl"],
+            ["jikan_etl", "--manga-catalogue"],
+            ["jikan_etl", "--refresh-manga"],
+            ["jikan_etl", "--bulk-seasons"],
+            ["jikan_etl", "--backfill-seasons"],
+            ["jikan_etl", "--season", "current"],
+            ["jikan_etl", "--season", "winter", "--year", "2020"],
+        )
+
+        for command_line in command_lines:
+            with self.subTest(command_line=command_line), ExitStack() as stack:
+                stack.enter_context(patch("sys.argv", command_line))
+                stack.enter_context(
+                    patch(
+                        "backend.jobs.jikan_etl.refresh_catalogue",
+                        return_value=CatalogueRefreshResult(),
+                    )
+                )
+                stack.enter_context(
+                    patch(
+                        "backend.jobs.jikan_etl.sync_manga_catalogue",
+                        return_value=MangaCatalogueSyncResult(scans={}),
+                    )
+                )
+                stack.enter_context(
+                    patch(
+                        "backend.jobs.jikan_etl.refresh_manga_catalogue",
+                        return_value=MangaRefreshResult(),
+                    )
+                )
+                stack.enter_context(
+                    patch(
+                        "backend.jobs.jikan_etl.sync_bulk_anime_seasons",
+                        return_value=BulkSeasonSyncResult(),
+                    )
+                )
+                stack.enter_context(
+                    patch(
+                        "backend.jobs.jikan_etl.backfill_missing_seasons",
+                        return_value=SeasonBackfillResult(),
+                    )
+                )
+                stack.enter_context(
+                    patch(
+                        "backend.jobs.jikan_etl.sync_current_season",
+                        return_value=CurrentSeasonSyncResult(),
+                    )
+                )
+                stack.enter_context(
+                    patch(
+                        "backend.jobs.jikan_etl.sync_season",
+                        return_value=(1, 0),
+                    )
+                )
+                for report_name in (
+                    "_report_bulk_seasons",
+                    "_report_catalogue",
+                    "_report_current_season",
+                    "_report_season_backfill",
+                    "report_manga_catalogue",
+                    "report_manga_refresh",
+                ):
+                    stack.enter_context(
+                        patch(f"backend.jobs.jikan_etl.{report_name}")
+                    )
+                stack.enter_context(patch("builtins.print"))
+                publish = stack.enter_context(
+                    patch(
+                        "backend.jobs.jikan_etl."
+                        "_refresh_and_report_catalogue_facets"
+                    )
+                )
+
+                main()
+
+                publish.assert_called_once_with()
+
+    def test_scheduled_cli_does_not_publish_facets_twice(self):
+        with (
+            patch("sys.argv", ["jikan_etl", "--scheduled-sync"]),
+            patch("backend.jobs.jikan_etl.run_scheduled_sync") as scheduled,
+            patch(
+                "backend.jobs.jikan_etl._refresh_and_report_catalogue_facets"
+            ) as standalone_publish,
+        ):
+            main()
+
+        scheduled.assert_called_once()
+        standalone_publish.assert_not_called()
 
     def test_season_sync_reuses_and_forces_listing_data(self):
         anime = SimpleNamespace(mal_id=1)

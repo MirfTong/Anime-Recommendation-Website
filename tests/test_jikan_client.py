@@ -63,6 +63,77 @@ class JikanClientTests(unittest.TestCase):
         self.assertEqual(client.get_anime_full(1), {"data": {"mal_id": 1}})
         self.assertEqual(seen_urls, ["https://api.tenrai.org/v1/anime/1/full"])
 
+    def test_streaming_request_uses_provider_with_streaming_data_directly(self):
+        seen_urls = []
+        clock = FakeClock()
+
+        def opener(request, *, timeout):
+            seen_urls.append(request.full_url)
+            return Response(
+                b'{"data": {"mal_id": 1, "streaming": '
+                b'[{"name": "Crunchyroll", "url": "https://example.test/1"}]}}'
+            )
+
+        client = JikanClient(
+            opener=opener,
+            clock=clock,
+            sleeper=clock.sleep,
+            base_url="https://primary.example/v1",
+            fallback_base_url="https://fallback.example/v4",
+        )
+
+        payload = client.get_anime_streaming(1)
+
+        self.assertEqual(payload["data"]["streaming"][0]["name"], "Crunchyroll")
+        self.assertEqual(
+            seen_urls,
+            ["https://fallback.example/v4/anime/1/full"],
+        )
+
+    def test_streaming_request_allows_a_dedicated_provider_override(self):
+        seen_urls = []
+
+        def opener(request, *, timeout):
+            seen_urls.append(request.full_url)
+            return Response(b'{"data": {"mal_id": 1, "streaming": []}}')
+
+        client = JikanClient(
+            opener=opener,
+            base_url="https://primary.example/v1",
+            fallback_base_url="https://fallback.example/v4",
+            streaming_base_url="https://streaming.example/v4",
+        )
+
+        client.get_anime_streaming(1)
+
+        self.assertEqual(
+            seen_urls,
+            ["https://streaming.example/v4/anime/1/full"],
+        )
+
+    def test_streaming_request_uses_primary_when_no_fallback_is_configured(self):
+        seen_urls = []
+
+        def opener(request, *, timeout):
+            seen_urls.append(request.full_url)
+            return Response(
+                b'{"data": {"mal_id": 1, "streaming": '
+                b'[{"name": "Crunchyroll", "url": "https://example.test/1"}]}}'
+            )
+
+        client = JikanClient(
+            opener=opener,
+            base_url="https://primary.example/v1",
+            fallback_base_url="",
+        )
+
+        client.get_anime_streaming(1)
+
+        self.assertEqual(
+            seen_urls,
+            ["https://primary.example/v1/anime/1/full"],
+        )
+
     def test_fetches_basic_and_full_manga_payloads(self):
         seen_urls = []
         clock = FakeClock()

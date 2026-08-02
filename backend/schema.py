@@ -8,7 +8,7 @@ from sqlalchemy import text
 from backend.models import db
 
 
-CATALOGUE_SCHEMA_VERSION = 3
+CATALOGUE_SCHEMA_VERSION = 4
 CATALOGUE_SCHEMA_LOCK_ID = 5_423_769_101
 CATALOGUE_SCHEMA_VERSION_TABLE = "catalogue_schema_version"
 
@@ -113,6 +113,17 @@ def refresh_catalogue_facets(*, commit: bool = True) -> int:
     )
     total = int(
         db.session.scalar(text("SELECT COUNT(*) FROM catalogue_facet")) or 0
+    )
+    # Web workers use this shared generation timestamp to invalidate their
+    # process-local response caches after an ETL process rebuilds the facets.
+    db.session.execute(
+        text(
+            "INSERT INTO jikan_sync_state "
+            "(key, next_page, last_completed_at) "
+            "VALUES ('catalogue_cache_generation', 1, CURRENT_TIMESTAMP) "
+            "ON CONFLICT (key) DO UPDATE SET "
+            "last_completed_at = EXCLUDED.last_completed_at"
+        )
     )
     if commit:
         db.session.commit()
@@ -329,6 +340,9 @@ def _apply_catalogue_schema_migration(connection) -> None:
         "ON anime (is_adult)",
         "CREATE INDEX IF NOT EXISTS ix_anime_public_score "
         "ON anime (is_adult, score)",
+        "CREATE INDEX IF NOT EXISTS ix_anime_public_top_rated "
+        "ON anime (score DESC NULLS LAST, LOWER(title), title, mal_id, anime_id) "
+        "WHERE is_adult = FALSE",
         "CREATE INDEX IF NOT EXISTS ix_anime_status_score "
         "ON anime (status, score DESC)",
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_studio_normalized_name "
@@ -356,6 +370,9 @@ def _apply_catalogue_schema_migration(connection) -> None:
         "ON manga (is_adult)",
         "CREATE INDEX IF NOT EXISTS ix_manga_content_public_score "
         "ON manga (content_type, is_adult, score)",
+        "CREATE INDEX IF NOT EXISTS ix_manga_public_top_rated "
+        "ON manga (content_type, score DESC NULLS LAST, LOWER(title), title, "
+        "mal_id, manga_id) WHERE is_adult = FALSE",
         "CREATE INDEX IF NOT EXISTS ix_manga_content_status_normalized_score "
         "ON manga (content_type, LOWER(BTRIM(status)), score DESC)",
     ):

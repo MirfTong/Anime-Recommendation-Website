@@ -123,6 +123,7 @@ export function queryString(
     page: String(page),
     per_page: "24",
     sort,
+    preview: "1",
   });
   addFilterParams(params, filters, contentType);
   return params.toString();
@@ -136,6 +137,7 @@ export function randomQueryString(
   const params = new URLSearchParams({
     content_type: contentType,
     limit: String(limit),
+    preview: "1",
   });
   addFilterParams(params, filters, contentType);
   return params.toString();

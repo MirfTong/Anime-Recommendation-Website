@@ -109,7 +109,10 @@ are also provided.
 
 `backend.services.jikan_client` uses Tenrai's Jikan-compatible v1 API as its
 primary provider and public Jikan v4 as a fallback. Override the endpoints with
-`ANIME_API_BASE_URL` and `ANIME_API_FALLBACK_BASE_URL`.
+`ANIME_API_BASE_URL` and `ANIME_API_FALLBACK_BASE_URL`. Streaming enrichment
+uses Jikan directly by default because Tenrai's otherwise valid full responses
+rarely include service links; override that endpoint separately with
+`ANIME_STREAMING_API_BASE_URL`.
 
 Anime and manga calls share one process-wide limiter capped at three requests
 per second and 55 requests per minute. Temporary network failures and 5xx
@@ -144,11 +147,14 @@ unavailable records are still marked attempted and cannot trap the queue.
 
 Studio metadata is available on Anime listing and detail payloads, so the
 shared Anime mapper updates it across seasonal, bulk, supplemental, and detail
-phases. Streaming data comes from the full Anime endpoint. In addition to the
+phases. Streaming data comes from Jikan's full Anime endpoint. In addition to the
 normal detail refresh, each scheduled run checks 2,000 Anime with no saved
 service links through a separate, indexed streaming-attempt queue. This lets
 missing links be retried without waiting for rating and season refresh cycles.
-If a full request falls back to a sparse basic response, missing relationship
+The streaming-only queue reconciles only service relationships and its attempt
+timestamp, avoiding unnecessary genre, studio, rating, and title rewrites.
+If a normal metadata request falls back to a sparse basic response, missing
+relationship
 fields preserve existing data. A valid empty relationship array clears stale
 links, while partially malformed arrays only add or update valid entries and
 do not destructively remove known links. Only HTTP(S) streaming URLs are
