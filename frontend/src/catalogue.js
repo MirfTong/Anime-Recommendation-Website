@@ -556,6 +556,7 @@ export function streamingServiceBrand(name, url = "") {
     ["netflix", ["netflix"]],
     ["hulu", ["hulu"]],
     ["prime-video", ["prime video", "primevideo", "amazon.com/gp/video"]],
+    ["hotstar", ["hotstar"]],
     ["disney-plus", ["disney+", "disney plus", "disneyplus"]],
     ["hidive", ["hidive"]],
     ["funimation", ["funimation"]],
@@ -569,6 +570,13 @@ export function streamingServiceBrand(name, url = "") {
   return brands.find(([, aliases]) => (
     aliases.some((alias) => identity.includes(alias))
   ))?.[0] ?? "external";
+}
+
+export function serviceFaviconUrl(url) {
+  const safeUrl = safeExternalUrl(url);
+  if (!safeUrl) return null;
+  const parsed = new URL(safeUrl);
+  return `${parsed.origin}/favicon.ico`;
 }
 
 export function validatedPage(value, totalPages) {

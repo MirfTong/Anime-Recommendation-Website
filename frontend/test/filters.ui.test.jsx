@@ -194,14 +194,21 @@ describe("rendered filter controls", () => {
         <ServiceBrandIcon name="Netflix" />
         <ServiceBrandIcon name="Crunchyroll" />
         <ServiceBrandIcon name="MyAnimeList" brand="mal" />
-        <ServiceBrandIcon name="Unknown provider" />
+        <ServiceBrandIcon
+          name="Bilibili Global"
+          url="https://www.bilibili.tv/play/123"
+        />
       </div>,
     );
 
     expect(container.querySelector('[data-service-brand="netflix"]')).not.toBeNull();
     expect(container.querySelector('[data-service-brand="crunchyroll"]')).not.toBeNull();
     expect(container.querySelector('[data-service-brand="mal"]')).not.toBeNull();
-    expect(container.querySelector('[data-service-brand="external"]')).not.toBeNull();
+    const providerIcon = container.querySelector('[data-service-brand="external"]');
+    const favicon = providerIcon.querySelector("img");
+    expect(favicon).toHaveAttribute("src", "https://www.bilibili.tv/favicon.ico");
+    fireEvent.error(favicon);
+    expect(providerIcon).toHaveTextContent("BG");
   });
 
   test("the entire dual-slider track accepts pointer input", () => {
