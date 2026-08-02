@@ -85,6 +85,7 @@ class JikanClient:
         transient_retry_budget: int = MAX_TRANSIENT_RETRY_BUDGET,
         base_url: str | None = None,
         fallback_base_url: str | None = None,
+        streaming_base_url: str | None = None,
     ) -> None:
         if transient_retry_budget < 0:
             raise ValueError("transient_retry_budget cannot be negative")
@@ -111,6 +112,17 @@ class JikanClient:
         )
         if self._fallback_base_url == self._base_url:
             self._fallback_base_url = None
+        configured_streaming_url = (
+            streaming_base_url
+            if streaming_base_url is not None
+            else os.getenv(
+                "ANIME_STREAMING_API_BASE_URL",
+                self._fallback_base_url or self._base_url,
+            )
+        )
+        self._streaming_base_url = self._normalize_base_url(
+            configured_streaming_url, required=True
+        )
         self._lock = threading.Lock()
 
     def get_anime_full(self, mal_id: int) -> dict[str, Any]:
@@ -129,6 +141,22 @@ class JikanClient:
             ):
                 raise
             return self.get_anime(mal_id)
+
+    def get_anime_streaming(self, mal_id: int) -> dict[str, Any]:
+        """Fetch streaming metadata directly from its configured provider.
+
+        Bulk catalogue traffic prefers Tenrai, but production measurements
+        showed its full responses almost never contain streaming links. The
+        streaming queue therefore uses Jikan (the default fallback) directly,
+        avoiding a guaranteed no-op request before every useful request.
+        """
+        self._validate_mal_id(mal_id)
+        return self._get_from_base(
+            self._streaming_base_url,
+            f"/anime/{mal_id}/full",
+            max_transient_retries=MAX_ANIME_TRANSIENT_RETRIES,
+            retry_network_errors=True,
+        )
 
     def get_anime(self, mal_id: int) -> dict[str, Any]:
         """Return basic anime data with one bounded 5xx/network retry."""
@@ -550,6 +578,11 @@ def get_anime(mal_id: int) -> dict[str, Any]:
 def get_anime_full(mal_id: int) -> dict[str, Any]:
     """Return the parsed Jikan v4 full-anime payload for a MAL ID."""
     return _default_client.get_anime_full(mal_id)
+
+
+def get_anime_streaming(mal_id: int) -> dict[str, Any]:
+    """Return a full payload enriched with fallback streaming metadata."""
+    return _default_client.get_anime_streaming(mal_id)
 
 
 def get_manga(mal_id: int) -> dict[str, Any]:

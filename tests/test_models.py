@@ -224,6 +224,15 @@ class MangaSchemaTests(unittest.TestCase):
             {index.name for index in Manga.__table__.indexes},
         )
 
+    def test_top_rated_indexes_are_applied_by_versioned_migration(self):
+        schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("CATALOGUE_SCHEMA_VERSION = 4", schema_source)
+        self.assertIn("ix_anime_public_top_rated", schema_source)
+        self.assertIn("ix_manga_public_top_rated", schema_source)
+        self.assertIn("score DESC NULLS LAST", schema_source)
+        self.assertIn("WHERE is_adult = FALSE", schema_source)
+
     def test_catalogue_facets_have_a_composite_lookup_key(self):
         self.assertEqual(
             {
@@ -235,6 +244,7 @@ class MangaSchemaTests(unittest.TestCase):
         schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
         self.assertIn("refresh_catalogue_facets", schema_source)
         self.assertIn("INSERT INTO catalogue_facet", schema_source)
+        self.assertIn("catalogue_cache_generation", schema_source)
 
     def test_catalogue_facets_support_relationship_options(self):
         facet_checks = [

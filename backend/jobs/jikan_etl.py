@@ -48,6 +48,7 @@ from backend.services.jikan_client import (
     get_anime,
     get_anime_catalogue_page,
     get_anime_full,
+    get_anime_streaming,
     get_season_anime,
     get_season_page,
 )
@@ -405,6 +406,19 @@ def _association_caches() -> AnimeAssociationCaches:
             for studio in studios
             if studio.mal_id is not None
         },
+        streaming_services_by_name={
+            service.normalized_name: service
+            for service in streaming_services
+        },
+    )
+
+
+def _streaming_association_caches() -> AnimeAssociationCaches:
+    """Load only the normalized entities needed by streaming enrichment."""
+    streaming_services = list(db.session.scalars(select(StreamingService)))
+    return AnimeAssociationCaches(
+        studios_by_name={},
+        studios_by_mal_id={},
         streaming_services_by_name={
             service.normalized_name: service
             for service in streaming_services
@@ -1041,7 +1055,7 @@ def backfill_streaming_services(
     *,
     limit: int = DEFAULT_STREAMING_BACKFILL_LIMIT,
     batch_size: int = 25,
-    fetch_anime: Callable[[int], dict[str, Any]] = get_anime_full,
+    fetch_anime: Callable[[int], dict[str, Any]] = get_anime_streaming,
 ) -> StreamingBackfillResult:
     """Retry Anime with no saved streaming links on an independent queue.
 
@@ -1062,9 +1076,15 @@ def backfill_streaming_services(
                 select(Anime)
                 .where(
                     Anime.is_adult.is_(False),
+                    Anime.mal_id.is_not(None),
+                    Anime.mal_id > 0,
                     ~Anime.streaming_links.any(),
                 )
-                .options(*_anime_etl_load_options())
+                .options(
+                    selectinload(Anime.streaming_links).selectinload(
+                        AnimeStreamingService.streaming_service
+                    )
+                )
                 .order_by(
                     Anime.last_streaming_attempt.asc().nulls_first(),
                     Anime.animeID,
@@ -1072,7 +1092,6 @@ def backfill_streaming_services(
                 .limit(limit)
             )
         )
-        genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
         association_caches = None
         result = StreamingBackfillResult(selected=len(anime_rows))
 
@@ -1088,14 +1107,24 @@ def backfill_streaming_services(
                         result.missing_streaming_payloads += 1
                     elif fetched.data.get("streaming") == []:
                         result.empty_streaming_payloads += 1
-                    association_caches = _update_anime_with_associations(
-                        anime,
-                        fetched.data,
-                        genres,
-                        association_caches,
-                        result.associations,
-                    )
-                    result.updated += 1
+                    if "streaming" in fetched.data:
+                        association_caches = (
+                            association_caches or _streaming_association_caches()
+                        )
+                        updated_before = (
+                            result.associations.anime_with_streaming_updated
+                        )
+                        _reconcile_streaming_services(
+                            anime,
+                            fetched.data.get("streaming"),
+                            association_caches,
+                            result.associations,
+                        )
+                        if (
+                            result.associations.anime_with_streaming_updated
+                            > updated_before
+                        ):
+                            result.updated += 1
             elif fetched.failure == "not_found":
                 result.not_found += 1
             elif fetched.failure == "temporary":
@@ -1785,7 +1814,7 @@ def _report_catalogue(result: CatalogueRefreshResult) -> None:
 def _report_streaming_backfill(result: StreamingBackfillResult) -> None:
     print(
         "Streaming service backfill: "
-        f"selected={result.selected}, updated={result.updated}, "
+        f"selected={result.selected}, relationships_updated={result.updated}, "
         f"removed_hentai={result.removed_hentai}, "
         f"missing_streaming_payloads={result.missing_streaming_payloads}, "
         f"empty_streaming_payloads={result.empty_streaming_payloads}, "
@@ -1798,7 +1827,7 @@ def _report_streaming_backfill(result: StreamingBackfillResult) -> None:
         "Streaming-service backfill",
         [
             ("Anime selected without saved services", result.selected),
-            ("Anime refreshed", result.updated),
+            ("Anime with streaming relationships updated", result.updated),
             ("Hentai records removed", result.removed_hentai),
             ("Responses missing the streaming field", result.missing_streaming_payloads),
             ("Explicitly empty streaming responses", result.empty_streaming_payloads),
@@ -1913,6 +1942,14 @@ def _report_catalogue_facets(total: int) -> None:
     )
 
 
+def _refresh_and_report_catalogue_facets() -> int:
+    """Publish fresh filter options and one cross-process cache generation."""
+    with app.app_context():
+        facet_count = refresh_catalogue_facets()
+    _report_catalogue_facets(facet_count)
+    return facet_count
+
+
 def _report_season_coverage(coverage: SeasonCoverage) -> None:
     print(
         "TV season coverage: "
@@ -2005,9 +2042,7 @@ def run_scheduled_sync(
         association_stats.add(phase_stats)
     _report_anime_associations(association_stats)
 
-    with app.app_context():
-        facet_count = refresh_catalogue_facets()
-    _report_catalogue_facets(facet_count)
+    _refresh_and_report_catalogue_facets()
 
     coverage = get_season_coverage()
     _report_season_coverage(coverage)
@@ -2121,6 +2156,8 @@ def main() -> None:
             batch_size=args.batch_size,
             page_limit=page_limit,
         )
+        # The scheduled orchestrator already refreshes facets after all phases.
+        return
     elif args.manga_catalogue:
         if (
             args.bulk_seasons
@@ -2191,6 +2228,11 @@ def main() -> None:
             args.anime_id, limit=args.limit, batch_size=args.batch_size
         )
         _report_catalogue(result)
+
+    # Every standalone mutation follows this one successful completion path,
+    # so facet options and process-local web caches cannot remain stale until
+    # the next scheduled workflow.
+    _refresh_and_report_catalogue_facets()
 
 
 if __name__ == "__main__":

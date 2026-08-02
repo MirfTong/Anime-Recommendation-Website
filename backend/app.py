@@ -7,6 +7,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from random import randrange
 from threading import Lock
 from time import monotonic
 from typing import Any
@@ -14,7 +15,8 @@ from typing import Any
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 from sqlalchemy import func, literal, or_, select, union_all
-from sqlalchemy.orm import selectinload
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import lazyload, load_only, noload, selectinload
 
 from backend.models import (
     Anime,
@@ -22,6 +24,7 @@ from backend.models import (
     Author,
     CatalogueFacet,
     Genre,
+    JikanSyncState,
     Manga,
     MangaAuthor,
     StreamingService,
@@ -66,14 +69,32 @@ CONTENT_TYPE_SCOPES = {
     "ALL": frozenset({"ANIME", "MANGA", "MANHWA"}),
 }
 CACHE_TTL_SECONDS = 300
+MAX_CACHE_ENTRIES = 512
+CACHE_GENERATION_POLL_SECONDS = 15
+MULTI_VALUE_FILTERS = frozenset(
+    {
+        "author",
+        "genre",
+        "season",
+        "status",
+        "streaming_service",
+        "studio",
+        "tag",
+        "type",
+    }
+)
+CASE_INSENSITIVE_MULTI_FILTERS = MULTI_VALUE_FILTERS.difference(
+    {"genre", "tag"}
+)
 
 
 class TtlCache:
     """Small process-local cache for repeatable catalogue metadata queries."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_entries: int = MAX_CACHE_ENTRIES) -> None:
         self._values: dict[tuple[Any, ...], tuple[float, Any]] = {}
         self._lock = Lock()
+        self._max_entries = max(1, max_entries)
 
     def get_or_create(self, key: tuple[Any, ...], factory):
         now = monotonic()
@@ -84,6 +105,19 @@ class TtlCache:
 
         value = factory()
         with self._lock:
+            expired = [
+                existing_key
+                for existing_key, (expires_at, _) in self._values.items()
+                if expires_at <= now
+            ]
+            for existing_key in expired:
+                self._values.pop(existing_key, None)
+            while len(self._values) >= self._max_entries:
+                oldest_key = min(
+                    self._values,
+                    key=lambda existing_key: self._values[existing_key][0],
+                )
+                self._values.pop(oldest_key, None)
             self._values[key] = (now + CACHE_TTL_SECONDS, value)
         return value
 
@@ -93,6 +127,50 @@ class TtlCache:
 
 
 response_cache = TtlCache()
+
+
+class CacheGenerationMonitor:
+    """Invalidate local caches when a separate ETL process publishes data."""
+
+    def __init__(self) -> None:
+        self._generation: str | None = None
+        self._initialized = False
+        self._next_check = 0.0
+        self._lock = Lock()
+
+    def refresh_if_needed(self) -> None:
+        now = monotonic()
+        with self._lock:
+            if now < self._next_check:
+                return
+            self._next_check = now + CACHE_GENERATION_POLL_SECONDS
+
+        try:
+            generation = db.session.scalar(
+                select(JikanSyncState.last_completed_at).where(
+                    JikanSyncState.key == "catalogue_cache_generation"
+                )
+            )
+        except SQLAlchemyError:
+            db.session.rollback()
+            return
+        token = generation.isoformat() if generation is not None else None
+        with self._lock:
+            previous = self._generation
+            initialized = self._initialized
+            self._generation = token
+            self._initialized = True
+        if initialized and token != previous:
+            response_cache.clear()
+
+
+cache_generation_monitor = CacheGenerationMonitor()
+
+
+@app.before_request
+def invalidate_stale_catalogue_cache() -> None:
+    if request.method == "GET" and request.path.startswith(API_PREFIX):
+        cache_generation_monitor.refresh_if_needed()
 
 
 @dataclass(frozen=True)
@@ -212,17 +290,42 @@ def _list_argument(name: str) -> list[str]:
     return list(dict.fromkeys(values))
 
 
+def _preview_requested() -> bool:
+    """Return whether the card client requested a compact list payload."""
+    return request.args.get("preview", "").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def _request_filter_signature(*, exclude: set[str]) -> tuple[Any, ...]:
-    return tuple(
-        sorted(
-            (
-                key,
-                tuple(request.args.getlist(key)),
+    signature = []
+    for key in request.args:
+        if key in exclude:
+            continue
+        if key in MULTI_VALUE_FILTERS:
+            values = tuple(
+                sorted(
+                    {
+                        (
+                            value.strip().casefold()
+                            if key in CASE_INSENSITIVE_MULTI_FILTERS
+                            else value.strip()
+                        )
+                        for raw_value in request.args.getlist(key)
+                        for value in raw_value.split(",")
+                        if value.strip()
+                    }
+                )
             )
-            for key in request.args
-            if key not in exclude
-        )
-    )
+        else:
+            values = tuple(
+                value.strip().casefold() if key == "q" else value.strip()
+                for value in request.args.getlist(key)
+            )
+        signature.append((key, values))
+    return tuple(sorted(signature))
 
 
 def _cached_scalar_count(key: tuple[Any, ...], statement) -> int:
@@ -413,31 +516,42 @@ def _manga_filter_values(*, include_status: bool = True) -> MangaFilters:
     )
 
 
-def _serialize_anime(anime: Anime, *, detailed: bool = False) -> dict[str, Any]:
+def _serialize_anime(
+    anime: Anime,
+    *,
+    detailed: bool = False,
+    preview: bool = False,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": anime.animeID,
         "mal_id": anime.mal_id,
         "content_type": "ANIME",
         "title": anime.title,
-        "alternative_title": anime.alternative_title,
         "type": anime.type,
         "season": anime.season,
-        "status": anime.status,
         "year": anime.year,
         "score": anime.score,
         "episodes": anime.episodes,
         "image_url": anime.image_url,
-        "mal_url": anime.mal_url,
-        "sequel": anime.sequel,
         "genres": [genre.name for genre in anime.genre_entries],
-        "studios": [
+    }
+    if detailed or not preview:
+        payload.update(
+            {
+                "alternative_title": anime.alternative_title,
+                "status": anime.status,
+                "mal_url": anime.mal_url,
+                "sequel": anime.sequel,
+            }
+        )
+        payload["studios"] = [
             {"mal_id": studio.mal_id, "name": studio.name}
             for studio in sorted(
                 anime.studio_entries,
                 key=lambda entry: entry.name.casefold(),
             )
-        ],
-        "streaming_services": [
+        ]
+        payload["streaming_services"] = [
             {
                 "name": link.streaming_service.name,
                 "url": link.url,
@@ -446,8 +560,7 @@ def _serialize_anime(anime: Anime, *, detailed: bool = False) -> dict[str, Any]:
                 anime.streaming_links,
                 key=lambda entry: entry.streaming_service.name.casefold(),
             )
-        ],
-    }
+        ]
     if detailed:
         payload["synopsis"] = anime.synopsis
         payload["genres_detailed"] = anime.genres_detailed
@@ -457,25 +570,36 @@ def _serialize_anime(anime: Anime, *, detailed: bool = False) -> dict[str, Any]:
     return payload
 
 
-def _serialize_manga(manga: Manga, *, detailed: bool = False) -> dict[str, Any]:
+def _serialize_manga(
+    manga: Manga,
+    *,
+    detailed: bool = False,
+    preview: bool = False,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": manga.mangaID,
         "mal_id": manga.mal_id,
         "content_type": manga.content_type,
         "title": manga.title,
-        "alternative_title": manga.alternative_title,
         "type": manga.manga_type,
         "manga_type": manga.manga_type,
-        "status": manga.status,
         "year": manga.publication_year,
         "publication_year": manga.publication_year,
         "score": manga.score,
         "chapters": manga.chapters,
         "volumes": manga.volumes,
         "image_url": manga.image_url,
-        "mal_url": manga.mal_url,
         "genres": [genre.name for genre in manga.genre_entries],
-        "authors": [
+    }
+    if detailed or not preview:
+        payload.update(
+            {
+                "alternative_title": manga.alternative_title,
+                "status": manga.status,
+                "mal_url": manga.mal_url,
+            }
+        )
+        payload["authors"] = [
             {
                 "mal_id": link.author.mal_id,
                 "name": link.author.name,
@@ -488,8 +612,7 @@ def _serialize_manga(manga: Manga, *, detailed: bool = False) -> dict[str, Any]:
                     entry.role or "",
                 ),
             )
-        ],
-    }
+        ]
     if detailed:
         payload["synopsis"] = manga.synopsis
         payload["genres_detailed"] = manga.genres_detailed or []
@@ -499,37 +622,98 @@ def _serialize_manga(manga: Manga, *, detailed: bool = False) -> dict[str, Any]:
     return payload
 
 
-def _public_statement(model):
+def _public_statement(model, *, preview: bool = False, detailed: bool = False):
     """Return the indexed, ETL-maintained public catalogue query."""
     statement = (
         select(model)
         .where(model.is_adult.is_(False))
-        .options(selectinload(model.genre_entries))
+        .options(lazyload("*"), selectinload(model.genre_entries))
     )
+    if not detailed:
+        if model is Anime:
+            anime_columns = [
+                Anime.animeID,
+                Anime.mal_id,
+                Anime.title,
+                Anime.type,
+                Anime.season,
+                Anime.year,
+                Anime.score,
+                Anime.episodes,
+                Anime.image_url,
+            ]
+            if not preview:
+                anime_columns.extend(
+                    [
+                        Anime.alternative_title,
+                        Anime.status,
+                        Anime.mal_url,
+                        Anime.sequel,
+                    ]
+                )
+            statement = statement.options(load_only(*anime_columns))
+        elif model is Manga:
+            manga_columns = [
+                Manga.mangaID,
+                Manga.mal_id,
+                Manga.content_type,
+                Manga.title,
+                Manga.manga_type,
+                Manga.publication_year,
+                Manga.score,
+                Manga.chapters,
+                Manga.volumes,
+                Manga.image_url,
+            ]
+            if not preview:
+                manga_columns.extend(
+                    [
+                        Manga.alternative_title,
+                        Manga.status,
+                        Manga.mal_url,
+                    ]
+                )
+            statement = statement.options(load_only(*manga_columns))
     if model is Anime:
-        statement = statement.options(
-            selectinload(Anime.studio_entries),
-            selectinload(Anime.streaming_links).selectinload(
-                AnimeStreamingService.streaming_service
-            ),
-        )
+        if preview:
+            statement = statement.options(
+                noload(Anime.studio_entries),
+                noload(Anime.streaming_links),
+            )
+        else:
+            statement = statement.options(
+                selectinload(Anime.studio_entries),
+                selectinload(Anime.streaming_links).selectinload(
+                    AnimeStreamingService.streaming_service
+                ),
+            )
     elif model is Manga:
-        statement = statement.options(
-            selectinload(Manga.author_links).selectinload(MangaAuthor.author)
-        )
+        if preview:
+            statement = statement.options(noload(Manga.author_links))
+        else:
+            statement = statement.options(
+                selectinload(Manga.author_links).selectinload(
+                    MangaAuthor.author
+                )
+            )
     return statement
 
 
-def _anime_statement():
+def _anime_statement(*, preview: bool = False, detailed: bool = False):
     """Base public anime query."""
-    return _public_statement(Anime)
+    return _public_statement(Anime, preview=preview, detailed=detailed)
 
 
 def _manga_statement(
     content_types: frozenset[str] | set[str] | None = None,
+    *,
+    preview: bool = False,
+    detailed: bool = False,
 ):
     """Base public Manga/Manhwa query."""
-    statement = _public_statement(Manga)
+    statement = _public_statement(
+        Manga, preview=preview, detailed=detailed
+    )
     if content_types is not None:
         statement = statement.where(
             Manga.content_type.in_(sorted(content_types))
@@ -569,11 +753,13 @@ def _apply_common_filters(
 def _filtered_anime_statement(
     common_filters: CommonFilters | None = None,
     anime_filters: AnimeFilters | None = None,
+    *,
+    preview: bool = False,
 ):
     common_filters = common_filters or _common_filter_values()
     anime_filters = anime_filters or _anime_filter_values()
     statement = _apply_common_filters(
-        _anime_statement(), Anime, Anime.year, common_filters
+        _anime_statement(preview=preview), Anime, Anime.year, common_filters
     )
     if anime_filters.min_episodes is not None:
         statement = statement.where(
@@ -614,11 +800,13 @@ def _filtered_manga_statement(
     content_types: frozenset[str] | set[str],
     common_filters: CommonFilters | None = None,
     manga_filters: MangaFilters | None = None,
+    *,
+    preview: bool = False,
 ):
     common_filters = common_filters or _common_filter_values()
     manga_filters = manga_filters or _manga_filter_values()
     statement = _apply_common_filters(
-        _manga_statement(content_types),
+        _manga_statement(content_types, preview=preview),
         Manga,
         Manga.publication_year,
         common_filters,
@@ -658,6 +846,9 @@ def _filtered_manga_statement(
 
 def _catalogue_rows_subquery(
     content_types: frozenset[str] | set[str],
+    *,
+    branch_limit: int | None = None,
+    sort: str = "top_rated",
 ):
     """Build one normalized identity stream for deterministic mixed paging."""
     common_filters = _common_filter_values()
@@ -683,58 +874,70 @@ def _catalogue_rows_subquery(
 
     branches = []
     if "ANIME" in effective_types:
-        anime_rows = (
-            _filtered_anime_statement(common_filters, anime_filters)
-            .order_by(None)
-            .subquery("filtered_anime")
-        )
         branches.append(
-            select(
-                literal("ANIME").label("content_type"),
-                anime_rows.c.anime_id.label("record_id"),
-                anime_rows.c.mal_id.label("mal_id"),
-                anime_rows.c.score.label("score"),
-                anime_rows.c.title.label("title"),
-                anime_rows.c.year.label("year"),
-                anime_rows.c.episodes.label("length"),
+            _filtered_anime_statement(
+                common_filters, anime_filters, preview=True
             )
+            .with_only_columns(
+                literal("ANIME").label("content_type"),
+                Anime.animeID.label("record_id"),
+                Anime.mal_id.label("mal_id"),
+                Anime.score.label("score"),
+                Anime.title.label("title"),
+                Anime.year.label("year"),
+                Anime.episodes.label("length"),
+            )
+            .order_by(None)
         )
 
-    manga_content_types = effective_types.intersection({"MANGA", "MANHWA"})
-    if manga_content_types:
-        manga_rows = (
+    manga_content_types = sorted(
+        effective_types.intersection({"MANGA", "MANHWA"})
+    )
+    for manga_content_type in manga_content_types:
+        branches.append(
             _filtered_manga_statement(
-                manga_content_types, common_filters, manga_filters
+                {manga_content_type},
+                common_filters,
+                manga_filters,
+                preview=True,
+            )
+            .with_only_columns(
+                literal(manga_content_type).label("content_type"),
+                Manga.mangaID.label("record_id"),
+                Manga.mal_id.label("mal_id"),
+                Manga.score.label("score"),
+                Manga.title.label("title"),
+                Manga.publication_year.label("year"),
+                Manga.chapters.label("length"),
             )
             .order_by(None)
-            .subquery("filtered_manga")
-        )
-        branches.append(
-            select(
-                manga_rows.c.content_type.label("content_type"),
-                manga_rows.c.manga_id.label("record_id"),
-                manga_rows.c.mal_id.label("mal_id"),
-                manga_rows.c.score.label("score"),
-                manga_rows.c.title.label("title"),
-                manga_rows.c.publication_year.label("year"),
-                manga_rows.c.chapters.label("length"),
-            )
         )
 
     if not branches:
         return None
+    if branch_limit is not None and len(branches) > 1:
+        limited_branches = []
+        for index, branch in enumerate(branches):
+            branch_rows = branch.subquery(f"catalogue_branch_{index}")
+            limited_branches.append(
+                select(
+                    branch_rows.c.content_type,
+                    branch_rows.c.record_id,
+                    branch_rows.c.mal_id,
+                    branch_rows.c.score,
+                    branch_rows.c.title,
+                    branch_rows.c.year,
+                    branch_rows.c.length,
+                )
+                .order_by(*_catalogue_order_clauses(branch_rows, sort))
+                .limit(branch_limit)
+            )
+        branches = limited_branches
     combined = branches[0] if len(branches) == 1 else union_all(*branches)
     return combined.subquery("catalogue_rows")
 
 
-def _ordered_catalogue_rows(catalogue_rows, sort: str):
-    statement = select(
-        catalogue_rows.c.content_type,
-        catalogue_rows.c.record_id,
-        catalogue_rows.c.mal_id,
-        catalogue_rows.c.score,
-        catalogue_rows.c.title,
-    )
+def _catalogue_order_clauses(catalogue_rows, sort: str):
     score_order = catalogue_rows.c.score.desc().nullslast()
     title_order = (
         func.lower(catalogue_rows.c.title),
@@ -762,12 +965,23 @@ def _ordered_catalogue_rows(catalogue_rows, sort: str):
         )
     else:
         primary_order = (score_order, *title_order)
-    return statement.order_by(
+    return (
         *primary_order,
         catalogue_rows.c.content_type,
         catalogue_rows.c.mal_id.nulls_last(),
         catalogue_rows.c.record_id,
     )
+
+
+def _ordered_catalogue_rows(catalogue_rows, sort: str):
+    statement = select(
+        catalogue_rows.c.content_type,
+        catalogue_rows.c.record_id,
+        catalogue_rows.c.mal_id,
+        catalogue_rows.c.score,
+        catalogue_rows.c.title,
+    )
+    return statement.order_by(*_catalogue_order_clauses(catalogue_rows, sort))
 
 
 def _catalogue_freshness(
@@ -819,7 +1033,11 @@ def _catalogue_freshness(
     )
 
 
-def _serialize_catalogue_rows(rows) -> list[dict[str, Any]]:
+def _serialize_catalogue_rows(
+    rows,
+    *,
+    preview: bool = False,
+) -> list[dict[str, Any]]:
     """Hydrate normalized identity rows without losing their global order."""
     anime_ids = [
         row.record_id for row in rows if row.content_type == "ANIME"
@@ -831,14 +1049,18 @@ def _serialize_catalogue_rows(rows) -> list[dict[str, Any]]:
 
     if anime_ids:
         anime = db.session.scalars(
-            _anime_statement().where(Anime.animeID.in_(anime_ids))
+            _anime_statement(preview=preview).where(
+                Anime.animeID.in_(anime_ids)
+            )
         ).all()
         entries_by_key.update(
             {("ANIME", entry.animeID): entry for entry in anime}
         )
     if manga_ids:
         manga = db.session.scalars(
-            _manga_statement().where(Manga.mangaID.in_(manga_ids))
+            _manga_statement(preview=preview).where(
+                Manga.mangaID.in_(manga_ids)
+            )
         ).all()
         entries_by_key.update(
             {
@@ -851,9 +1073,9 @@ def _serialize_catalogue_rows(rows) -> list[dict[str, Any]]:
     for row in rows:
         entry = entries_by_key.get((row.content_type, row.record_id))
         if isinstance(entry, Anime):
-            items.append(_serialize_anime(entry))
+            items.append(_serialize_anime(entry, preview=preview))
         elif isinstance(entry, Manga):
-            items.append(_serialize_manga(entry))
+            items.append(_serialize_manga(entry, preview=preview))
     return items
 
 
@@ -887,6 +1109,7 @@ def _list_catalogue(content_types: frozenset[str] | set[str]):
         or 24
     )
     sort = _sort_argument(content_types)
+    preview = _preview_requested()
     catalogue_rows = _catalogue_rows_subquery(content_types)
     if catalogue_rows is None:
         total = 0
@@ -896,19 +1119,31 @@ def _list_catalogue(content_types: frozenset[str] | set[str]):
             "catalogue-total",
             tuple(sorted(content_types)),
             _request_filter_signature(
-                exclude={"content_type", "page", "per_page", "sort"}
+                exclude={
+                    "content_type",
+                    "limit",
+                    "page",
+                    "per_page",
+                    "preview",
+                    "sort",
+                }
             ),
         )
         total = _cached_scalar_count(
             count_key,
             select(func.count()).select_from(catalogue_rows),
         )
+        page_rows = _catalogue_rows_subquery(
+            content_types,
+            branch_limit=page * per_page,
+            sort=sort,
+        )
         rows = db.session.execute(
-            _ordered_catalogue_rows(catalogue_rows, sort)
+            _ordered_catalogue_rows(page_rows, sort)
             .offset((page - 1) * per_page)
             .limit(per_page)
         ).all()
-        items = _serialize_catalogue_rows(rows)
+        items = _serialize_catalogue_rows(rows, preview=preview)
     return jsonify(
         {
             "items": items,
@@ -923,12 +1158,97 @@ def _list_catalogue(content_types: frozenset[str] | set[str]):
     )
 
 
-def _random_catalogue(content_types: frozenset[str] | set[str]):
-    limit = _integer_argument("limit", minimum=1, maximum=12) or 6
-    catalogue_rows = _catalogue_rows_subquery(content_types)
-    if catalogue_rows is None:
-        return jsonify({"items": []})
-    rows = db.session.execute(
+def _sampled_random_statement(
+    content_types: frozenset[str] | set[str],
+    limit: int,
+):
+    """Randomize only a small PostgreSQL physical sample, not whole tables."""
+    branches = []
+    if "ANIME" in content_types:
+        sampled_anime = Anime.__table__.tablesample(
+            func.system(2), name="sampled_anime"
+        )
+        branches.append(
+            select(
+                literal("ANIME").label("content_type"),
+                sampled_anime.c.anime_id.label("record_id"),
+                sampled_anime.c.mal_id.label("mal_id"),
+                sampled_anime.c.score.label("score"),
+                sampled_anime.c.title.label("title"),
+            ).where(sampled_anime.c.is_adult.is_(False))
+        )
+    print_types = set(content_types).intersection({"MANGA", "MANHWA"})
+    if print_types:
+        sampled_manga = Manga.__table__.tablesample(
+            func.system(2), name="sampled_manga"
+        )
+        branches.append(
+            select(
+                sampled_manga.c.content_type.label("content_type"),
+                sampled_manga.c.manga_id.label("record_id"),
+                sampled_manga.c.mal_id.label("mal_id"),
+                sampled_manga.c.score.label("score"),
+                sampled_manga.c.title.label("title"),
+            ).where(
+                sampled_manga.c.is_adult.is_(False),
+                sampled_manga.c.content_type.in_(sorted(print_types)),
+            )
+        )
+    if not branches:
+        return None
+    sample = (
+        branches[0] if len(branches) == 1 else union_all(*branches)
+    ).subquery("sampled_catalogue")
+    return (
+        select(
+            sample.c.content_type,
+            sample.c.record_id,
+            sample.c.mal_id,
+            sample.c.score,
+            sample.c.title,
+        )
+        .order_by(func.random())
+        .limit(limit)
+    )
+
+
+def _sampled_random_rows(
+    content_types: frozenset[str] | set[str],
+    limit: int,
+):
+    statement = _sampled_random_statement(content_types, limit)
+    if statement is None:
+        return []
+    return db.session.execute(statement).all()
+
+
+def _random_id_bounds(catalogue_rows) -> tuple[int, int] | None:
+    """Return stable candidate bounds for indexed filtered random seeking."""
+    minimum, maximum = db.session.execute(
+        select(
+            func.min(catalogue_rows.c.record_id),
+            func.max(catalogue_rows.c.record_id),
+        ).select_from(catalogue_rows)
+    ).one()
+    if minimum is None or maximum is None:
+        return None
+    return int(minimum), int(maximum)
+
+
+def _random_window_statement(
+    catalogue_rows,
+    *,
+    pivot: int,
+    limit: int,
+    wrap: bool = False,
+):
+    """Seek from a random primary-key pivot without a full random sort."""
+    predicate = (
+        catalogue_rows.c.record_id < pivot
+        if wrap
+        else catalogue_rows.c.record_id >= pivot
+    )
+    return (
         select(
             catalogue_rows.c.content_type,
             catalogue_rows.c.record_id,
@@ -936,10 +1256,77 @@ def _random_catalogue(content_types: frozenset[str] | set[str]):
             catalogue_rows.c.score,
             catalogue_rows.c.title,
         )
-        .order_by(func.random())
+        .where(predicate)
+        .order_by(
+            catalogue_rows.c.record_id,
+            catalogue_rows.c.content_type,
+        )
         .limit(limit)
+    )
+
+
+def _random_catalogue(content_types: frozenset[str] | set[str]):
+    limit = _integer_argument("limit", minimum=1, maximum=12) or 6
+    preview = _preview_requested()
+    catalogue_rows = _catalogue_rows_subquery(content_types)
+    if catalogue_rows is None:
+        return jsonify({"items": []})
+    filter_signature = _request_filter_signature(
+        exclude={
+            "content_type",
+            "limit",
+            "page",
+            "per_page",
+            "preview",
+            "sort",
+        }
+    )
+    rows = []
+    if not filter_signature and db.engine.dialect.name == "postgresql":
+        rows = _sampled_random_rows(content_types, limit)
+        if len(rows) >= limit:
+            return jsonify(
+                {"items": _serialize_catalogue_rows(rows, preview=preview)}
+            )
+
+    bounds_key = (
+        "catalogue-random-id-bounds",
+        tuple(sorted(content_types)),
+        filter_signature,
+    )
+    bounds = response_cache.get_or_create(
+        bounds_key,
+        lambda: _random_id_bounds(catalogue_rows),
+    )
+    if bounds is None:
+        return jsonify({"items": []})
+
+    minimum_id, maximum_id = bounds
+    pivot = randrange(minimum_id, maximum_id + 1)
+    rows = db.session.execute(
+        _random_window_statement(
+            catalogue_rows,
+            pivot=pivot,
+            limit=limit,
+        )
     ).all()
-    return jsonify({"items": _serialize_catalogue_rows(rows)})
+    if len(rows) < limit:
+        # Treat IDs as circular. The strict wrap predicate prevents duplicate
+        # rows while allowing small or sparse filtered catalogues to return as
+        # many distinct matches as they actually contain.
+        rows.extend(
+            db.session.execute(
+                _random_window_statement(
+                    catalogue_rows,
+                    pivot=pivot,
+                    limit=limit - len(rows),
+                    wrap=True,
+                )
+            ).all()
+        )
+    return jsonify(
+        {"items": _serialize_catalogue_rows(rows, preview=preview)}
+    )
 
 
 def _catalogue_detail_response(content_type: str, mal_id: int):
@@ -948,14 +1335,16 @@ def _catalogue_detail_response(content_type: str, mal_id: int):
     )
     if normalized_type == "ANIME":
         entry = db.session.scalar(
-            _anime_statement().where(Anime.mal_id == mal_id)
+            _anime_statement(detailed=True).where(Anime.mal_id == mal_id)
         )
         if entry is None:
             raise ApiError("Anime not found", 404)
         return jsonify({"item": _serialize_anime(entry, detailed=True)})
 
     entry = db.session.scalar(
-        _manga_statement({normalized_type}).where(Manga.mal_id == mal_id)
+        _manga_statement({normalized_type}, detailed=True).where(
+            Manga.mal_id == mal_id
+        )
     )
     if entry is None:
         label = "Manga" if normalized_type == "MANGA" else "Manhwa"
@@ -969,11 +1358,14 @@ def list_anime():
     page = _integer_argument("page", minimum=1) or 1
     per_page = _integer_argument("per_page", minimum=1, maximum=MAX_PAGE_SIZE) or 24
     sort = _sort_argument(CONTENT_TYPE_SCOPES["ANIME"])
-    statement = _filtered_anime_statement()
+    preview = _preview_requested()
+    statement = _filtered_anime_statement(preview=preview)
     total = _cached_scalar_count(
         (
             "anime-total",
-            _request_filter_signature(exclude={"page", "per_page", "sort"}),
+            _request_filter_signature(
+                exclude={"page", "per_page", "preview", "sort"}
+            ),
         ),
         select(func.count()).select_from(statement.order_by(None).subquery()),
     )
@@ -984,7 +1376,9 @@ def list_anime():
     ).all()
     return jsonify(
         {
-            "items": [_serialize_anime(anime) for anime in items],
+            "items": [
+                _serialize_anime(anime, preview=preview) for anime in items
+            ],
             "pagination": {
                 "page": page,
                 "per_page": per_page,
@@ -1001,13 +1395,7 @@ def list_anime():
 @app.get(f"{API_PREFIX}/anime/random")
 def random_anime():
     """Return a small random selection of public anime."""
-    limit = _integer_argument("limit", minimum=1, maximum=12) or 6
-    anime = db.session.scalars(
-        _filtered_anime_statement()
-        .order_by(func.random())
-        .limit(limit)
-    ).all()
-    return jsonify({"items": [_serialize_anime(entry) for entry in anime]})
+    return _random_catalogue(CONTENT_TYPE_SCOPES["ANIME"])
 
 
 @app.get(f"{API_PREFIX}/anime/seasonal")
@@ -1015,19 +1403,25 @@ def popular_current_season():
     """Return the highest-rated anime from the current Japan-season window."""
     limit = _integer_argument("limit", minimum=1, maximum=12) or 6
     page = _integer_argument("page", minimum=1) or 1
+    preview = _preview_requested()
     year, season = _current_season_identity()
     filters = (
         Anime.score.is_not(None),
         Anime.year == year,
         Anime.season == season,
     )
-    public_season = _anime_statement().where(*filters).order_by(None).subquery()
+    public_season = (
+        _anime_statement(preview=True)
+        .where(*filters)
+        .order_by(None)
+        .subquery()
+    )
     total = _cached_scalar_count(
         ("seasonal-total", year, season),
         select(func.count()).select_from(public_season),
     )
     anime = db.session.scalars(
-        _anime_statement()
+        _anime_statement(preview=preview)
         .where(*filters)
         .order_by(Anime.score.desc(), Anime.title)
         .offset((page - 1) * limit)
@@ -1035,7 +1429,9 @@ def popular_current_season():
     ).all()
     return jsonify(
         {
-            "items": [_serialize_anime(entry) for entry in anime],
+            "items": [
+                _serialize_anime(entry, preview=preview) for entry in anime
+            ],
             "season": season,
             "year": year,
             "pagination": {
@@ -1052,7 +1448,7 @@ def popular_current_season():
 def anime_detail(mal_id: int):
     """Return the full record for one MyAnimeList anime ID."""
     anime = db.session.scalar(
-        _anime_statement().where(Anime.mal_id == mal_id)
+        _anime_statement(detailed=True).where(Anime.mal_id == mal_id)
     )
     if anime is None:
         raise ApiError("Anime not found", 404)
@@ -1158,6 +1554,73 @@ def _load_facet_names(
     )
 
 
+def _load_facet_page(
+    content_types: frozenset[str],
+    facet_type: str,
+    query: str,
+    *,
+    offset: int,
+    limit: int,
+) -> tuple[tuple[str, ...], bool]:
+    """Read one indexed facet page without materializing the full catalogue."""
+    statement = select(CatalogueFacet.value).where(
+        CatalogueFacet.content_type.in_(sorted(content_types)),
+        CatalogueFacet.facet_type == facet_type,
+    )
+    if query:
+        statement = statement.where(
+            CatalogueFacet.value.ilike(
+                _escaped_search_pattern(query), escape="\\"
+            )
+        )
+    values = tuple(
+        db.session.scalars(
+            statement
+            .distinct()
+            .order_by(CatalogueFacet.value)
+            .offset(offset)
+            .limit(limit + 1)
+        ).all()
+    )
+    return values[:limit], len(values) > limit
+
+
+def _paginated_facet_response(
+    content_types: frozenset[str],
+    facet_type: str,
+    query: str,
+    limit: int,
+):
+    offset = _integer_argument("offset", minimum=0) or 0
+    items, has_more = response_cache.get_or_create(
+        (
+            "facet-page",
+            tuple(sorted(content_types)),
+            facet_type,
+            query,
+            offset,
+            limit,
+        ),
+        lambda: _load_facet_page(
+            content_types,
+            facet_type,
+            query,
+            offset=offset,
+            limit=limit,
+        ),
+    )
+    return jsonify(
+        {
+            "items": items,
+            "pagination": {
+                "offset": offset,
+                "limit": limit,
+                "has_more": has_more,
+            },
+        }
+    )
+
+
 def _searched_facet_response(
     facet_type: str,
     *,
@@ -1171,13 +1634,39 @@ def _searched_facet_response(
         if "limit" in request.args
         else None
     )
+    if limit is not None:
+        return _paginated_facet_response(
+            content_types, facet_type, query, limit
+        )
     values = response_cache.get_or_create(
         (facet_type, tuple(sorted(content_types))),
         lambda: _load_facet_names(content_types, facet_type),
     )
     if query:
         values = tuple(value for value in values if query in value.casefold())
-    return jsonify({"items": values if limit is None else values[:limit]})
+    return _facet_values_response(values, limit)
+
+
+def _facet_values_response(
+    values: tuple[str, ...],
+    limit: int | None,
+):
+    """Return a backward-compatible full list or one incremental UI page."""
+    if limit is None:
+        return jsonify({"items": values})
+    offset = _integer_argument("offset", minimum=0) or 0
+    items = values[offset : offset + limit]
+    return jsonify(
+        {
+            "items": items,
+            "pagination": {
+                "offset": offset,
+                "limit": limit,
+                "total": len(values),
+                "has_more": offset + len(items) < len(values),
+            },
+        }
+    )
 
 
 def _combined_numeric_bounds(
@@ -1277,6 +1766,10 @@ def list_detailed_tags():
         if "limit" in request.args
         else None
     )
+    if limit is not None:
+        return _paginated_facet_response(
+            content_types, "tag", query, limit
+        )
     all_tags = response_cache.get_or_create(
         ("tags", tuple(sorted(content_types))),
         lambda: _load_detailed_tag_names(content_types),
@@ -1285,7 +1778,7 @@ def list_detailed_tags():
         all_tags = tuple(
             tag for tag in all_tags if query in tag.casefold()
         )
-    return jsonify({"items": all_tags if limit is None else all_tags[:limit]})
+    return _facet_values_response(all_tags, limit)
 
 
 @app.get(f"{API_PREFIX}/studios")
@@ -1316,6 +1809,20 @@ def list_filter_ranges():
         lambda: _load_filter_ranges(content_types),
     )
     return jsonify({"ranges": ranges})
+
+
+@app.after_request
+def add_frontend_cache_headers(response):
+    """Cache fingerprinted bundles while keeping the app shell fresh."""
+    if request.method != "GET" or response.status_code != 200:
+        return response
+    if request.path.startswith("/assets/"):
+        response.headers["Cache-Control"] = (
+            "public, max-age=31536000, immutable"
+        )
+    elif response.mimetype == "text/html":
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.get("/")

@@ -1,10 +1,15 @@
+import json
 import unittest
-from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock, patch
 
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
 from backend.app import (
+    CacheGenerationMonitor,
+    FRONTEND_BUILD_DIR,
+    TtlCache,
     _anime_statement,
     _catalogue_rows_subquery,
     _filtered_anime_statement,
@@ -15,7 +20,10 @@ from backend.app import (
     _normalized_status,
     _normalized_type,
     _ordered_catalogue_rows,
+    _random_catalogue,
+    _random_window_statement,
     _request_filter_signature,
+    _sampled_random_statement,
     _serialize_anime,
     _serialize_manga,
     app,
@@ -49,6 +57,77 @@ class AppTests(unittest.TestCase):
         self.assertIn("status", body["items"][0])
         self.assertIn("studios", body["items"][0])
         self.assertIn("streaming_services", body["items"][0])
+
+    def test_preview_lists_omit_detail_only_relationship_payloads(self):
+        anime = self.client.get(
+            "/api/v1/anime", query_string={"preview": 1, "per_page": 1}
+        ).get_json()["items"][0]
+        manga = self.client.get(
+            "/api/v1/manga", query_string={"preview": 1, "per_page": 1}
+        ).get_json()["items"][0]
+
+        self.assertNotIn("studios", anime)
+        self.assertNotIn("streaming_services", anime)
+        self.assertNotIn("authors", manga)
+        self.assertIn("genres", anime)
+        self.assertIn("genres", manga)
+
+        mixed_response = self.client.get(
+            "/api/v1/catalogue",
+            query_string={
+                "content_type": "ALL",
+                "preview": 1,
+                "per_page": 3,
+            },
+        )
+        self.assertEqual(mixed_response.status_code, 200)
+        self.assertTrue(mixed_response.get_json()["items"])
+
+    def test_preview_statements_do_not_select_large_detail_columns(self):
+        anime_sql = str(_anime_statement(preview=True)).lower()
+        manga_sql = str(_manga_statement({"MANGA"}, preview=True)).lower()
+
+        self.assertNotIn("anime.synopsis", anime_sql)
+        self.assertNotIn("anime.genres_detailed", anime_sql)
+        self.assertNotIn("anime.last_jikan_sync", anime_sql)
+        self.assertNotIn("manga.synopsis", manga_sql)
+        self.assertNotIn("manga.genres_detailed", manga_sql)
+        self.assertNotIn("manga.last_jikan_sync", manga_sql)
+
+    def test_fingerprinted_assets_receive_immutable_cache_headers(self):
+        asset = next((FRONTEND_BUILD_DIR / "assets").glob("*.js"))
+
+        response = self.client.get(f"/assets/{asset.name}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["Cache-Control"],
+            "public, max-age=31536000, immutable",
+        )
+
+    def test_ttl_cache_evicts_entries_when_bounded(self):
+        cache = TtlCache(max_entries=2)
+        cache.get_or_create(("first",), lambda: 1)
+        cache.get_or_create(("second",), lambda: 2)
+        cache.get_or_create(("third",), lambda: 3)
+
+        self.assertEqual(len(cache._values), 2)
+        self.assertNotIn(("first",), cache._values)
+
+    def test_etl_generation_change_invalidates_process_cache(self):
+        monitor = CacheGenerationMonitor()
+        first = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        second = first + timedelta(minutes=1)
+        response_cache.get_or_create(("generation-probe",), lambda: "old")
+
+        with patch(
+            "backend.app.db.session.scalar", side_effect=(None, second)
+        ):
+            monitor.refresh_if_needed()
+            monitor._next_check = 0
+            monitor.refresh_if_needed()
+
+        self.assertNotIn(("generation-probe",), response_cache._values)
 
     def test_anime_detail_returns_detailed_tags(self):
         response = self.client.get("/api/v1/anime/52991")
@@ -270,6 +349,11 @@ class AppTests(unittest.TestCase):
                     "url": "https://example.test/netflix",
                 },
             ],
+        )
+        preview = _serialize_anime(anime, preview=True)
+        self.assertLess(
+            len(json.dumps(preview)),
+            len(json.dumps(item)),
         )
 
     def test_anime_status_filter_uses_canonical_indexed_predicate(self):
@@ -534,6 +618,117 @@ class AppTests(unittest.TestCase):
 
         self.assertEqual(first_page, later_page)
 
+    def test_count_cache_canonicalizes_reordered_multi_value_filters(self):
+        with app.test_request_context(
+            "/api/v1/catalogue?genre=Action,Comedy&studio=MAPPA&studio=Bones"
+        ):
+            first = _request_filter_signature(exclude=set())
+        with app.test_request_context(
+            "/api/v1/catalogue?studio=bones,mappa&genre=Comedy&genre=Action"
+        ):
+            second = _request_filter_signature(exclude=set())
+
+        self.assertEqual(first, second)
+
+    def test_mixed_page_limits_each_media_branch_before_global_sort(self):
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ALL&sort=top_rated"
+        ):
+            rows = _catalogue_rows_subquery(
+                {"ANIME", "MANGA", "MANHWA"},
+                branch_limit=24,
+                sort="top_rated",
+            )
+            sql = str(
+                _ordered_catalogue_rows(rows, "top_rated").compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            ).lower()
+
+        self.assertEqual(sql.count("limit 24"), 3)
+        self.assertEqual(sql.count("union all"), 2)
+        self.assertNotIn("synopsis", sql)
+        self.assertNotIn("genres_detailed", sql)
+        self.assertNotIn("alternative_title", sql)
+        self.assertNotIn("last_jikan_sync", sql)
+
+    def test_unfiltered_random_statement_samples_before_random_sorting(self):
+        statement = _sampled_random_statement(
+            {"ANIME", "MANGA", "MANHWA"}, 6
+        )
+        sql = str(
+            statement.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).lower()
+
+        self.assertEqual(sql.count("tablesample system(2)"), 2)
+        self.assertIn("order by random()", sql)
+        self.assertIn("limit 6", sql)
+
+    def test_filtered_random_statement_seeks_from_an_id_pivot(self):
+        with app.test_request_context(
+            "/api/v1/catalogue?content_type=ALL&genre=Action"
+        ):
+            rows = _catalogue_rows_subquery(
+                {"ANIME", "MANGA", "MANHWA"}
+            )
+            sql = str(
+                _random_window_statement(
+                    rows,
+                    pivot=500,
+                    limit=6,
+                ).compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            ).lower()
+
+        self.assertIn("catalogue_rows.record_id >= 500", sql)
+        self.assertIn("limit 6", sql)
+        self.assertNotIn("order by random()", sql)
+        self.assertNotIn(" offset ", sql)
+
+    def test_filtered_random_wraps_without_using_physical_sampling(self):
+        first_result = Mock()
+        first_result.all.return_value = ["tail-row"]
+        wrapped_result = Mock()
+        wrapped_result.all.return_value = ["head-row"]
+
+        with (
+            app.test_request_context(
+                "/api/v1/catalogue/random?genre=Action&limit=2"
+            ),
+            patch(
+                "backend.app._random_id_bounds", return_value=(1, 10)
+            ),
+            patch("backend.app.randrange", return_value=9),
+            patch(
+                "backend.app._sampled_random_rows"
+            ) as sampled_random,
+            patch(
+                "backend.app.db.session.execute",
+                side_effect=(first_result, wrapped_result),
+            ) as execute,
+            patch(
+                "backend.app._serialize_catalogue_rows",
+                return_value=[{"id": 9}, {"id": 1}],
+            ),
+        ):
+            response = _random_catalogue(
+                {"ANIME", "MANGA", "MANHWA"}
+            )
+
+        self.assertEqual(response.get_json()["items"], [{"id": 9}, {"id": 1}])
+        sampled_random.assert_not_called()
+        self.assertEqual(execute.call_count, 2)
+        first_sql = str(execute.call_args_list[0].args[0]).lower()
+        wrapped_sql = str(execute.call_args_list[1].args[0]).lower()
+        self.assertIn("catalogue_rows.record_id >=", first_sql)
+        self.assertIn("catalogue_rows.record_id <", wrapped_sql)
+
     def test_tag_searches_reuse_one_precomputed_scope(self):
         with patch(
             "backend.app._load_detailed_tag_names",
@@ -560,6 +755,10 @@ class AppTests(unittest.TestCase):
                 "backend.app._load_facet_names",
                 return_value=("Bones", "MAPPA", "Studio Pierrot"),
             ),
+            patch(
+                "backend.app._load_facet_page",
+                return_value=(("action",), True),
+            ),
         ):
             tags = self.client.get("/api/v1/tags")
             studios = self.client.get("/api/v1/studios")
@@ -571,6 +770,31 @@ class AppTests(unittest.TestCase):
             ["Bones", "MAPPA", "Studio Pierrot"],
         )
         self.assertEqual(limited_tags.get_json()["items"], ["action"])
+
+    def test_facets_support_incremental_pages_without_limiting_search(self):
+        def facet_page(_types, _facet, _query, *, offset, limit):
+            self.assertEqual(limit, 2)
+            return (
+                (("Author A", "Author B"), True)
+                if offset == 0
+                else (("Author C",), False)
+            )
+
+        with patch(
+            "backend.app._load_facet_page", side_effect=facet_page
+        ) as load_page:
+            first = self.client.get("/api/v1/authors?limit=2&offset=0")
+            second = self.client.get("/api/v1/authors?limit=2&offset=2")
+            repeated_first = self.client.get(
+                "/api/v1/authors?limit=2&offset=0"
+            )
+
+        self.assertEqual(first.get_json()["items"], ["Author A", "Author B"])
+        self.assertTrue(first.get_json()["pagination"]["has_more"])
+        self.assertEqual(second.get_json()["items"], ["Author C"])
+        self.assertFalse(second.get_json()["pagination"]["has_more"])
+        self.assertEqual(repeated_first.get_json(), first.get_json())
+        self.assertEqual(load_page.call_count, 2)
 
     def test_studio_and_streaming_searches_reuse_precomputed_facets(self):
         def load_facets(_content_types, facet_type):

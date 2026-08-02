@@ -1,7 +1,9 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -35,6 +37,51 @@ import {
   validatedPage,
   visiblePageNumbers,
 } from "./catalogue.js";
+import { getJson } from "./api.js";
+
+const COVER_FALLBACK_URL = "/cover-placeholder.svg";
+const FACET_OPTION_LIMIT = 100;
+const CATALOGUE_CACHE_TTL_MS = 45_000;
+const FACET_CACHE_TTL_MS = 5 * 60_000;
+const DETAIL_CACHE_TTL_MS = 5 * 60_000;
+const SLIDER_DEBOUNCE_MS = 250;
+
+function nextRequestController(controllerRef) {
+  controllerRef.current?.abort();
+  const controller = new AbortController();
+  controllerRef.current = controller;
+  return controller;
+}
+
+function cancelRequest(controllerRef) {
+  controllerRef.current?.abort();
+  controllerRef.current = null;
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError";
+}
+
+function limitedMatchingOptions(options, selected, query) {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const selectedSet = new Set(selected);
+  const matchingSelected = selected.filter((option) => (
+    option.toLocaleLowerCase().includes(normalizedQuery)
+  ));
+  const remaining = options.filter((option) => (
+    !selectedSet.has(option)
+    && option.toLocaleLowerCase().includes(normalizedQuery)
+  ));
+  return [...matchingSelected, ...remaining];
+}
+
+function isNearScrollEnd(element) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= 48;
+}
+
+function facetHasMore(body, itemCount) {
+  return body.pagination?.has_more ?? itemCount >= FACET_OPTION_LIMIT;
+}
 
 const DEFAULT_FILTER_RANGES = {
   year: { min: 1900, max: new Date().getFullYear() + 2, step: 1 },
@@ -127,7 +174,30 @@ function ContentBadge({ contentType }) {
   );
 }
 
-function CatalogueCard({ item, onSelect, showContentBadge = false }) {
+export function CoverImage({ item, className = "", loading = "lazy" }) {
+  const title = item?.title || "Catalogue title";
+  return (
+    <img
+      className={className}
+      src={item?.image_url || COVER_FALLBACK_URL}
+      alt={`${title} cover`}
+      loading={loading}
+      decoding="async"
+      width="400"
+      height="600"
+      onError={(event) => {
+        if (event.currentTarget.getAttribute("src") === COVER_FALLBACK_URL) return;
+        event.currentTarget.src = COVER_FALLBACK_URL;
+      }}
+    />
+  );
+}
+
+const CatalogueCard = memo(function CatalogueCard({
+  item,
+  onSelect,
+  showContentBadge = false,
+}) {
   const metadata = itemMetadata(item).join(" · ");
   const cardContentType = itemContentType(item);
   const visibleGenres = (item.genres ?? []).slice(0, 4);
@@ -139,11 +209,9 @@ function CatalogueCard({ item, onSelect, showContentBadge = false }) {
       type="button"
     >
       <div className="relative aspect-[2/3] w-full shrink-0 overflow-hidden bg-slate-800">
-        <img
+        <CoverImage
           className="block h-full w-full object-cover object-center transition duration-300 group-hover:scale-105"
-          src={item.image_url}
-          alt={`${item.title} cover`}
-          loading="lazy"
+          item={item}
         />
         {showContentBadge && (
           <div className="absolute right-3 top-3">
@@ -175,7 +243,7 @@ function CatalogueCard({ item, onSelect, showContentBadge = false }) {
       </div>
     </button>
   );
-}
+});
 
 function DetailModal({ item, loading, onClose }) {
   if (!item) return null;
@@ -214,11 +282,13 @@ function DetailModal({ item, loading, onClose }) {
           &times;
         </button>
         <div className="grid gap-6 p-6 sm:grid-cols-[12rem_1fr]">
-          <img
-            className="w-full rounded-2xl object-cover"
-            src={item.image_url}
-            alt={`${item.title} cover`}
-          />
+          <div className="aspect-[2/3] w-full overflow-hidden rounded-2xl bg-slate-800">
+            <CoverImage
+              className="h-full w-full object-cover object-center"
+              item={item}
+              loading="eager"
+            />
+          </div>
           <div className="space-y-4">
             <div>
               <p className="text-sm font-semibold uppercase tracking-widest text-violet-300">
@@ -342,16 +412,71 @@ function GenreTagPicker({
   tagOptions,
   tagQuery,
   tagsLoading,
+  tagsHasMore,
   dropdownOpen,
   dropdownRef,
   onDropdownToggle,
   onQueryChange,
+  onTagsLoadMore,
   onGenreToggle,
   onTagToggle,
 }) {
-  const matchingGenres = genres.filter((genre) => (
-    genre.toLowerCase().includes(tagQuery.trim().toLowerCase())
-  ));
+  const [tagWindowStart, setTagWindowStart] = useState(0);
+  const tagPanelRef = useRef(null);
+  const pendingTagAdvanceRef = useRef(null);
+  const matchingGenres = useMemo(() => limitedMatchingOptions(
+    genres,
+    filters.genre,
+    tagQuery,
+  ), [filters.genre, genres, tagQuery]);
+  const allMatchingTags = useMemo(() => limitedMatchingOptions(
+    tagOptions,
+    filters.tag,
+    tagQuery,
+  ), [filters.tag, tagOptions, tagQuery]);
+  const matchingTags = allMatchingTags.slice(
+    tagWindowStart,
+    tagWindowStart + FACET_OPTION_LIMIT,
+  );
+  const canShowPreviousTags = tagWindowStart > 0;
+  const canShowMoreTags = (
+    tagWindowStart + FACET_OPTION_LIMIT < allMatchingTags.length
+    || tagsHasMore
+  );
+  useEffect(() => {
+    setTagWindowStart(0);
+    pendingTagAdvanceRef.current = null;
+    if (tagPanelRef.current) tagPanelRef.current.scrollTop = 0;
+  }, [dropdownOpen, tagQuery]);
+
+  useEffect(() => {
+    const previousLength = pendingTagAdvanceRef.current;
+    if (previousLength === null || allMatchingTags.length <= previousLength) return;
+    if (tagPanelRef.current) tagPanelRef.current.scrollTop = 0;
+    setTagWindowStart(previousLength);
+    pendingTagAdvanceRef.current = null;
+  }, [allMatchingTags.length]);
+
+  const showNextTags = () => {
+    if (tagsLoading) return;
+    const nextStart = tagWindowStart + FACET_OPTION_LIMIT;
+    if (nextStart < allMatchingTags.length) {
+      if (tagPanelRef.current) tagPanelRef.current.scrollTop = 0;
+      setTagWindowStart(nextStart);
+      return;
+    }
+    if (tagsHasMore) {
+      pendingTagAdvanceRef.current = allMatchingTags.length;
+      onTagsLoadMore();
+    }
+  };
+
+  const showPreviousTags = () => {
+    if (tagPanelRef.current) tagPanelRef.current.scrollTop = 0;
+    setTagWindowStart((current) => (
+      Math.max(0, current - FACET_OPTION_LIMIT)
+    ));
+  };
   return (
     <div className="relative">
       <details
@@ -379,7 +504,15 @@ function GenreTagPicker({
           )}
           <span className="text-violet-300 transition group-open:rotate-180">⌄</span>
         </summary>
-        <div className="absolute z-30 mt-2 max-h-72 w-full min-w-64 overflow-y-auto rounded-xl border border-white/10 bg-slate-950 p-1 shadow-2xl">
+        <div
+          ref={tagPanelRef}
+          className="absolute z-30 mt-2 max-h-72 w-full min-w-64 overflow-y-auto rounded-xl border border-white/10 bg-slate-950 p-1 shadow-2xl"
+          aria-label="Genre and tag options"
+          onScroll={(event) => {
+            if (!isNearScrollEnd(event.currentTarget) || tagsLoading) return;
+            showNextTags();
+          }}
+        >
           <p className="px-3 pb-1 pt-2 text-xs font-bold uppercase tracking-widest text-violet-300">
             Genres
           </p>
@@ -401,9 +534,9 @@ function GenreTagPicker({
           <p className="mt-2 border-t border-white/10 px-3 pb-1 pt-3 text-xs font-bold uppercase tracking-widest text-violet-300">
             Tags
           </p>
-          {tagsLoading ? (
+          {tagsLoading && matchingTags.length === 0 ? (
             <p className="px-3 py-2 text-sm text-slate-400">Searching tags…</p>
-          ) : tagOptions.map((tag) => (
+          ) : matchingTags.map((tag) => (
             <button
               key={tag}
               className={`block w-full rounded-lg px-3 py-2 text-left text-sm capitalize transition ${
@@ -418,6 +551,34 @@ function GenreTagPicker({
               {tag}
             </button>
           ))}
+          {tagsLoading && matchingTags.length > 0 && (
+            <p className="px-3 py-2 text-sm text-slate-400" role="status">
+              Loading more tags…
+            </p>
+          )}
+          {(canShowPreviousTags || canShowMoreTags) && (
+            <div className="sticky bottom-0 flex gap-2 border-t border-white/10 bg-slate-950 p-2">
+              {canShowPreviousTags && (
+                <button
+                  className="flex-1 rounded-lg px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-violet-400/10"
+                  type="button"
+                  onClick={showPreviousTags}
+                >
+                  Previous tags
+                </button>
+              )}
+              {canShowMoreTags && (
+                <button
+                  className="flex-1 rounded-lg px-3 py-2 text-xs font-semibold text-violet-200 hover:bg-violet-400/10 disabled:opacity-50"
+                  type="button"
+                  disabled={tagsLoading}
+                  onClick={showNextTags}
+                >
+                  {tagsLoading ? "Loading tags..." : "More tags"}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </details>
     </div>
@@ -430,27 +591,43 @@ export function SearchableMultiSelect({
   options,
   query,
   loading,
+  hasMore = false,
   open,
   dropdownRef,
   onOpenChange,
   onQueryChange,
+  onLoadMore = () => {},
   onToggle,
 }) {
   const listId = useId();
   const statusId = useId();
   const triggerRef = useRef(null);
+  const listboxRef = useRef(null);
   const restoreFocusRef = useRef(false);
   const wasOpenRef = useRef(open);
+  const pendingAdvanceRef = useRef(null);
   const [activeIndex, setActiveIndex] = useState(0);
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  const matchingOptions = options.filter((option) => (
-    option.toLocaleLowerCase().includes(normalizedQuery)
-  ));
+  const [windowStart, setWindowStart] = useState(0);
+  const allMatchingOptions = useMemo(() => limitedMatchingOptions(
+    options,
+    selected,
+    query,
+  ), [options, query, selected]);
+  const matchingOptions = allMatchingOptions.slice(
+    windowStart,
+    windowStart + FACET_OPTION_LIMIT,
+  );
+  const canShowPreviousOptions = windowStart > 0;
+  const canShowMoreOptions = (
+    windowStart + FACET_OPTION_LIMIT < allMatchingOptions.length
+    || hasMore
+  );
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
   const safeActiveIndex = Math.min(
     activeIndex,
     Math.max(0, matchingOptions.length - 1),
   );
-  const hasNavigableOptions = !loading && matchingOptions.length > 0;
+  const hasNavigableOptions = matchingOptions.length > 0;
   const activeOptionId = matchingOptions.length > 0
     ? `${listId}-option-${safeActiveIndex}`
     : undefined;
@@ -458,7 +635,24 @@ export function SearchableMultiSelect({
   useEffect(() => {
     if (!open) return;
     setActiveIndex(0);
+    setWindowStart(0);
+    pendingAdvanceRef.current = null;
+    if (listboxRef.current) listboxRef.current.scrollTop = 0;
   }, [open, query]);
+
+  useEffect(() => {
+    const previousLength = pendingAdvanceRef.current;
+    if (previousLength === null || allMatchingOptions.length <= previousLength) return;
+    if (listboxRef.current) listboxRef.current.scrollTop = 0;
+    setWindowStart(previousLength);
+    setActiveIndex(0);
+    pendingAdvanceRef.current = null;
+  }, [allMatchingOptions.length]);
+
+  useEffect(() => {
+    if (!open || !activeOptionId) return;
+    document.getElementById(activeOptionId)?.scrollIntoView?.({ block: "nearest" });
+  }, [activeOptionId, open]);
 
   useEffect(() => {
     if (wasOpenRef.current && !open && restoreFocusRef.current) {
@@ -471,6 +665,27 @@ export function SearchableMultiSelect({
   const closeAndRestoreFocus = () => {
     restoreFocusRef.current = true;
     onOpenChange(false);
+  };
+
+  const showNextOptions = () => {
+    if (loading) return;
+    const nextStart = windowStart + FACET_OPTION_LIMIT;
+    if (nextStart < allMatchingOptions.length) {
+      if (listboxRef.current) listboxRef.current.scrollTop = 0;
+      setWindowStart(nextStart);
+      setActiveIndex(0);
+      return;
+    }
+    if (hasMore) {
+      pendingAdvanceRef.current = allMatchingOptions.length;
+      onLoadMore();
+    }
+  };
+
+  const showPreviousOptions = () => {
+    if (listboxRef.current) listboxRef.current.scrollTop = 0;
+    setWindowStart((current) => Math.max(0, current - FACET_OPTION_LIMIT));
+    setActiveIndex(0);
   };
 
   return (
@@ -517,7 +732,7 @@ export function SearchableMultiSelect({
             aria-expanded="true"
             aria-controls={listId}
             aria-autocomplete="list"
-            aria-activedescendant={!loading ? activeOptionId : undefined}
+            aria-activedescendant={activeOptionId}
             aria-describedby={statusId}
             autoFocus
           />
@@ -558,38 +773,75 @@ export function SearchableMultiSelect({
       )}
       {open && (
         <div
-          id={listId}
-          className="absolute z-40 mt-2 max-h-72 w-full min-w-64 overflow-y-auto rounded-xl border border-white/10 bg-slate-950 p-1 shadow-2xl"
-          role="listbox"
-          aria-label={label}
-          aria-multiselectable="true"
+          className="absolute z-40 mt-2 w-full min-w-64 overflow-hidden rounded-xl border border-white/10 bg-slate-950 shadow-2xl"
         >
-          {loading ? (
-            <p className="px-3 py-2 text-sm text-slate-400" role="status">
-              Loading options…
-            </p>
-          ) : matchingOptions.length > 0 ? matchingOptions.map((option, index) => (
-            <button
-              key={option}
-              id={`${listId}-option-${index}`}
-              className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${
-                selected.includes(option)
-                  ? "bg-violet-500 text-white"
-                  : "text-slate-300 hover:bg-violet-400/10"
-              } ${index === safeActiveIndex ? "ring-1 ring-inset ring-violet-300" : ""}`}
-              type="button"
-              role="option"
-              aria-selected={selected.includes(option)}
-              tabIndex={-1}
-              onPointerMove={() => setActiveIndex(index)}
-              onClick={() => onToggle(option)}
-            >
-              {option}
-            </button>
-          )) : (
-            <p className="px-3 py-2 text-sm text-slate-400">
-              No matching options.
-            </p>
+          <div
+            id={listId}
+            ref={listboxRef}
+            className="max-h-72 overflow-y-auto p-1"
+            role="listbox"
+            aria-label={label}
+            aria-multiselectable="true"
+            onScroll={(event) => {
+              if (!isNearScrollEnd(event.currentTarget) || loading) return;
+              showNextOptions();
+            }}
+          >
+            {loading && matchingOptions.length === 0 ? (
+              <div className="px-3 py-2 text-sm text-slate-400" role="status">
+                Loading options…
+              </div>
+            ) : matchingOptions.length > 0 ? matchingOptions.map((option, index) => (
+              <button
+                key={option}
+                id={`${listId}-option-${index}`}
+                className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition ${
+                  selectedSet.has(option)
+                    ? "bg-violet-500 text-white"
+                    : "text-slate-300 hover:bg-violet-400/10"
+                } ${index === safeActiveIndex ? "ring-1 ring-inset ring-violet-300" : ""}`}
+                type="button"
+                role="option"
+                aria-selected={selectedSet.has(option)}
+                tabIndex={-1}
+                onPointerMove={() => setActiveIndex(index)}
+                onClick={() => onToggle(option)}
+              >
+                {option}
+              </button>
+            )) : (
+              <div className="px-3 py-2 text-sm text-slate-400" role="status">
+                No matching options.
+              </div>
+            )}
+            {loading && matchingOptions.length > 0 && (
+              <div className="px-3 py-2 text-sm text-slate-400" role="status">
+                Loading more options…
+              </div>
+            )}
+          </div>
+          {(canShowPreviousOptions || canShowMoreOptions) && (
+            <div className="flex gap-2 border-t border-white/10 bg-slate-950 p-2">
+              {canShowPreviousOptions && (
+                <button
+                  className="flex-1 rounded-lg px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-violet-400/10"
+                  type="button"
+                  onClick={showPreviousOptions}
+                >
+                  Previous options
+                </button>
+              )}
+              {canShowMoreOptions && (
+                <button
+                  className="flex-1 rounded-lg px-3 py-2 text-xs font-semibold text-violet-200 hover:bg-violet-400/10 disabled:opacity-50"
+                  type="button"
+                  disabled={loading}
+                  onClick={showNextOptions}
+                >
+                  {loading ? "Loading options..." : "More options"}
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -724,7 +976,7 @@ export function DualRangeSlider({
             disabled={inactive}
             onClick={() => {
               onValueChange(minName, "");
-              onValueChange(maxName, "");
+              onValueChange(maxName, "", { immediate: true });
             }}
             aria-label={`Clear ${label.toLocaleLowerCase()} range`}
           >
@@ -821,7 +1073,7 @@ export function MinimumSlider({
             className="text-xs font-semibold text-slate-400 underline-offset-2 hover:text-white hover:underline disabled:cursor-not-allowed disabled:opacity-40"
             type="button"
             disabled={value === ""}
-            onClick={() => onValueChange(name, "")}
+            onClick={() => onValueChange(name, "", { immediate: true })}
             aria-label={`Clear ${label.toLocaleLowerCase()}`}
           >
             Clear
@@ -878,9 +1130,13 @@ export default function App() {
   const [streamingQuery, setStreamingQuery] = useState("");
   const [authorQuery, setAuthorQuery] = useState("");
   const [tagsLoading, setTagsLoading] = useState(false);
+  const [tagsHasMore, setTagsHasMore] = useState(false);
   const [studiosLoading, setStudiosLoading] = useState(false);
+  const [studiosHasMore, setStudiosHasMore] = useState(false);
   const [streamingServicesLoading, setStreamingServicesLoading] = useState(false);
+  const [streamingServicesHasMore, setStreamingServicesHasMore] = useState(false);
   const [authorsLoading, setAuthorsLoading] = useState(false);
+  const [authorsHasMore, setAuthorsHasMore] = useState(false);
   const [genreDropdownOpen, setGenreDropdownOpen] = useState(false);
   const [studioDropdownOpen, setStudioDropdownOpen] = useState(false);
   const [streamingDropdownOpen, setStreamingDropdownOpen] = useState(false);
@@ -914,13 +1170,27 @@ export default function App() {
   const streamingDropdownRef = useRef(null);
   const authorDropdownRef = useRef(null);
   const catalogueRequestRef = useRef(0);
+  const catalogueControllerRef = useRef(null);
+  const seasonalRequestRef = useRef(0);
+  const seasonalControllerRef = useRef(null);
   const genreRequestRef = useRef(0);
+  const genreControllerRef = useRef(null);
   const tagRequestRef = useRef(0);
+  const tagControllerRef = useRef(null);
   const studioRequestRef = useRef(0);
+  const studioControllerRef = useRef(null);
   const streamingRequestRef = useRef(0);
+  const streamingControllerRef = useRef(null);
   const authorRequestRef = useRef(0);
+  const authorControllerRef = useRef(null);
   const rangeRequestRef = useRef(0);
+  const rangeControllerRef = useRef(null);
   const detailRequestRef = useRef(0);
+  const detailControllerRef = useRef(null);
+  const loadedContentTypeRef = useRef(null);
+  const sliderApplyTimerRef = useRef(null);
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
 
   const loadCatalogue = useCallback(async (
     page = 1,
@@ -929,27 +1199,39 @@ export default function App() {
     activeSort = DEFAULT_SORT,
   ) => {
     const requestId = ++catalogueRequestRef.current;
+    const controller = nextRequestController(catalogueControllerRef);
+    if (
+      loadedContentTypeRef.current
+      && loadedContentTypeRef.current !== activeContentType
+    ) {
+      setItems([]);
+      setPagination({ page: 1, pages: 1, total: 0 });
+      setUpdatedAt(null);
+    }
     setLoading(true);
     setError("");
     try {
-      const response = await fetch(
-        `/api/v1/catalogue?${queryString(
-          activeFilters,
-          page,
-          activeContentType,
-          activeSort,
-        )}`,
-      );
-      const body = await response.json();
-      if (!response.ok) {
+      const url = `/api/v1/catalogue?${queryString(
+        activeFilters,
+        page,
+        activeContentType,
+        activeSort,
+      )}`;
+      const { ok, body } = await getJson(url, {
+        signal: controller.signal,
+        ttlMs: CATALOGUE_CACHE_TTL_MS,
+      });
+      if (!ok) {
         const label = contentTypeDetails(activeContentType).resultLabel;
         throw new Error(body.error?.message || `Could not load ${label}.`);
       }
       if (requestId !== catalogueRequestRef.current) return;
+      loadedContentTypeRef.current = activeContentType;
       setItems(body.items ?? []);
       setPagination(body.pagination ?? { page: 1, pages: 1, total: 0 });
       setUpdatedAt(body.updated_at ?? null);
     } catch (requestError) {
+      if (isAbortError(requestError)) return;
       if (requestId !== catalogueRequestRef.current) return;
       setItems([]);
       setPagination({ page: 1, pages: 1, total: 0 });
@@ -985,52 +1267,89 @@ export default function App() {
   }, [loadCatalogue, updateUrl]);
 
   const loadSeasonalAnime = useCallback(async (page = 1) => {
+    const requestId = ++seasonalRequestRef.current;
+    const controller = nextRequestController(seasonalControllerRef);
     setSeasonalLoading(true);
     try {
-      const response = await fetch(`/api/v1/anime/seasonal?limit=6&page=${page}`);
-      const body = await response.json();
-      if (!response.ok) {
+      const { ok, body } = await getJson(
+        `/api/v1/anime/seasonal?limit=6&page=${page}&preview=1`,
+        {
+          signal: controller.signal,
+          ttlMs: CATALOGUE_CACHE_TTL_MS,
+        },
+      );
+      if (!ok) {
         throw new Error(body.error?.message || "Could not load seasonal anime.");
       }
+      if (requestId !== seasonalRequestRef.current) return;
       setSeasonalAnime(body.items ?? []);
       setSeasonalPagination(
         body.pagination ?? { page: 1, pages: 1, total: body.items?.length ?? 0 },
       );
-    } catch {
+    } catch (requestError) {
+      if (isAbortError(requestError)) return;
+      if (requestId !== seasonalRequestRef.current) return;
       setSeasonalAnime([]);
       setSeasonalPagination({ page: 1, pages: 1, total: 0 });
     } finally {
-      setSeasonalLoading(false);
+      if (requestId === seasonalRequestRef.current) setSeasonalLoading(false);
     }
   }, []);
 
   const loadGenres = useCallback(async (activeContentType) => {
     const requestId = ++genreRequestRef.current;
+    const controller = nextRequestController(genreControllerRef);
     try {
       const params = new URLSearchParams({ content_type: activeContentType });
-      const response = await fetch(`/api/v1/genres?${params}`);
-      const body = await response.json();
-      if (!response.ok) throw new Error("Could not load genres.");
+      const { ok, body } = await getJson(`/api/v1/genres?${params}`, {
+        signal: controller.signal,
+        ttlMs: FACET_CACHE_TTL_MS,
+      });
+      if (!ok) throw new Error("Could not load genres.");
       if (requestId === genreRequestRef.current) setGenres(body.items ?? []);
-    } catch {
+    } catch (requestError) {
+      if (isAbortError(requestError)) return;
       if (requestId === genreRequestRef.current) setGenres([]);
     }
   }, []);
 
-  const loadTags = useCallback(async (query = "", activeContentType = "ANIME") => {
+  const loadTags = useCallback(async (
+    query = "",
+    activeContentType = "ANIME",
+    offset = 0,
+  ) => {
     const requestId = ++tagRequestRef.current;
+    const controller = nextRequestController(tagControllerRef);
     setTagsLoading(true);
+    if (offset === 0) {
+      setTagOptions([]);
+      setTagsHasMore(false);
+    }
     try {
       const params = new URLSearchParams({
         content_type: activeContentType,
+        limit: String(FACET_OPTION_LIMIT),
+        offset: String(offset),
       });
       if (query) params.set("q", query);
-      const response = await fetch(`/api/v1/tags?${params}`);
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error?.message || "Could not load tags.");
-      if (requestId === tagRequestRef.current) setTagOptions(body.items ?? []);
-    } catch {
-      if (requestId === tagRequestRef.current) setTagOptions([]);
+      const { ok, body } = await getJson(`/api/v1/tags?${params}`, {
+        signal: controller.signal,
+        ttlMs: FACET_CACHE_TTL_MS,
+      });
+      if (!ok) throw new Error(body.error?.message || "Could not load tags.");
+      if (requestId === tagRequestRef.current) {
+        const incoming = body.items ?? [];
+        setTagOptions((current) => (
+          offset > 0 ? namedValues([...current, ...incoming]) : incoming
+        ));
+        setTagsHasMore(facetHasMore(body, incoming.length));
+      }
+    } catch (requestError) {
+      if (isAbortError(requestError)) return;
+      if (requestId === tagRequestRef.current && offset === 0) {
+        setTagOptions([]);
+        setTagsHasMore(false);
+      }
     } finally {
       if (requestId === tagRequestRef.current) setTagsLoading(false);
     }
@@ -1039,22 +1358,40 @@ export default function App() {
   const loadStudios = useCallback(async (
     query = "",
     activeContentType = "ANIME",
+    offset = 0,
   ) => {
     const requestId = ++studioRequestRef.current;
+    const controller = nextRequestController(studioControllerRef);
     setStudiosLoading(true);
+    if (offset === 0) {
+      setStudios([]);
+      setStudiosHasMore(false);
+    }
     try {
-      const params = new URLSearchParams({ content_type: activeContentType });
+      const params = new URLSearchParams({
+        content_type: activeContentType,
+        limit: String(FACET_OPTION_LIMIT),
+        offset: String(offset),
+      });
       if (query) params.set("q", query);
-      const response = await fetch(`/api/v1/studios?${params}`);
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error?.message || "Could not load studios.");
+      const { ok, body } = await getJson(`/api/v1/studios?${params}`, {
+        signal: controller.signal,
+        ttlMs: FACET_CACHE_TTL_MS,
+      });
+      if (!ok) throw new Error(body.error?.message || "Could not load studios.");
       if (requestId === studioRequestRef.current) {
-        setStudios(
-          namedValues(body.items).sort((left, right) => left.localeCompare(right)),
-        );
+        const incoming = namedValues(body.items);
+        setStudios((current) => namedValues(
+          offset > 0 ? [...current, ...incoming] : incoming,
+        ));
+        setStudiosHasMore(facetHasMore(body, incoming.length));
       }
-    } catch {
-      if (requestId === studioRequestRef.current) setStudios([]);
+    } catch (requestError) {
+      if (isAbortError(requestError)) return;
+      if (requestId === studioRequestRef.current && offset === 0) {
+        setStudios([]);
+        setStudiosHasMore(false);
+      }
     } finally {
       if (requestId === studioRequestRef.current) setStudiosLoading(false);
     }
@@ -1063,24 +1400,42 @@ export default function App() {
   const loadStreamingServices = useCallback(async (
     query = "",
     activeContentType = "ANIME",
+    offset = 0,
   ) => {
     const requestId = ++streamingRequestRef.current;
+    const controller = nextRequestController(streamingControllerRef);
     setStreamingServicesLoading(true);
+    if (offset === 0) {
+      setStreamingServices([]);
+      setStreamingServicesHasMore(false);
+    }
     try {
-      const params = new URLSearchParams({ content_type: activeContentType });
+      const params = new URLSearchParams({
+        content_type: activeContentType,
+        limit: String(FACET_OPTION_LIMIT),
+        offset: String(offset),
+      });
       if (query) params.set("q", query);
-      const response = await fetch(`/api/v1/streaming-services?${params}`);
-      const body = await response.json();
-      if (!response.ok) {
+      const { ok, body } = await getJson(`/api/v1/streaming-services?${params}`, {
+        signal: controller.signal,
+        ttlMs: FACET_CACHE_TTL_MS,
+      });
+      if (!ok) {
         throw new Error(body.error?.message || "Could not load streaming services.");
       }
       if (requestId === streamingRequestRef.current) {
-        setStreamingServices(
-          namedValues(body.items).sort((left, right) => left.localeCompare(right)),
-        );
+        const incoming = namedValues(body.items);
+        setStreamingServices((current) => namedValues(
+          offset > 0 ? [...current, ...incoming] : incoming,
+        ));
+        setStreamingServicesHasMore(facetHasMore(body, incoming.length));
       }
-    } catch {
-      if (requestId === streamingRequestRef.current) setStreamingServices([]);
+    } catch (requestError) {
+      if (isAbortError(requestError)) return;
+      if (requestId === streamingRequestRef.current && offset === 0) {
+        setStreamingServices([]);
+        setStreamingServicesHasMore(false);
+      }
     } finally {
       if (requestId === streamingRequestRef.current) {
         setStreamingServicesLoading(false);
@@ -1091,24 +1446,42 @@ export default function App() {
   const loadAuthors = useCallback(async (
     query = "",
     activeContentType = "ALL",
+    offset = 0,
   ) => {
     const requestId = ++authorRequestRef.current;
+    const controller = nextRequestController(authorControllerRef);
     setAuthorsLoading(true);
+    if (offset === 0) {
+      setAuthors([]);
+      setAuthorsHasMore(false);
+    }
     try {
-      const params = new URLSearchParams({ content_type: activeContentType });
+      const params = new URLSearchParams({
+        content_type: activeContentType,
+        limit: String(FACET_OPTION_LIMIT),
+        offset: String(offset),
+      });
       if (query) params.set("q", query);
-      const response = await fetch(`/api/v1/authors?${params}`);
-      const body = await response.json();
-      if (!response.ok) {
+      const { ok, body } = await getJson(`/api/v1/authors?${params}`, {
+        signal: controller.signal,
+        ttlMs: FACET_CACHE_TTL_MS,
+      });
+      if (!ok) {
         throw new Error(body.error?.message || "Could not load authors.");
       }
       if (requestId === authorRequestRef.current) {
-        setAuthors(
-          namedValues(body.items).sort((left, right) => left.localeCompare(right)),
-        );
+        const incoming = namedValues(body.items);
+        setAuthors((current) => namedValues(
+          offset > 0 ? [...current, ...incoming] : incoming,
+        ));
+        setAuthorsHasMore(facetHasMore(body, incoming.length));
       }
-    } catch {
-      if (requestId === authorRequestRef.current) setAuthors([]);
+    } catch (requestError) {
+      if (isAbortError(requestError)) return;
+      if (requestId === authorRequestRef.current && offset === 0) {
+        setAuthors([]);
+        setAuthorsHasMore(false);
+      }
     } finally {
       if (requestId === authorRequestRef.current) setAuthorsLoading(false);
     }
@@ -1116,17 +1489,21 @@ export default function App() {
 
   const loadFilterRanges = useCallback(async (activeContentType = "ANIME") => {
     const requestId = ++rangeRequestRef.current;
+    const controller = nextRequestController(rangeControllerRef);
     try {
       const params = new URLSearchParams({ content_type: activeContentType });
-      const response = await fetch(`/api/v1/filter-ranges?${params}`);
-      const body = await response.json();
-      if (!response.ok) {
+      const { ok, body } = await getJson(`/api/v1/filter-ranges?${params}`, {
+        signal: controller.signal,
+        ttlMs: FACET_CACHE_TTL_MS,
+      });
+      if (!ok) {
         throw new Error(body.error?.message || "Could not load filter ranges.");
       }
       if (requestId === rangeRequestRef.current) {
         setFilterRanges(normalizedFilterRanges(body));
       }
-    } catch {
+    } catch (requestError) {
+      if (isAbortError(requestError)) return;
       if (requestId === rangeRequestRef.current) {
         setFilterRanges(DEFAULT_FILTER_RANGES);
       }
@@ -1140,23 +1517,38 @@ export default function App() {
       initialState.contentType,
       initialState.sort,
     );
-    loadSeasonalAnime();
   }, [
     initialAppliedFilters,
     initialState.contentType,
     initialState.page,
     initialState.sort,
     loadCatalogue,
-    loadSeasonalAnime,
   ]);
 
   useEffect(() => {
+    if (contentType === "ANIME" && viewMode === "home") {
+      loadSeasonalAnime();
+      return undefined;
+    }
+    ++seasonalRequestRef.current;
+    cancelRequest(seasonalControllerRef);
+    setSeasonalLoading(false);
+    return undefined;
+  }, [contentType, loadSeasonalAnime, viewMode]);
+
+  useEffect(() => {
     const restoreFromUrl = () => {
+      if (sliderApplyTimerRef.current) {
+        window.clearTimeout(sliderApplyTimerRef.current);
+        sliderApplyTimerRef.current = null;
+      }
       const restored = catalogueStateFromSearch(window.location.search);
       const restoredApplied = restored.view === "home"
         ? TOP_RATED_FILTERS
         : restored.filters;
       ++detailRequestRef.current;
+      cancelRequest(detailControllerRef);
+      filtersRef.current = restored.filters;
       setContentType(restored.contentType);
       setFilters(restored.filters);
       setAppliedFilters(restoredApplied);
@@ -1195,36 +1587,25 @@ export default function App() {
     loadGenres(contentType);
     setFilterRanges(DEFAULT_FILTER_RANGES);
     loadFilterRanges(contentType);
-    if (contentType === "ANIME") {
-      setStudios([]);
-      setStreamingServices([]);
-      loadStudios("", contentType);
-      loadStreamingServices("", contentType);
-      ++authorRequestRef.current;
-      setAuthors([]);
-      setAuthorsLoading(false);
-    } else {
-      ++studioRequestRef.current;
-      ++streamingRequestRef.current;
-      setStudios([]);
-      setStreamingServices([]);
-      setStudiosLoading(false);
-      setStreamingServicesLoading(false);
-      setAuthors([]);
-      if (contentType === "MANGA" || contentType === "MANHWA") {
-        loadAuthors("", contentType);
-      } else {
-        ++authorRequestRef.current;
-        setAuthorsLoading(false);
-      }
-    }
+    ++studioRequestRef.current;
+    ++streamingRequestRef.current;
+    ++authorRequestRef.current;
+    cancelRequest(studioControllerRef);
+    cancelRequest(streamingControllerRef);
+    cancelRequest(authorControllerRef);
+    setStudios([]);
+    setStreamingServices([]);
+    setAuthors([]);
+    setStudiosLoading(false);
+    setStreamingServicesLoading(false);
+    setAuthorsLoading(false);
+    setStudiosHasMore(false);
+    setStreamingServicesHasMore(false);
+    setAuthorsHasMore(false);
   }, [
     contentType,
     loadFilterRanges,
     loadGenres,
-    loadAuthors,
-    loadStreamingServices,
-    loadStudios,
   ]);
 
   useEffect(() => {
@@ -1247,6 +1628,31 @@ export default function App() {
     };
     document.addEventListener("pointerdown", closeFilterDropdowns);
     return () => document.removeEventListener("pointerdown", closeFilterDropdowns);
+  }, []);
+
+  useEffect(() => () => {
+    ++catalogueRequestRef.current;
+    ++seasonalRequestRef.current;
+    ++genreRequestRef.current;
+    ++tagRequestRef.current;
+    ++studioRequestRef.current;
+    ++streamingRequestRef.current;
+    ++authorRequestRef.current;
+    ++rangeRequestRef.current;
+    ++detailRequestRef.current;
+    cancelRequest(catalogueControllerRef);
+    cancelRequest(seasonalControllerRef);
+    cancelRequest(genreControllerRef);
+    cancelRequest(tagControllerRef);
+    cancelRequest(studioControllerRef);
+    cancelRequest(streamingControllerRef);
+    cancelRequest(authorControllerRef);
+    cancelRequest(rangeControllerRef);
+    cancelRequest(detailControllerRef);
+    if (sliderApplyTimerRef.current) {
+      window.clearTimeout(sliderApplyTimerRef.current);
+      sliderApplyTimerRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -1315,7 +1721,12 @@ export default function App() {
   const filterPresets = presetsFor(contentType);
   const applyFilters = useCallback((nextFilters, {
     allTypesSelected = allTypesExplicitlySelected,
+    replace = false,
   } = {}) => {
+    if (sliderApplyTimerRef.current) {
+      window.clearTimeout(sliderApplyTimerRef.current);
+      sliderApplyTimerRef.current = null;
+    }
     const submittedFilters = copiedFilters(nextFilters);
     const returnsHome = usesTopRatedAnimeHomepage(
       contentType,
@@ -1324,6 +1735,7 @@ export default function App() {
     );
     const requestFilters = returnsHome ? TOP_RATED_FILTERS : submittedFilters;
     const nextView = returnsHome ? "home" : "results";
+    filtersRef.current = submittedFilters;
     setFilters(submittedFilters);
     setAppliedFilters(requestFilters);
     setAllTypesExplicitlySelected(allTypesSelected);
@@ -1337,6 +1749,7 @@ export default function App() {
       activeContentType: contentType,
       activeSort: sort,
       activeView: nextView,
+      replace,
     });
   }, [
     allTypesExplicitlySelected,
@@ -1355,6 +1768,10 @@ export default function App() {
 
   const selectContentType = (nextContentType) => {
     if (nextContentType === contentType) return;
+    if (sliderApplyTimerRef.current) {
+      window.clearTimeout(sliderApplyTimerRef.current);
+      sliderApplyTimerRef.current = null;
+    }
 
     const nextFilters = filtersFor();
     const nextView = nextContentType === "ANIME" ? "home" : "results";
@@ -1362,7 +1779,9 @@ export default function App() {
       ? TOP_RATED_FILTERS
       : nextFilters;
     ++detailRequestRef.current;
+    cancelRequest(detailControllerRef);
     setContentType(nextContentType);
+    filtersRef.current = nextFilters;
     setFilters(nextFilters);
     setAppliedFilters(nextAppliedFilters);
     setSort(DEFAULT_SORT);
@@ -1371,6 +1790,7 @@ export default function App() {
     setDetailLoading(false);
     setTagOptions([]);
     setTagsLoading(false);
+    setTagsHasMore(false);
     setActivePreset("");
     setMobileFiltersOpen(false);
     setMoreFiltersOpen(false);
@@ -1386,6 +1806,7 @@ export default function App() {
     setJumpPage("");
     setPageError("");
     ++tagRequestRef.current;
+    cancelRequest(tagControllerRef);
     setViewMode(nextView);
     navigateCatalogue({
       page: 1,
@@ -1398,6 +1819,7 @@ export default function App() {
 
   const showRandom = async () => {
     const requestId = ++catalogueRequestRef.current;
+    const controller = nextRequestController(catalogueControllerRef);
     const randomFilters = copiedFilters(filters);
     setViewMode("random");
     setAppliedFilters(randomFilters);
@@ -1405,15 +1827,15 @@ export default function App() {
     setError("");
     setActivePreset("");
     try {
-      const response = await fetch(
+      const { ok, body } = await getJson(
         `/api/v1/catalogue/random?${randomQueryString(
           randomFilters,
           contentType,
           6,
         )}`,
+        { signal: controller.signal, cache: false },
       );
-      const body = await response.json();
-      if (!response.ok) {
+      if (!ok) {
         throw new Error(
           body.error?.message || `Could not load random ${contentDetails.resultLabel}.`,
         );
@@ -1424,6 +1846,7 @@ export default function App() {
       setPagination({ page: 1, pages: 1, total: randomItems.length });
       setUpdatedAt(null);
     } catch (requestError) {
+      if (isAbortError(requestError)) return;
       if (requestId !== catalogueRequestRef.current) return;
       setItems([]);
       setPagination({ page: 1, pages: 1, total: 0 });
@@ -1434,18 +1857,22 @@ export default function App() {
     }
   };
 
-  const openDetail = async (item) => {
+  const openDetail = useCallback(async (item) => {
     const requestId = ++detailRequestRef.current;
+    const controller = nextRequestController(detailControllerRef);
     const detailContentType = itemContentType(item);
     setSelected({ ...item, content_type: detailContentType });
     setDetailLoading(true);
     setError("");
     try {
-      const response = await fetch(
+      const { ok, body } = await getJson(
         `/api/v1/catalogue/${detailContentType}/${item.mal_id}`,
+        {
+          signal: controller.signal,
+          ttlMs: DETAIL_CACHE_TTL_MS,
+        },
       );
-      const body = await response.json();
-      if (!response.ok) {
+      if (!ok) {
         throw new Error(body.error?.message || "Could not load details.");
       }
       if (requestId === detailRequestRef.current) {
@@ -1455,25 +1882,28 @@ export default function App() {
         });
       }
     } catch (requestError) {
+      if (isAbortError(requestError)) return;
       if (requestId !== detailRequestRef.current) return;
       setSelected(null);
       setError(requestError.message);
     } finally {
       if (requestId === detailRequestRef.current) setDetailLoading(false);
     }
-  };
+  }, []);
 
-  const closeDetail = () => {
+  const closeDetail = useCallback(() => {
     ++detailRequestRef.current;
+    cancelRequest(detailControllerRef);
     setSelected(null);
     setDetailLoading(false);
-  };
+  }, []);
 
   const changeFilter = (event) => {
     const { name, value } = event.target;
     const nextFilters = { ...filters, [name]: value };
     if (name === "q") {
       setActivePreset("");
+      filtersRef.current = nextFilters;
       setFilters(nextFilters);
       return;
     }
@@ -1482,8 +1912,21 @@ export default function App() {
     });
   };
 
-  const changeFilterValue = (name, value) => {
-    applyFilters({ ...filters, [name]: value });
+  const changeFilterValue = (name, value, { immediate = false } = {}) => {
+    const nextFilters = { ...filtersRef.current, [name]: value };
+    filtersRef.current = nextFilters;
+    setFilters(nextFilters);
+    if (sliderApplyTimerRef.current) {
+      window.clearTimeout(sliderApplyTimerRef.current);
+    }
+    if (immediate) {
+      applyFilters(nextFilters);
+      return;
+    }
+    sliderApplyTimerRef.current = window.setTimeout(() => {
+      sliderApplyTimerRef.current = null;
+      applyFilters(filtersRef.current);
+    }, SLIDER_DEBOUNCE_MS);
   };
 
   const toggleMultiFilter = (name, value) => {
@@ -1522,6 +1965,11 @@ export default function App() {
       ? TOP_RATED_FILTERS
       : clearedFilters;
     const nextView = contentType === "ANIME" ? "home" : "results";
+    if (sliderApplyTimerRef.current) {
+      window.clearTimeout(sliderApplyTimerRef.current);
+      sliderApplyTimerRef.current = null;
+    }
+    filtersRef.current = clearedFilters;
     setFilters(clearedFilters);
     setAppliedFilters(clearedAppliedFilters);
     setAllTypesExplicitlySelected(false);
@@ -1552,6 +2000,11 @@ export default function App() {
 
   const applyPreset = (preset) => {
     const presetFilters = filtersFromPreset(preset);
+    if (sliderApplyTimerRef.current) {
+      window.clearTimeout(sliderApplyTimerRef.current);
+      sliderApplyTimerRef.current = null;
+    }
+    filtersRef.current = presetFilters;
     setFilters(presetFilters);
     setAppliedFilters(presetFilters);
     setAllTypesExplicitlySelected(contentType === "ANIME");
@@ -1571,6 +2024,7 @@ export default function App() {
 
   const removeChip = (chip) => {
     const nextFilters = filtersWithoutChip(appliedFilters, chip);
+    filtersRef.current = nextFilters;
     setFilters(nextFilters);
     setAppliedFilters(nextFilters);
     setActivePreset("");
@@ -1588,6 +2042,7 @@ export default function App() {
   const changeSort = (event) => {
     const nextSort = event.target.value;
     const nextFilters = showHomepageSections ? filtersFor() : appliedFilters;
+    filtersRef.current = nextFilters;
     setSort(nextSort);
     setFilters(nextFilters);
     setAppliedFilters(nextFilters);
@@ -1697,6 +2152,7 @@ export default function App() {
             tagOptions={tagOptions}
             tagQuery={tagQuery}
             tagsLoading={tagsLoading}
+            tagsHasMore={tagsHasMore}
             dropdownOpen={genreDropdownOpen}
             dropdownRef={genreDropdownRef}
             onDropdownToggle={(isOpen) => {
@@ -1712,6 +2168,11 @@ export default function App() {
               if (!isOpen) setTagQuery("");
             }}
             onQueryChange={setTagQuery}
+            onTagsLoadMore={() => loadTags(
+              tagQuery.trim(),
+              contentType,
+              tagOptions.length,
+            )}
             onGenreToggle={toggleGenre}
             onTagToggle={toggleTag}
           />
@@ -1728,6 +2189,7 @@ export default function App() {
               options={authors}
               query={authorQuery}
               loading={authorsLoading}
+              hasMore={authorsHasMore}
               open={authorDropdownOpen}
               dropdownRef={authorDropdownRef}
               onOpenChange={(isOpen) => {
@@ -1744,6 +2206,11 @@ export default function App() {
                 }
               }}
               onQueryChange={setAuthorQuery}
+              onLoadMore={() => loadAuthors(
+                authorQuery.trim(),
+                contentType,
+                authors.length,
+              )}
               onToggle={toggleAuthor}
             />
           </div>
@@ -1882,6 +2349,7 @@ export default function App() {
                 options={studios}
                 query={studioQuery}
                 loading={studiosLoading}
+                hasMore={studiosHasMore}
                 open={studioDropdownOpen}
                 dropdownRef={studioDropdownRef}
                 onOpenChange={(isOpen) => {
@@ -1898,6 +2366,11 @@ export default function App() {
                   }
                 }}
                 onQueryChange={setStudioQuery}
+                onLoadMore={() => loadStudios(
+                  studioQuery.trim(),
+                  contentType,
+                  studios.length,
+                )}
                 onToggle={toggleStudio}
               />
             </div>
@@ -1914,6 +2387,7 @@ export default function App() {
                 options={streamingServices}
                 query={streamingQuery}
                 loading={streamingServicesLoading}
+                hasMore={streamingServicesHasMore}
                 open={streamingDropdownOpen}
                 dropdownRef={streamingDropdownRef}
                 onOpenChange={(isOpen) => {
@@ -1930,6 +2404,11 @@ export default function App() {
                   }
                 }}
                 onQueryChange={setStreamingQuery}
+                onLoadMore={() => loadStreamingServices(
+                  streamingQuery.trim(),
+                  contentType,
+                  streamingServices.length,
+                )}
                 onToggle={toggleStreamingService}
               />
             </div>
@@ -2090,14 +2569,18 @@ export default function App() {
       )}
 
       {showHomepageSections && (
-        <section className="mb-12" aria-labelledby="popular-this-season">
+        <section
+          className="mb-12"
+          aria-labelledby="popular-this-season"
+          aria-busy={seasonalLoading}
+        >
           <h2
             id="popular-this-season"
             className="mb-5 text-3xl font-black tracking-tight text-white sm:text-4xl"
           >
             POPULAR THIS SEASON
           </h2>
-          {seasonalLoading ? (
+          {seasonalLoading && seasonalAnime.length === 0 ? (
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
               {Array.from({ length: 6 }, (_, index) => (
                 <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />
@@ -2105,11 +2588,19 @@ export default function App() {
             </div>
           ) : seasonalAnime.length > 0 ? (
             <div className="relative">
+              {seasonalLoading && (
+                <p
+                  className="absolute right-2 top-2 z-20 rounded-full bg-slate-950/85 px-3 py-1 text-xs font-semibold text-violet-200"
+                  role="status"
+                >
+                  Refreshing seasonal anime...
+                </p>
+              )}
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
                 {seasonalAnime.map((entry) => (
                   <CatalogueCard
                     key={`ANIME:${entry.mal_id ?? entry.id}`}
-                    item={{ ...entry, content_type: "ANIME" }}
+                    item={entry}
                     onSelect={openDetail}
                   />
                 ))}
@@ -2141,7 +2632,10 @@ export default function App() {
         </section>
       )}
 
-      <section aria-label={`${contentDetails.label} results`}>
+      <section
+        aria-label={`${contentDetails.label} results`}
+        aria-busy={loading}
+      >
         <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
           <div>
             {showHomepageSections && (
@@ -2152,7 +2646,7 @@ export default function App() {
                 TOP RATED
               </h2>
             )}
-            {!loading && !error && (
+            {(!loading || items.length > 0) && !error && (
               <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-400">
                 <span>
                   {pagination.total.toLocaleString()} {contentDetails.resultLabel} found
@@ -2185,22 +2679,32 @@ export default function App() {
           )}
         </div>
 
-        {loading ? (
+        {loading && items.length === 0 ? (
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
             {Array.from({ length: 12 }, (_, index) => (
               <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />
             ))}
           </div>
         ) : items.length > 0 ? (
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
-            {items.map((entry) => (
-              <CatalogueCard
-                key={`${itemContentType(entry)}:${entry.mal_id ?? entry.id}`}
-                item={entry}
-                onSelect={openDetail}
-                showContentBadge={contentType === "ALL"}
-              />
-            ))}
+          <div className="relative">
+            {loading && (
+              <p
+                className="absolute right-2 top-2 z-20 rounded-full bg-slate-950/85 px-3 py-1 text-xs font-semibold text-violet-200 shadow-lg"
+                role="status"
+              >
+                Refreshing results...
+              </p>
+            )}
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+              {items.map((entry) => (
+                <CatalogueCard
+                  key={`${itemContentType(entry)}:${entry.mal_id ?? entry.id}`}
+                  item={entry}
+                  onSelect={openDetail}
+                  showContentBadge={contentType === "ALL"}
+                />
+              ))}
+            </div>
           </div>
         ) : !error && (
           <div className="rounded-2xl border border-dashed border-slate-600 p-12 text-center text-slate-300">
@@ -2209,7 +2713,9 @@ export default function App() {
         )}
       </section>
 
-      {!loading && pagination.pages > 1 && viewMode !== "random" && (
+      {(!loading || items.length > 0)
+        && pagination.pages > 1
+        && viewMode !== "random" && (
         <nav
           className="mt-10 flex flex-col items-center gap-4"
           aria-label="Pagination"
