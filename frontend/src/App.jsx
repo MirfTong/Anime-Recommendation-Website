@@ -1933,6 +1933,9 @@ export default function App() {
     && !filtersMatch(appliedFilters, defaultFilters);
   const contentDetails = contentTypeDetails(contentType);
   const filterLayout = FILTER_LAYOUTS[contentType];
+  const resultsHeading = sortOptionsFor(contentType).find(
+    ({ value }) => value === sort,
+  )?.label.toUpperCase() ?? "TOP RATED";
   const chips = showHomepageSections
     ? []
     : activeFilterChips(appliedFilters, contentType);
@@ -2267,20 +2270,24 @@ export default function App() {
 
   const changeSort = (event) => {
     const nextSort = event.target.value;
-    const nextFilters = showHomepageSections ? filtersFor() : appliedFilters;
-    filtersRef.current = nextFilters;
+    const remainsOnHomepage = showHomepageSections;
+    const nextFilters = remainsOnHomepage ? TOP_RATED_FILTERS : appliedFilters;
+    const nextFilterInputs = remainsOnHomepage ? filtersFor() : nextFilters;
+    filtersRef.current = nextFilterInputs;
     setSort(nextSort);
-    setFilters(nextFilters);
+    setFilters(nextFilterInputs);
     setAppliedFilters(nextFilters);
-    setViewMode("results");
-    setAllTypesExplicitlySelected(contentType === "ANIME");
+    setViewMode(remainsOnHomepage ? "home" : "results");
+    setAllTypesExplicitlySelected(
+      !remainsOnHomepage && contentType === "ANIME",
+    );
     setActivePreset("");
     navigateCatalogue({
       page: 1,
       activeFilters: nextFilters,
       activeContentType: contentType,
       activeSort: nextSort,
-      activeView: "results",
+      activeView: remainsOnHomepage ? "home" : "results",
     });
   };
 
@@ -2869,7 +2876,7 @@ export default function App() {
                 id="top-rated"
                 className="text-3xl font-black tracking-tight text-white sm:text-4xl"
               >
-                TOP RATED
+                {resultsHeading}
               </h2>
             )}
             {(!loading || items.length > 0) && !error && (

@@ -373,6 +373,33 @@ describe("catalogue filter integration", () => {
     })).toBe(true));
   });
 
+  test("sorting the anime homepage retains the seasonal section and updates its results heading", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByRole("heading", {
+      name: "POPULAR THIS SEASON",
+    })).toBeInTheDocument();
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Sort catalogue" }),
+      "most_popular",
+    );
+
+    expect(screen.getByRole("heading", {
+      name: "POPULAR THIS SEASON",
+    })).toBeInTheDocument();
+    expect(screen.getByRole("heading", {
+      name: "MOST POPULAR",
+    })).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => {
+      const request = new URL(String(input), "https://kyoquan.test");
+      return request.pathname === "/api/v1/catalogue"
+        && request.searchParams.get("sort") === "most_popular"
+        && request.searchParams.get("type") === "TV";
+    })).toBe(true));
+    expect(new URLSearchParams(window.location.search).get("view")).toBe("home");
+  });
+
   test("print-only entry points skip seasonal anime and bound facet responses", async () => {
     const user = userEvent.setup();
     window.history.replaceState({}, "", "/?content_type=MANGA");
