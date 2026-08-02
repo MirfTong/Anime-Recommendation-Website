@@ -548,6 +548,29 @@ export function streamingServiceEntries(entries) {
     });
 }
 
+export function streamingServiceBrand(name, url = "") {
+  const identity = `${name ?? ""} ${url ?? ""}`.toLocaleLowerCase();
+  const brands = [
+    ["myanimelist", ["myanimelist", "my anime list"]],
+    ["crunchyroll", ["crunchyroll"]],
+    ["netflix", ["netflix"]],
+    ["hulu", ["hulu"]],
+    ["prime-video", ["prime video", "primevideo", "amazon.com/gp/video"]],
+    ["disney-plus", ["disney+", "disney plus", "disneyplus"]],
+    ["hidive", ["hidive"]],
+    ["funimation", ["funimation"]],
+    ["youtube", ["youtube", "youtu.be"]],
+    ["tubi", ["tubi"]],
+    ["peacock", ["peacocktv", "peacock tv"]],
+    ["retrocrush", ["retrocrush"]],
+    ["max", ["hbo max", "hbomax", "max.com"]],
+    ["apple-tv", ["apple tv", "tv.apple.com"]],
+  ];
+  return brands.find(([, aliases]) => (
+    aliases.some((alias) => identity.includes(alias))
+  ))?.[0] ?? "external";
+}
+
 export function validatedPage(value, totalPages) {
   const page = Number(value);
   return Number.isInteger(page) && page >= 1 && page <= totalPages

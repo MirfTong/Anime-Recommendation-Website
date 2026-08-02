@@ -32,6 +32,7 @@ import {
   responsiveFilterPanelClasses,
   scoreLabel,
   sortOptionsFor,
+  streamingServiceBrand,
   streamingServiceEntries,
   usesTopRatedAnimeHomepage,
   validatedPage,
@@ -170,6 +171,108 @@ function ContentBadge({ contentType }) {
       }`}
     >
       {contentTypeDetails(contentType).label}
+    </span>
+  );
+}
+
+export function ServiceBrandIcon({ name, url = "", brand: explicitBrand }) {
+  const brand = explicitBrand ?? streamingServiceBrand(name, url);
+  const styles = {
+    "apple-tv": "bg-black text-white",
+    crunchyroll: "bg-[#f47521] text-white",
+    "disney-plus": "bg-[#113ccf] text-white",
+    external: "bg-[#2563eb] text-white",
+    funimation: "bg-[#5b23c8] text-white",
+    hidive: "bg-[#00a8e1] text-slate-950",
+    hulu: "bg-[#1ce783] text-slate-950",
+    mal: "bg-[#2e51a2] text-white",
+    max: "bg-[#002be7] text-white",
+    myanimelist: "bg-[#2e51a2] text-white",
+    netflix: "bg-black text-[#e50914]",
+    peacock: "bg-black text-white",
+    "prime-video": "bg-[#00a8e1] text-slate-950",
+    retrocrush: "bg-[#e83e8c] text-white",
+    tubi: "bg-[#6f2cff] text-white",
+    youtube: "bg-[#ff0033] text-white",
+  };
+  const labels = {
+    "apple-tv": "tv",
+    "disney-plus": "D+",
+    hidive: "HD",
+    hulu: "hulu",
+    mal: "MAL",
+    max: "max",
+    myanimelist: "MAL",
+    "prime-video": "prime",
+    retrocrush: "RC",
+    tubi: "tubi",
+  };
+  let glyph;
+  if (brand === "netflix") {
+    glyph = (
+      <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+        <path fill="currentColor" d="M5 3h4v18H5zM15 3h4v18h-4z" />
+        <path fill="currentColor" d="M5 3h4l10 18h-4z" />
+      </svg>
+    );
+  } else if (brand === "crunchyroll") {
+    glyph = (
+      <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+        <circle cx="12" cy="12" r="8" fill="currentColor" />
+        <circle cx="14.5" cy="10.5" r="6" fill="#f47521" />
+        <circle cx="18" cy="8.5" r="2" fill="currentColor" />
+      </svg>
+    );
+  } else if (brand === "youtube") {
+    glyph = (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+        <path fill="currentColor" d="m9 7 8 5-8 5z" />
+      </svg>
+    );
+  } else if (brand === "funimation") {
+    glyph = (
+      <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+        <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="2" />
+        <path d="M8 13c1 3 7 3 8 0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      </svg>
+    );
+  } else if (brand === "peacock") {
+    glyph = (
+      <span className="flex gap-px" aria-hidden="true">
+        {["#f7d117", "#f89c1c", "#ef3e42", "#9e4aa7", "#0089cf", "#00a651"].map((color) => (
+          <span key={color} className="h-1 w-1 rounded-full" style={{ backgroundColor: color }} />
+        ))}
+      </span>
+    );
+  } else if (labels[brand]) {
+    glyph = (
+      <span
+        className={`font-black leading-none ${
+          ["hulu", "prime-video", "tubi", "max"].includes(brand)
+            ? "text-[0.42rem]"
+            : "text-[0.48rem]"
+        }`}
+        aria-hidden="true"
+      >
+        {labels[brand]}
+      </span>
+    );
+  } else {
+    glyph = (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+        <path d="M8 16 16 8M10 8h6v6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  return (
+    <span
+      className={`inline-flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-md ring-1 ring-white/15 ${
+        styles[brand] ?? styles.external
+      }`}
+      data-service-brand={brand}
+      aria-hidden="true"
+    >
+      {glyph}
     </span>
   );
 }
@@ -359,19 +462,22 @@ function DetailModal({ item, loading, onClose }) {
                     url ? (
                       <a
                         key={name}
-                        className="rounded-full border border-violet-400/30 bg-violet-400/10 px-3 py-1.5 text-sm font-semibold text-violet-100 transition hover:border-violet-300 hover:bg-violet-400/20"
+                        className="inline-flex items-center gap-2 rounded-full border border-violet-400/30 bg-violet-400/10 py-1 pl-1 pr-3 text-sm font-semibold text-violet-100 transition hover:border-violet-300 hover:bg-violet-400/20"
                         href={url}
                         target="_blank"
                         rel="noopener noreferrer"
                       >
-                        {name} ↗
+                        <ServiceBrandIcon name={name} url={url} />
+                        <span>{name}</span>
+                        <span className="sr-only"> (opens in a new tab)</span>
                       </a>
                     ) : (
                       <span
                         key={name}
-                        className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-slate-300"
+                        className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 py-1 pl-1 pr-3 text-sm text-slate-300"
                       >
-                        {name}
+                        <ServiceBrandIcon name={name} />
+                        <span>{name}</span>
                       </span>
                     )
                   ))}
@@ -391,12 +497,14 @@ function DetailModal({ item, loading, onClose }) {
             )}
             {item.mal_url && (
               <a
-                className="inline-flex rounded-xl bg-violet-500 px-4 py-2 font-bold text-white transition hover:bg-violet-400"
+                className="inline-flex items-center gap-2 rounded-xl bg-violet-500 py-2 pl-2 pr-4 font-bold text-white transition hover:bg-violet-400"
                 href={item.mal_url}
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                View on MyAnimeList ↗
+                <ServiceBrandIcon name="MyAnimeList" brand="mal" />
+                <span>View on MyAnimeList</span>
+                <span className="sr-only"> (opens in a new tab)</span>
               </a>
             )}
           </div>

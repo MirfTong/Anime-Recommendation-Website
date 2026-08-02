@@ -25,6 +25,7 @@ import {
   safeExternalUrl,
   scoreLabel,
   sortOptionsFor,
+  streamingServiceBrand,
   streamingServiceEntries,
   usesTopRatedAnimeHomepage,
   validatedPage,
@@ -563,6 +564,19 @@ test("studio and streaming helpers normalize names and safe external links", () 
       { name: "Netflix", url: null },
     ],
   );
+  assert.equal(
+    streamingServiceBrand("Crunchyroll", "https://www.crunchyroll.com/watch"),
+    "crunchyroll",
+  );
+  assert.equal(
+    streamingServiceBrand("Watch now", "https://www.netflix.com/title/123"),
+    "netflix",
+  );
+  assert.equal(
+    streamingServiceBrand("Amazon Prime Video"),
+    "prime-video",
+  );
+  assert.equal(streamingServiceBrand("Unknown provider"), "external");
 });
 
 test("freshness text is omitted for missing data and humanized when present", () => {

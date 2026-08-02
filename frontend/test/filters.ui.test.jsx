@@ -14,6 +14,7 @@ import App, {
   DualRangeSlider,
   MinimumSlider,
   SearchableMultiSelect,
+  ServiceBrandIcon,
 } from "../src/App.jsx";
 import { clearGetCache, getJson } from "../src/api.js";
 
@@ -185,6 +186,22 @@ describe("rendered filter controls", () => {
     expect(image).toHaveAttribute("decoding", "async");
     fireEvent.error(image);
     expect(image).toHaveAttribute("src", "/cover-placeholder.svg");
+  });
+
+  test("streaming and MyAnimeList links use provider-specific brand icons", () => {
+    const { container } = render(
+      <div>
+        <ServiceBrandIcon name="Netflix" />
+        <ServiceBrandIcon name="Crunchyroll" />
+        <ServiceBrandIcon name="MyAnimeList" brand="mal" />
+        <ServiceBrandIcon name="Unknown provider" />
+      </div>,
+    );
+
+    expect(container.querySelector('[data-service-brand="netflix"]')).not.toBeNull();
+    expect(container.querySelector('[data-service-brand="crunchyroll"]')).not.toBeNull();
+    expect(container.querySelector('[data-service-brand="mal"]')).not.toBeNull();
+    expect(container.querySelector('[data-service-brand="external"]')).not.toBeNull();
   });
 
   test("the entire dual-slider track accepts pointer input", () => {
