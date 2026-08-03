@@ -741,7 +741,7 @@ function GenreTagPicker({
         </summary>
         <div
           ref={tagPanelRef}
-          className="absolute z-30 mt-2 max-h-72 w-full min-w-64 overflow-y-auto rounded-xl border border-white/10 bg-slate-950 p-1 shadow-2xl"
+          className="absolute z-30 mt-2 max-h-72 w-full min-w-64 overflow-y-auto rounded-xl border border-white/10 bg-slate-950 shadow-2xl"
           aria-label="Genre and tag options"
           onScroll={(event) => {
             if (!isNearScrollEnd(event.currentTarget) || tagsLoading) return;
@@ -749,7 +749,7 @@ function GenreTagPicker({
           }}
         >
           <div
-            className="sticky top-0 z-10 flex gap-1 border-b border-white/10 bg-slate-950 p-2"
+            className="sticky top-0 z-20 flex gap-1 rounded-t-xl border-b border-white/10 bg-slate-950 p-2"
             role="group"
             aria-label="Genre and tag selection mode"
           >
