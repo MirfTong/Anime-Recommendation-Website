@@ -308,9 +308,19 @@ export function presetsFor(contentType, now = new Date()) {
         filters: { type: "TV", max_episodes: "13" },
       },
       {
+        id: "long-series",
+        label: "Long series",
+        filters: { type: "TV", min_episodes: "24" },
+      },
+      {
         id: "movies",
         label: "Movies",
         filters: { type: "MOVIE" },
+      },
+      {
+        id: "completed-anime",
+        label: "Completed anime",
+        filters: { status: "FINISHED_AIRING" },
       },
     );
   }
