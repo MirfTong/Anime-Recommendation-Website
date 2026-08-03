@@ -458,7 +458,7 @@ function SeasonalCarousel({
             ))}
           </div>
           <button
-            className="absolute -left-3 top-[45%] z-10 inline-flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-slate-900/90 p-0 text-white shadow-lg transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30"
+            className="absolute -left-3 top-[45%] z-10 inline-flex h-16 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-slate-900/90 p-0 text-white shadow-lg transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30"
             type="button"
             aria-label={`Previous ${title.toLowerCase()} anime`}
             disabled={pagination.page === 1}
@@ -478,7 +478,7 @@ function SeasonalCarousel({
             </svg>
           </button>
           <button
-            className="absolute -right-3 top-[45%] z-10 inline-flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-slate-900/90 p-0 text-white shadow-lg transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30"
+            className="absolute -right-3 top-[45%] z-10 inline-flex h-16 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-slate-900/90 p-0 text-white shadow-lg transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30"
             type="button"
             aria-label={`Next ${title.toLowerCase()} anime`}
             disabled={pagination.page === pagination.pages}
