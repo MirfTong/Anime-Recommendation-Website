@@ -3,6 +3,28 @@
 @tailwind utilities;
 
 @layer base {
+  html {
+    scrollbar-color: #8b5cf6 #0f172a;
+    scrollbar-width: thin;
+  }
+
+  html::-webkit-scrollbar {
+    width: 0.75rem;
+  }
+
+  html::-webkit-scrollbar-track {
+    @apply border-l border-white/5 bg-slate-950;
+  }
+
+  html::-webkit-scrollbar-thumb {
+    @apply rounded-full border-2 border-slate-950 bg-violet-500;
+    background-clip: padding-box;
+  }
+
+  html::-webkit-scrollbar-thumb:hover {
+    @apply bg-emerald-400;
+  }
+
   body {
     @apply min-h-screen bg-slate-950 font-sans text-slate-100 antialiased;
     background-image: radial-gradient(circle at top, #312e81 0, transparent 32rem);
