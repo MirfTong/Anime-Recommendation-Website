@@ -2297,7 +2297,7 @@ export default function App() {
   };
 
   const applyPreset = (preset) => {
-    const presetFilters = filtersFromPreset(preset);
+    const presetFilters = filtersFromPreset(preset, filtersRef.current);
     if (sliderApplyTimerRef.current) {
       window.clearTimeout(sliderApplyTimerRef.current);
       sliderApplyTimerRef.current = null;
