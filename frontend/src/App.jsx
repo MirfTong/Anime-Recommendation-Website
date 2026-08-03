@@ -846,6 +846,7 @@ export function SearchableMultiSelect({
   query,
   loading,
   hasMore = false,
+  continuousScroll = false,
   open,
   dropdownRef,
   onOpenChange,
@@ -867,12 +868,14 @@ export function SearchableMultiSelect({
     selected,
     query,
   ), [options, query, selected]);
-  const matchingOptions = allMatchingOptions.slice(
-    windowStart,
-    windowStart + FACET_OPTION_LIMIT,
-  );
-  const canShowPreviousOptions = windowStart > 0;
-  const canShowMoreOptions = (
+  const matchingOptions = continuousScroll
+    ? allMatchingOptions
+    : allMatchingOptions.slice(
+      windowStart,
+      windowStart + FACET_OPTION_LIMIT,
+    );
+  const canShowPreviousOptions = !continuousScroll && windowStart > 0;
+  const canShowMoreOptions = !continuousScroll && (
     windowStart + FACET_OPTION_LIMIT < allMatchingOptions.length
     || hasMore
   );
@@ -923,6 +926,10 @@ export function SearchableMultiSelect({
 
   const showNextOptions = () => {
     if (loading) return;
+    if (continuousScroll) {
+      if (hasMore) onLoadMore();
+      return;
+    }
     const nextStart = windowStart + FACET_OPTION_LIMIT;
     if (nextStart < allMatchingOptions.length) {
       if (listboxRef.current) listboxRef.current.scrollTop = 0;
@@ -1074,7 +1081,7 @@ export function SearchableMultiSelect({
               </div>
             )}
           </div>
-          {(canShowPreviousOptions || canShowMoreOptions) && (
+          {!continuousScroll && (canShowPreviousOptions || canShowMoreOptions) && (
             <div className="flex gap-2 border-t border-white/10 bg-slate-950 p-2">
               {canShowPreviousOptions && (
                 <button
@@ -2652,6 +2659,7 @@ export default function App() {
                 query={studioQuery}
                 loading={studiosLoading}
                 hasMore={studiosHasMore}
+                continuousScroll
                 open={studioDropdownOpen}
                 dropdownRef={studioDropdownRef}
                 onOpenChange={(isOpen) => {
