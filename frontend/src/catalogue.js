@@ -336,9 +336,10 @@ export function presetsFor(contentType, now = new Date()) {
   return presets;
 }
 
-export function filtersFromPreset(preset) {
+export function filtersFromPreset(preset, existingFilters = filtersFor()) {
   return {
     ...filtersFor(),
+    ...existingFilters,
     ...preset.filters,
   };
 }

@@ -386,7 +386,7 @@ test("all-content URL state ignores media-specific filters", () => {
   assert.deepEqual(restored.filters.author, []);
 });
 
-test("presets create clean, media-relevant filter state", () => {
+test("presets add their filters without clearing existing selections", () => {
   const animePresets = presetsFor("ANIME", new Date("2026-07-15T12:00:00Z"));
   const seasonal = animePresets.find(({ id }) => id === "new-season");
   const shortSeries = animePresets.find(({ id }) => id === "short-series");
@@ -415,6 +415,22 @@ test("presets create clean, media-relevant filter state", () => {
   assert.equal(filtersFromPreset(completedManga).status, "FINISHED");
   assert.equal(filtersFromPreset(completedManga).genre.length, 0);
   assert.equal(filtersFromPreset(completedManhwa).status, "FINISHED");
+
+  const stacked = filtersFromPreset(completedManga, {
+    ...filtersFor("MANGA"),
+    q: "berserk",
+    genre: ["Action"],
+    tag: ["gore"],
+    exclude_tag: ["harem"],
+    min_score: "8",
+    status: "PUBLISHING",
+  });
+  assert.equal(stacked.status, "FINISHED");
+  assert.equal(stacked.q, "berserk");
+  assert.deepEqual(stacked.genre, ["Action"]);
+  assert.deepEqual(stacked.tag, ["gore"]);
+  assert.deepEqual(stacked.exclude_tag, ["harem"]);
+  assert.equal(stacked.min_score, "8");
 });
 
 test("active chips represent each removable catalogue filter", () => {
