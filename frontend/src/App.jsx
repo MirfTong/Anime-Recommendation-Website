@@ -524,6 +524,24 @@ function DetailModal({ item, loading, onClose }) {
               <Score value={item.score} />
               <span className="text-slate-300">{itemMetadata(item, true).join(" · ")}</span>
             </div>
+            {loading ? (
+              <div className="min-h-80 space-y-4 pt-1" role="status">
+                <p className="text-sm font-semibold text-violet-200">
+                  Loading full details…
+                </p>
+                <div className="grid grid-cols-2 gap-2 sm:max-w-md" aria-hidden="true">
+                  <div className="h-16 animate-pulse rounded-xl bg-slate-800" />
+                  <div className="h-16 animate-pulse rounded-xl bg-slate-800" />
+                </div>
+                <div className="h-7 w-3/4 animate-pulse rounded-full bg-slate-800" aria-hidden="true" />
+                <div className="space-y-2" aria-hidden="true">
+                  <div className="h-4 w-full animate-pulse rounded bg-slate-800" />
+                  <div className="h-4 w-11/12 animate-pulse rounded bg-slate-800" />
+                  <div className="h-4 w-4/5 animate-pulse rounded bg-slate-800" />
+                </div>
+              </div>
+            ) : (
+              <>
             <dl className="grid grid-cols-2 gap-2 text-sm text-slate-300 sm:max-w-md">
               <div className="rounded-xl border border-white/10 bg-slate-950/40 px-3 py-2">
                 <dt className="text-xs font-semibold uppercase tracking-wider text-violet-200">
@@ -568,11 +586,6 @@ function DetailModal({ item, loading, onClose }) {
                 {authors.map(({ name, role }) => (
                   role ? `${name} (${role})` : name
                 )).join(", ")}
-              </p>
-            )}
-            {loading && (
-              <p className="text-sm text-violet-200" role="status">
-                Loading full details…
               </p>
             )}
             {item.synopsis && (
@@ -642,6 +655,8 @@ function DetailModal({ item, loading, onClose }) {
                 <span>View on MyAnimeList</span>
                 <span className="sr-only"> (opens in a new tab)</span>
               </a>
+            )}
+              </>
             )}
           </div>
         </div>
