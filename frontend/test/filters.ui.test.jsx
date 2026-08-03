@@ -538,7 +538,9 @@ describe("catalogue filter integration", () => {
         && request.searchParams.get("offset") === "100";
     })).toBe(true));
     expect(await screen.findByRole("button", { name: "Include tag 100" })).toBeInTheDocument();
-    expect(optionPanel.scrollTop).toBe(0);
+    expect(optionPanel.scrollTop).toBe(720);
+    expect(screen.queryByText("Previous tags")).not.toBeInTheDocument();
+    expect(screen.queryByText("More tags")).not.toBeInTheDocument();
   });
 
   test("genre and tag exclusions update results, URL state, and selection mode", async () => {
