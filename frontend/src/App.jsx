@@ -381,7 +381,7 @@ const CatalogueCard = memo(function CatalogueCard({
         >
           {metadata}
         </p>
-        <div className="mt-auto flex h-14 content-start flex-wrap gap-1.5 overflow-hidden">
+        <div className="mt-auto flex h-[3.875rem] content-start flex-wrap gap-1.5 overflow-hidden">
           {visibleGenres.map((genre) => (
             <span
               key={genre}
@@ -444,7 +444,7 @@ function SeasonalCarousel({
             ))}
           </div>
           <button
-            className="absolute -left-3 top-1/2 z-10 -translate-y-1/2 rounded-full border border-white/15 bg-slate-900/90 px-3 py-4 text-2xl font-bold text-white shadow-lg transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30"
+            className="absolute -left-3 top-[46%] z-10 -translate-y-1/2 rounded-full border border-white/15 bg-slate-900/90 px-3 py-4 text-2xl font-bold text-white shadow-lg transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30"
             type="button"
             aria-label={`Previous ${title.toLowerCase()} anime`}
             disabled={pagination.page === 1}
@@ -453,7 +453,7 @@ function SeasonalCarousel({
             &lsaquo;
           </button>
           <button
-            className="absolute -right-3 top-1/2 z-10 -translate-y-1/2 rounded-full border border-white/15 bg-slate-900/90 px-3 py-4 text-2xl font-bold text-white shadow-lg transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30"
+            className="absolute -right-3 top-[46%] z-10 -translate-y-1/2 rounded-full border border-white/15 bg-slate-900/90 px-3 py-4 text-2xl font-bold text-white shadow-lg transition hover:border-violet-400 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30"
             type="button"
             aria-label={`Next ${title.toLowerCase()} anime`}
             disabled={pagination.page === pagination.pages}
@@ -501,7 +501,7 @@ function DetailModal({ item, loading, onClose }) {
       <article className="relative max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-3xl border border-white/10 bg-slate-900 shadow-2xl">
         <div className="sticky top-0 z-20 flex justify-end bg-slate-900/95 px-4 py-3 backdrop-blur-sm">
           <button
-            className="rounded-full bg-slate-950/80 px-3 py-1 text-xl text-white transition hover:bg-violet-600"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-slate-950/80 p-0 text-xl leading-none text-white transition hover:bg-violet-600"
             onClick={onClose}
             type="button"
             aria-label="Close details"
