@@ -21,7 +21,10 @@ import App, {
 import { clearGetCache, getJson } from "../src/api.js";
 
 
-function PickerHarness({ options = ["Bones", "Madhouse", "MAPPA"] }) {
+function PickerHarness({
+  options = ["Bones", "Madhouse", "MAPPA"],
+  continuousScroll = false,
+}) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState([]);
@@ -33,6 +36,7 @@ function PickerHarness({ options = ["Bones", "Madhouse", "MAPPA"] }) {
       options={options}
       query={query}
       loading={false}
+      continuousScroll={continuousScroll}
       open={open}
       dropdownRef={dropdownRef}
       onOpenChange={setOpen}
@@ -180,6 +184,17 @@ describe("rendered filter controls", () => {
 
     await user.type(screen.getByRole("combobox", { name: "Search studio" }), "499");
     expect(screen.getByRole("option", { name: "Studio 499" })).toBeInTheDocument();
+  });
+
+  test("studio lists can continuously display options without navigation buttons", async () => {
+    const user = userEvent.setup();
+    const options = Array.from({ length: 150 }, (_, index) => `Studio ${index}`);
+    render(<PickerHarness options={options} continuousScroll />);
+
+    await user.click(screen.getByRole("button", { name: "Studio" }));
+    expect(screen.getAllByRole("option")).toHaveLength(150);
+    expect(screen.queryByRole("button", { name: "Previous options" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "More options" })).toBeNull();
   });
 
   test("cover images reserve a fixed ratio and fall back after an image error", () => {
