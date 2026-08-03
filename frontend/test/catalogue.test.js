@@ -13,6 +13,7 @@ import {
   filtersMatch,
   filtersWithoutChip,
   formatFreshness,
+  hasConflictingRangeFilters,
   itemContentType,
   itemMetadata,
   namedValues,
@@ -416,6 +417,13 @@ test("presets add their filters without clearing existing selections", () => {
   assert.equal(filtersFromPreset(shortSeries).max_episodes, "13");
   assert.equal(filtersFromPreset(longSeries).min_episodes, "24");
   assert.equal(filtersFromPreset(completedAnime).status, "FINISHED_AIRING");
+  assert.equal(
+    hasConflictingRangeFilters(
+      filtersFromPreset(longSeries, filtersFromPreset(shortSeries)),
+    ),
+    true,
+  );
+  assert.equal(hasConflictingRangeFilters(filtersFromPreset(shortSeries)), false);
   assert.equal(filtersFromPreset(completedManga).status, "FINISHED");
   assert.equal(filtersFromPreset(completedManga).genre.length, 0);
   assert.equal(filtersFromPreset(completedManhwa).status, "FINISHED");

@@ -18,6 +18,7 @@ import {
   discreteRangeValues,
   filtersFor,
   filtersFromPreset,
+  hasConflictingRangeFilters,
   filtersMatch,
   filtersWithoutChip,
   formatFreshness,
@@ -2081,6 +2082,7 @@ export default function App() {
       sliderApplyTimerRef.current = null;
     }
     const submittedFilters = copiedFilters(nextFilters);
+    if (hasConflictingRangeFilters(submittedFilters)) return false;
     const returnsHome = usesTopRatedAnimeHomepage(
       contentType,
       submittedFilters,
@@ -2365,6 +2367,7 @@ export default function App() {
 
   const applyPreset = (preset) => {
     const presetFilters = filtersFromPreset(preset, filtersRef.current);
+    if (hasConflictingRangeFilters(presetFilters)) return;
     if (sliderApplyTimerRef.current) {
       window.clearTimeout(sliderApplyTimerRef.current);
       sliderApplyTimerRef.current = null;
@@ -2890,21 +2893,30 @@ export default function App() {
           <span className="mr-1 text-xs font-bold uppercase tracking-widest text-slate-500">
             Quick picks
           </span>
-          {filterPresets.map((preset) => (
-            <button
-              key={preset.id}
-              className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
-                activePreset === preset.id
-                  ? "border-violet-400 bg-violet-500 text-white"
-                  : "border-white/10 bg-slate-900/70 text-slate-300 hover:border-violet-400"
-              }`}
-              type="button"
-              aria-pressed={activePreset === preset.id}
-              onClick={() => applyPreset(preset)}
-            >
-              {preset.label}
-            </button>
-          ))}
+          {filterPresets.map((preset) => {
+            const conflictsWithFilters = hasConflictingRangeFilters(
+              filtersFromPreset(preset, filters),
+            );
+            return (
+              <button
+                key={preset.id}
+                className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+                  activePreset === preset.id
+                    ? "border-violet-400 bg-violet-500 text-white"
+                    : "border-white/10 bg-slate-900/70 text-slate-300 hover:border-violet-400"
+                } disabled:cursor-not-allowed disabled:border-white/5 disabled:bg-slate-900/40 disabled:text-slate-500 disabled:hover:border-white/5`}
+                type="button"
+                aria-pressed={activePreset === preset.id}
+                disabled={conflictsWithFilters}
+                title={conflictsWithFilters
+                  ? "Conflicts with your current range filters"
+                  : undefined}
+                onClick={() => applyPreset(preset)}
+              >
+                {preset.label}
+              </button>
+            );
+          })}
         </div>
 
         {chips.length > 0 && (

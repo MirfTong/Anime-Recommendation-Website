@@ -61,6 +61,12 @@ const PRINT_FILTER_KEYS = [
 ];
 const ALL_FILTER_KEYS = [...COMMON_FILTER_KEYS];
 const PAGE_WINDOW_SIZE = 8;
+const RANGE_FILTER_PAIRS = [
+  ["min_year", "max_year"],
+  ["min_episodes", "max_episodes"],
+  ["min_chapters", "max_chapters"],
+  ["min_volumes", "max_volumes"],
+];
 
 export function filtersFor() {
   return {
@@ -73,6 +79,23 @@ export function filtersFor() {
     streaming_service: [],
     author: [],
   };
+}
+
+function hasInvertedRange(filters, minimumKey, maximumKey) {
+  const minimum = filters[minimumKey];
+  const maximum = filters[maximumKey];
+  if (minimum === "" || maximum === "") return false;
+  const numericMinimum = Number(minimum);
+  const numericMaximum = Number(maximum);
+  return Number.isFinite(numericMinimum)
+    && Number.isFinite(numericMaximum)
+    && numericMinimum > numericMaximum;
+}
+
+export function hasConflictingRangeFilters(filters) {
+  return RANGE_FILTER_PAIRS.some(([minimumKey, maximumKey]) => (
+    hasInvertedRange(filters, minimumKey, maximumKey)
+  ));
 }
 
 export const TOP_RATED_FILTERS = { ...filtersFor(), type: "TV" };

@@ -408,6 +408,19 @@ describe("catalogue filter integration", () => {
     })).toBe(true));
   });
 
+  test("Quick Picks disable presets that conflict with the active range", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Short series" }));
+    const longSeries = screen.getByRole("button", { name: "Long series" });
+    expect(longSeries).toBeDisabled();
+    expect(longSeries).toHaveAttribute(
+      "title",
+      "Conflicts with your current range filters",
+    );
+  });
+
   test("sorting the anime homepage retains the seasonal section and updates its results heading", async () => {
     const user = userEvent.setup();
     render(<App />);
