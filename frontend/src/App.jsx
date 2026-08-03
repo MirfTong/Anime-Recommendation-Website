@@ -685,10 +685,8 @@ function GenreTagPicker({
   onGenreToggle,
   onTagToggle,
 }) {
-  const [tagWindowStart, setTagWindowStart] = useState(0);
   const [selectionMode, setSelectionMode] = useState("include");
   const tagPanelRef = useRef(null);
-  const pendingTagAdvanceRef = useRef(null);
   const matchingGenres = useMemo(() => limitedMatchingOptions(
     genres,
     [...filters.genre, ...filters.exclude_genre],
@@ -699,15 +697,7 @@ function GenreTagPicker({
     [...filters.tag, ...filters.exclude_tag],
     tagQuery,
   ), [filters.exclude_tag, filters.tag, tagOptions, tagQuery]);
-  const matchingTags = allMatchingTags.slice(
-    tagWindowStart,
-    tagWindowStart + FACET_OPTION_LIMIT,
-  );
-  const canShowPreviousTags = tagWindowStart > 0;
-  const canShowMoreTags = (
-    tagWindowStart + FACET_OPTION_LIMIT < allMatchingTags.length
-    || tagsHasMore
-  );
+  const matchingTags = allMatchingTags;
   const selectionCount = (
     filters.genre.length
     + filters.tag.length
@@ -715,39 +705,12 @@ function GenreTagPicker({
     + filters.exclude_tag.length
   );
   useEffect(() => {
-    setTagWindowStart(0);
-    pendingTagAdvanceRef.current = null;
     if (!dropdownOpen) setSelectionMode("include");
     if (tagPanelRef.current) tagPanelRef.current.scrollTop = 0;
   }, [dropdownOpen, tagQuery]);
 
-  useEffect(() => {
-    const previousLength = pendingTagAdvanceRef.current;
-    if (previousLength === null || allMatchingTags.length <= previousLength) return;
-    if (tagPanelRef.current) tagPanelRef.current.scrollTop = 0;
-    setTagWindowStart(previousLength);
-    pendingTagAdvanceRef.current = null;
-  }, [allMatchingTags.length]);
-
-  const showNextTags = () => {
-    if (tagsLoading) return;
-    const nextStart = tagWindowStart + FACET_OPTION_LIMIT;
-    if (nextStart < allMatchingTags.length) {
-      if (tagPanelRef.current) tagPanelRef.current.scrollTop = 0;
-      setTagWindowStart(nextStart);
-      return;
-    }
-    if (tagsHasMore) {
-      pendingTagAdvanceRef.current = allMatchingTags.length;
-      onTagsLoadMore();
-    }
-  };
-
-  const showPreviousTags = () => {
-    if (tagPanelRef.current) tagPanelRef.current.scrollTop = 0;
-    setTagWindowStart((current) => (
-      Math.max(0, current - FACET_OPTION_LIMIT)
-    ));
+  const loadMoreTags = () => {
+    if (!tagsLoading && tagsHasMore) onTagsLoadMore();
   };
   return (
     <div className="relative">
@@ -782,7 +745,7 @@ function GenreTagPicker({
           aria-label="Genre and tag options"
           onScroll={(event) => {
             if (!isNearScrollEnd(event.currentTarget) || tagsLoading) return;
-            showNextTags();
+            loadMoreTags();
           }}
         >
           <div
@@ -867,29 +830,6 @@ function GenreTagPicker({
             <p className="px-3 py-2 text-sm text-slate-400" role="status">
               Loading more tags…
             </p>
-          )}
-          {(canShowPreviousTags || canShowMoreTags) && (
-            <div className="sticky bottom-0 flex gap-2 border-t border-white/10 bg-slate-950 p-2">
-              {canShowPreviousTags && (
-                <button
-                  className="flex-1 rounded-lg px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-violet-400/10"
-                  type="button"
-                  onClick={showPreviousTags}
-                >
-                  Previous tags
-                </button>
-              )}
-              {canShowMoreTags && (
-                <button
-                  className="flex-1 rounded-lg px-3 py-2 text-xs font-semibold text-violet-200 hover:bg-violet-400/10 disabled:opacity-50"
-                  type="button"
-                  disabled={tagsLoading}
-                  onClick={showNextTags}
-                >
-                  {tagsLoading ? "Loading tags..." : "More tags"}
-                </button>
-              )}
-            </div>
           )}
         </div>
       </details>
