@@ -499,15 +499,17 @@ function DetailModal({ item, loading, onClose }) {
       aria-busy={loading}
     >
       <article className="relative max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-3xl border border-white/10 bg-slate-900 shadow-2xl">
-        <button
-          className="absolute right-4 top-4 rounded-full bg-slate-950/80 px-3 py-1 text-xl text-white hover:bg-violet-600"
-          onClick={onClose}
-          type="button"
-          aria-label="Close details"
-        >
-          &times;
-        </button>
-        <div className="grid gap-6 p-6 sm:grid-cols-[12rem_1fr]">
+        <div className="sticky top-0 z-20 flex justify-end bg-slate-900/95 px-4 py-3 backdrop-blur-sm">
+          <button
+            className="rounded-full bg-slate-950/80 px-3 py-1 text-xl text-white transition hover:bg-violet-600"
+            onClick={onClose}
+            type="button"
+            aria-label="Close details"
+          >
+            &times;
+          </button>
+        </div>
+        <div className="grid gap-6 px-6 pb-6 sm:grid-cols-[12rem_1fr]">
           <div className="aspect-[2/3] w-full overflow-hidden rounded-2xl bg-slate-800">
             <CoverImage
               className="h-full w-full object-cover object-center"
