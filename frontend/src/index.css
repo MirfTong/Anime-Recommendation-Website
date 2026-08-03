@@ -36,6 +36,16 @@
 }
 
 @layer components {
+  .seasonal-carousel-control:focus-visible {
+    @apply border-violet-400 bg-violet-500 outline-none ring-2 ring-violet-300 ring-offset-2 ring-offset-slate-950;
+  }
+
+  @media (hover: hover) {
+    .seasonal-carousel-control:hover {
+      @apply border-violet-400 bg-violet-500;
+    }
+  }
+
   .filter-input {
     @apply w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-violet-400;
   }
