@@ -790,6 +790,57 @@ describe("catalogue filter integration", () => {
     ))).toHaveLength(1);
   });
 
+  test("first detail open uses a stable skeleton until the full record arrives", async () => {
+    const user = userEvent.setup();
+    let resolveDetail;
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/api/v1/catalogue/ANIME/1")) {
+        return new Promise((resolve) => {
+          resolveDetail = () => resolve({
+            ok: true,
+            json: async () => ({
+              item: {
+                mal_id: 1,
+                content_type: "ANIME",
+                title: "Example Anime",
+                genres: ["Action"],
+                popularity: 1,
+                members: 100,
+                synopsis: "Full details are ready.",
+              },
+            }),
+          });
+        });
+      }
+      if (url.includes("/api/v1/catalogue?")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [{
+              mal_id: 1,
+              content_type: "ANIME",
+              title: "Example Anime",
+              genres: [],
+            }],
+            pagination: { page: 1, pages: 1, total: 1 },
+            updated_at: null,
+          }),
+        };
+      }
+      return mockCatalogueFetch()(input);
+    });
+    render(<App />);
+
+    await user.click(await screen.findByText("Example Anime"));
+    expect(await screen.findByText("Loading full details…")).toBeInTheDocument();
+    expect(screen.queryByText("Popularity rank")).toBeNull();
+
+    resolveDetail();
+    expect(await screen.findByText("Popularity rank")).toBeInTheDocument();
+    expect(screen.getByText("Full details are ready.")).toBeInTheDocument();
+  });
+
   test("mobile Filters reveals the responsive slider panel", async () => {
     const user = userEvent.setup();
     window.history.replaceState({}, "", "/?content_type=MANHWA");
