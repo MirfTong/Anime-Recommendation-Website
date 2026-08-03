@@ -390,6 +390,8 @@ test("presets add their filters without clearing existing selections", () => {
   const animePresets = presetsFor("ANIME", new Date("2026-07-15T12:00:00Z"));
   const seasonal = animePresets.find(({ id }) => id === "new-season");
   const shortSeries = animePresets.find(({ id }) => id === "short-series");
+  const longSeries = animePresets.find(({ id }) => id === "long-series");
+  const completedAnime = animePresets.find(({ id }) => id === "completed-anime");
   const completedManga = presetsFor("MANGA").find(
     ({ id }) => id === "completed-manga",
   );
@@ -412,6 +414,8 @@ test("presets add their filters without clearing existing selections", () => {
     },
   );
   assert.equal(filtersFromPreset(shortSeries).max_episodes, "13");
+  assert.equal(filtersFromPreset(longSeries).min_episodes, "24");
+  assert.equal(filtersFromPreset(completedAnime).status, "FINISHED_AIRING");
   assert.equal(filtersFromPreset(completedManga).status, "FINISHED");
   assert.equal(filtersFromPreset(completedManga).genre.length, 0);
   assert.equal(filtersFromPreset(completedManhwa).status, "FINISHED");
