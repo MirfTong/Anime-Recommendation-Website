@@ -4,7 +4,7 @@
 
 @layer base {
   html {
-    scrollbar-color: #60a5fa #0f172a;
+    scrollbar-color: #1e293b #020617;
     scrollbar-width: thin;
   }
 
@@ -17,12 +17,12 @@
   }
 
   html::-webkit-scrollbar-thumb {
-    @apply rounded-full border-2 border-slate-950 bg-blue-400;
+    @apply rounded-full border-2 border-slate-950 bg-slate-800;
     background-clip: padding-box;
   }
 
   html::-webkit-scrollbar-thumb:hover {
-    @apply bg-blue-300;
+    @apply bg-slate-700;
   }
 
   body {
