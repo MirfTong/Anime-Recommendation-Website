@@ -344,6 +344,7 @@ export function popularityLabel(value) {
 const CatalogueCard = memo(function CatalogueCard({
   item,
   onSelect,
+  onPrefetch,
   showContentBadge = false,
 }) {
   const metadata = itemMetadata(item).join(" · ");
@@ -354,6 +355,8 @@ const CatalogueCard = memo(function CatalogueCard({
     <button
       className="group flex h-full min-w-0 flex-col overflow-hidden rounded-2xl border border-white/10 bg-slate-900/80 text-left shadow-lg transition hover:-translate-y-1 hover:border-violet-400/60 hover:shadow-glow focus:outline-none focus:ring-2 focus:ring-violet-400"
       onClick={() => onSelect(item)}
+      onFocus={() => onPrefetch?.(item)}
+      onPointerEnter={() => onPrefetch?.(item)}
       type="button"
     >
       <div className="relative aspect-[2/3] w-full shrink-0 overflow-hidden bg-slate-800">
@@ -401,6 +404,7 @@ function SeasonalCarousel({
   pagination,
   onPrevious,
   onNext,
+  onPrefetch,
   onSelect,
   loadingMessage,
   emptyMessage,
@@ -434,6 +438,7 @@ function SeasonalCarousel({
               <CatalogueCard
                 key={`ANIME:${entry.mal_id ?? entry.id}`}
                 item={entry}
+                onPrefetch={onPrefetch}
                 onSelect={onSelect}
               />
             ))}
@@ -1502,7 +1507,6 @@ export default function App() {
   const rangeRequestRef = useRef(0);
   const rangeControllerRef = useRef(null);
   const detailRequestRef = useRef(0);
-  const detailControllerRef = useRef(null);
   const loadedContentTypeRef = useRef(null);
   const sliderApplyTimerRef = useRef(null);
   const filtersRef = useRef(filters);
@@ -1884,7 +1888,6 @@ export default function App() {
         ? TOP_RATED_FILTERS
         : restored.filters;
       ++detailRequestRef.current;
-      cancelRequest(detailControllerRef);
       filtersRef.current = restored.filters;
       setContentType(restored.contentType);
       setFilters(restored.filters);
@@ -1987,7 +1990,6 @@ export default function App() {
     cancelRequest(streamingControllerRef);
     cancelRequest(authorControllerRef);
     cancelRequest(rangeControllerRef);
-    cancelRequest(detailControllerRef);
     if (sliderApplyTimerRef.current) {
       window.clearTimeout(sliderApplyTimerRef.current);
       sliderApplyTimerRef.current = null;
@@ -2121,7 +2123,6 @@ export default function App() {
       ? TOP_RATED_FILTERS
       : nextFilters;
     ++detailRequestRef.current;
-    cancelRequest(detailControllerRef);
     setContentType(nextContentType);
     filtersRef.current = nextFilters;
     setFilters(nextFilters);
@@ -2199,9 +2200,17 @@ export default function App() {
     }
   };
 
+  const prefetchDetail = useCallback((item) => {
+    const detailContentType = itemContentType(item);
+    void getJson(`/api/v1/catalogue/${detailContentType}/${item.mal_id}`, {
+      ttlMs: DETAIL_CACHE_TTL_MS,
+    }).catch(() => {
+      // A prefetch is opportunistic; opening the card still reports failures.
+    });
+  }, []);
+
   const openDetail = useCallback(async (item) => {
     const requestId = ++detailRequestRef.current;
-    const controller = nextRequestController(detailControllerRef);
     const detailContentType = itemContentType(item);
     setSelected({ ...item, content_type: detailContentType });
     setDetailLoading(true);
@@ -2210,7 +2219,6 @@ export default function App() {
       const { ok, body } = await getJson(
         `/api/v1/catalogue/${detailContentType}/${item.mal_id}`,
         {
-          signal: controller.signal,
           ttlMs: DETAIL_CACHE_TTL_MS,
         },
       );
@@ -2235,7 +2243,6 @@ export default function App() {
 
   const closeDetail = useCallback(() => {
     ++detailRequestRef.current;
-    cancelRequest(detailControllerRef);
     setSelected(null);
     setDetailLoading(false);
   }, []);
@@ -2931,6 +2938,7 @@ export default function App() {
             pagination={seasonalPagination}
             onPrevious={() => loadSeasonalAnime(seasonalPagination.page - 1)}
             onNext={() => loadSeasonalAnime(seasonalPagination.page + 1)}
+            onPrefetch={prefetchDetail}
             onSelect={openDetail}
             loadingMessage="Refreshing seasonal anime..."
             emptyMessage="Seasonal anime are still being refreshed. Check back shortly."
@@ -2943,6 +2951,7 @@ export default function App() {
             pagination={upcomingPagination}
             onPrevious={() => loadSeasonalAnime(upcomingPagination.page - 1, "next")}
             onNext={() => loadSeasonalAnime(upcomingPagination.page + 1, "next")}
+            onPrefetch={prefetchDetail}
             onSelect={openDetail}
             loadingMessage="Refreshing upcoming anime..."
             emptyMessage="Upcoming anime are still being refreshed. Check back shortly."
@@ -3018,6 +3027,7 @@ export default function App() {
                 <CatalogueCard
                   key={`${itemContentType(entry)}:${entry.mal_id ?? entry.id}`}
                   item={entry}
+                  onPrefetch={prefetchDetail}
                   onSelect={openDetail}
                   showContentBadge={contentType === "ALL"}
                 />

@@ -316,6 +316,26 @@ describe("browser response cache", () => {
     expect(second.body.items).toEqual(["Action"]);
     expect(fetchResponse).toHaveBeenCalledTimes(1);
   });
+
+  test("shares an in-flight cacheable detail request", async () => {
+    let resolveResponse;
+    const fetchResponse = vi.fn(() => new Promise((resolve) => {
+      resolveResponse = () => resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ item: { mal_id: 1 } }),
+      });
+    }));
+    vi.stubGlobal("fetch", fetchResponse);
+
+    const first = getJson("/api/v1/catalogue/ANIME/1", { ttlMs: 60_000 });
+    const second = getJson("/api/v1/catalogue/ANIME/1", { ttlMs: 60_000 });
+
+    expect(fetchResponse).toHaveBeenCalledTimes(1);
+    resolveResponse();
+    await expect(first).resolves.toMatchObject({ body: { item: { mal_id: 1 } } });
+    await expect(second).resolves.toMatchObject({ body: { item: { mal_id: 1 } } });
+  });
 });
 
 describe("catalogue filter integration", () => {

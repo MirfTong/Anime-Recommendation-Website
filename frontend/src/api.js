@@ -2,6 +2,7 @@ const DEFAULT_TTL_MS = 60_000;
 const MAX_CACHE_ENTRIES = 80;
 
 const getCache = new Map();
+const inFlightRequests = new Map();
 
 function cachedEntry(url, now) {
   const entry = getCache.get(url);
@@ -37,17 +38,36 @@ export async function getJson(url, {
     if (existing) return { ...existing, cached: true };
   }
 
-  const response = await fetch(url, { signal });
-  const body = await response.json();
-  const result = {
-    ok: response.ok,
-    status: response.status,
-    body,
-  };
-  if (cache && response.ok) remember(url, result, ttlMs);
-  return { ...result, cached: false };
+  // Requests with an AbortSignal belong to a specific UI transition and must
+  // remain independently cancellable. Cacheable background/detail requests
+  // can safely share one in-flight fetch instead.
+  const shareRequest = cache && !signal;
+  let request = shareRequest ? inFlightRequests.get(url) : null;
+  if (!request) {
+    request = (async () => {
+      const response = await fetch(url, { signal });
+      const body = await response.json();
+      const result = {
+        ok: response.ok,
+        status: response.status,
+        body,
+      };
+      if (cache && response.ok) remember(url, result, ttlMs);
+      return result;
+    })();
+    if (shareRequest) inFlightRequests.set(url, request);
+  }
+
+  try {
+    return { ...(await request), cached: false };
+  } finally {
+    if (shareRequest && inFlightRequests.get(url) === request) {
+      inFlightRequests.delete(url);
+    }
+  }
 }
 
 export function clearGetCache() {
   getCache.clear();
+  inFlightRequests.clear();
 }
