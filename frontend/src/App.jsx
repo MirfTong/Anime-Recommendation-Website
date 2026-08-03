@@ -47,6 +47,15 @@ const CATALOGUE_CACHE_TTL_MS = 45_000;
 const FACET_CACHE_TTL_MS = 5 * 60_000;
 const DETAIL_CACHE_TTL_MS = 5 * 60_000;
 const SLIDER_DEBOUNCE_MS = 250;
+const MOBILE_SEASONAL_MEDIA_QUERY = "(max-width: 639px)";
+
+function seasonalPageSizeForViewport() {
+  if (
+    typeof window === "undefined"
+    || typeof window.matchMedia !== "function"
+  ) return 6;
+  return window.matchMedia(MOBILE_SEASONAL_MEDIA_QUERY).matches ? 2 : 6;
+}
 
 function nextRequestController(controllerRef) {
   controllerRef.current?.abort();
@@ -420,7 +429,12 @@ function SeasonalCarousel({
       {loading && anime.length === 0 ? (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
           {Array.from({ length: 6 }, (_, index) => (
-            <div key={index} className="aspect-[2/3] animate-pulse rounded-2xl bg-slate-800" />
+            <div
+              key={index}
+              className={`aspect-[2/3] animate-pulse rounded-2xl bg-slate-800 ${
+                index >= 2 ? "hidden sm:block" : ""
+              }`}
+            />
           ))}
         </div>
       ) : anime.length > 0 ? (
@@ -1461,6 +1475,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [seasonalLoading, setSeasonalLoading] = useState(true);
   const [upcomingLoading, setUpcomingLoading] = useState(true);
+  const [seasonalPageSize, setSeasonalPageSize] = useState(
+    seasonalPageSizeForViewport,
+  );
   const [detailLoading, setDetailLoading] = useState(false);
   const [viewMode, setViewMode] = useState(initialState.view);
   const [error, setError] = useState("");
@@ -1583,7 +1600,7 @@ export default function App() {
     setLoading(true);
     try {
       const params = new URLSearchParams({
-        limit: "6",
+        limit: String(seasonalPageSize),
         page: String(page),
         preview: "1",
         period,
@@ -1612,7 +1629,7 @@ export default function App() {
     } finally {
       if (requestId === requestRef.current) setLoading(false);
     }
-  }, []);
+  }, [seasonalPageSize]);
 
   const loadGenres = useCallback(async (activeContentType) => {
     const requestId = ++genreRequestRef.current;
@@ -1842,6 +1859,17 @@ export default function App() {
     initialState.sort,
     loadCatalogue,
   ]);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return undefined;
+    const mediaQuery = window.matchMedia(MOBILE_SEASONAL_MEDIA_QUERY);
+    const updateSeasonalPageSize = () => {
+      setSeasonalPageSize(mediaQuery.matches ? 2 : 6);
+    };
+    updateSeasonalPageSize();
+    mediaQuery.addEventListener?.("change", updateSeasonalPageSize);
+    return () => mediaQuery.removeEventListener?.("change", updateSeasonalPageSize);
+  }, []);
 
   useEffect(() => {
     if (contentType === "ANIME" && viewMode === "home") {
