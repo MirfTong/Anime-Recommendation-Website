@@ -8,7 +8,7 @@ from sqlalchemy import text
 from backend.models import db
 
 
-CATALOGUE_SCHEMA_VERSION = 5
+CATALOGUE_SCHEMA_VERSION = 6
 CATALOGUE_SCHEMA_LOCK_ID = 5_423_769_101
 CATALOGUE_SCHEMA_VERSION_TABLE = "catalogue_schema_version"
 
@@ -143,6 +143,37 @@ def _apply_catalogue_schema_migration(connection) -> None:
     # Use the session's locked transaction rather than opening another engine
     # connection that would sit outside the advisory-lock boundary.
     db.metadata.create_all(bind=connection)
+
+    # Daily aggregate rows retain visit totals without persisting the browser
+    # cookie, IP address, user agent, query string, or any other identifier.
+    # The unique key makes repeated refreshes increment a count in one row
+    # instead of creating duplicate anonymous-visitor records for the day.
+    db.session.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS site_visit ("
+            "id BIGSERIAL PRIMARY KEY, "
+            "visitor_token_hash VARCHAR(64) NOT NULL, "
+            "visit_date DATE NOT NULL, "
+            "route VARCHAR(80) NOT NULL DEFAULT 'frontend', "
+            "visit_count INTEGER NOT NULL DEFAULT 1, "
+            "first_visited_at TIMESTAMP WITH TIME ZONE NOT NULL "
+            "DEFAULT CURRENT_TIMESTAMP, "
+            "last_visited_at TIMESTAMP WITH TIME ZONE NOT NULL "
+            "DEFAULT CURRENT_TIMESTAMP, "
+            "CONSTRAINT ck_site_visit_visit_count_positive "
+            "CHECK (visit_count >= 1), "
+            "CONSTRAINT uq_site_visit_visitor_day_route "
+            "UNIQUE (visitor_token_hash, visit_date, route)"
+            ")"
+        )
+    )
+    for index_sql in (
+        "CREATE INDEX IF NOT EXISTS ix_site_visit_date "
+        "ON site_visit (visit_date)",
+        "CREATE INDEX IF NOT EXISTS ix_site_visit_date_route "
+        "ON site_visit (visit_date, route)",
+    ):
+        db.session.execute(text(index_sql))
 
     # The original facet table allowed only genres and tags. Widen its value
     # column and check constraint once so studio/service options can use the

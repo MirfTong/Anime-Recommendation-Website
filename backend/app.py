@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
+import secrets
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from random import randrange
 from threading import Lock
@@ -14,7 +17,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
-from sqlalchemy import func, literal, or_, select, union_all
+from sqlalchemy import Date, cast, func, literal, or_, select, union_all
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import lazyload, load_only, noload, selectinload
 
@@ -27,6 +31,7 @@ from backend.models import (
     JikanSyncState,
     Manga,
     MangaAuthor,
+    SiteVisit,
     StreamingService,
     Studio,
     db,
@@ -73,6 +78,25 @@ CONTENT_TYPE_SCOPES = {
 CACHE_TTL_SECONDS = 300
 MAX_CACHE_ENTRIES = 512
 CACHE_GENERATION_POLL_SECONDS = 15
+ANALYTICS_CACHE_TTL_SECONDS = 60
+ANALYTICS_COOKIE_NAME = "kyoquan_visitor"
+ANALYTICS_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+ANALYTICS_CATEGORY = "frontend"
+ANALYTICS_EXCLUDED_PATHS = frozenset({"/health", "/healthz", "/ready", "/readyz"})
+ANALYTICS_BOT_MARKERS = (
+    "bot",
+    "crawler",
+    "spider",
+    "slurp",
+    "facebookexternalhit",
+    "uptimerobot",
+    "kube-probe",
+    "elb-healthchecker",
+    "github-actions",
+    "python-requests",
+    "curl/",
+    "wget/",
+)
 MULTI_VALUE_FILTERS = frozenset(
     {
         "author",
@@ -95,10 +119,16 @@ CASE_INSENSITIVE_MULTI_FILTERS = MULTI_VALUE_FILTERS.difference(
 class TtlCache:
     """Small process-local cache for repeatable catalogue metadata queries."""
 
-    def __init__(self, *, max_entries: int = MAX_CACHE_ENTRIES) -> None:
+    def __init__(
+        self,
+        *,
+        max_entries: int = MAX_CACHE_ENTRIES,
+        ttl_seconds: int = CACHE_TTL_SECONDS,
+    ) -> None:
         self._values: dict[tuple[Any, ...], tuple[float, Any]] = {}
         self._lock = Lock()
         self._max_entries = max(1, max_entries)
+        self._ttl_seconds = max(1, ttl_seconds)
 
     def get_or_create(self, key: tuple[Any, ...], factory):
         now = monotonic()
@@ -122,7 +152,7 @@ class TtlCache:
                     key=lambda existing_key: self._values[existing_key][0],
                 )
                 self._values.pop(oldest_key, None)
-            self._values[key] = (now + CACHE_TTL_SECONDS, value)
+            self._values[key] = (now + self._ttl_seconds, value)
         return value
 
     def clear(self) -> None:
@@ -131,6 +161,10 @@ class TtlCache:
 
 
 response_cache = TtlCache()
+analytics_response_cache = TtlCache(
+    max_entries=4,
+    ttl_seconds=ANALYTICS_CACHE_TTL_SECONDS,
+)
 
 
 class CacheGenerationMonitor:
@@ -169,6 +203,156 @@ class CacheGenerationMonitor:
 
 
 cache_generation_monitor = CacheGenerationMonitor()
+
+
+def _analytics_cookie_is_secure() -> bool:
+    """Use a Secure cookie for HTTPS deployments, with a local override."""
+    configured = os.getenv("ANALYTICS_COOKIE_SECURE")
+    if configured is not None:
+        return configured.strip().casefold() in {"1", "true", "yes", "on"}
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "")
+    return (
+        request.is_secure
+        or forwarded_proto.casefold().split(",")[0].strip() == "https"
+    )
+
+
+def _is_valid_analytics_cookie(value: str | None) -> bool:
+    return bool(
+        value
+        and 32 <= len(value) <= 128
+        and all(character.isalnum() or character in "-_" for character in value)
+    )
+
+
+def _analytics_request_is_trackable(response) -> bool:
+    """Allow only successful browser HTML navigations into visit analytics."""
+    if request.method != "GET" or not 200 <= response.status_code < 400:
+        return False
+    if response.mimetype != "text/html":
+        return False
+    if request.path in ANALYTICS_EXCLUDED_PATHS or request.path.startswith(
+        (API_PREFIX, "/assets/", "/static/")
+    ):
+        return False
+    user_agent = request.headers.get("User-Agent", "").casefold()
+    return not any(marker in user_agent for marker in ANALYTICS_BOT_MARKERS)
+
+
+def _record_site_visit(visitor_token: str) -> None:
+    """Atomically aggregate one anonymous browser visit for the current day."""
+    now = datetime.now(timezone.utc)
+    token_hash = hashlib.sha256(visitor_token.encode("utf-8")).hexdigest()
+    statement = postgresql_insert(SiteVisit).values(
+        visitor_token_hash=token_hash,
+        visit_date=now.date(),
+        route=ANALYTICS_CATEGORY,
+        visit_count=1,
+        first_visited_at=now,
+        last_visited_at=now,
+    )
+    statement = statement.on_conflict_do_update(
+        constraint="uq_site_visit_visitor_day_route",
+        set_={
+            "visit_count": SiteVisit.visit_count + 1,
+            "last_visited_at": now,
+        },
+    )
+    db.session.execute(statement)
+    db.session.commit()
+    analytics_response_cache.clear()
+
+
+def _analytics_period_rows(bucket, *, since: date) -> list[dict[str, int | str]]:
+    rows = db.session.execute(
+        select(
+            bucket.label("period"),
+            func.coalesce(func.sum(SiteVisit.visit_count), 0).label("visits"),
+            func.count(func.distinct(SiteVisit.visitor_token_hash)).label(
+                "unique_visitors"
+            ),
+        )
+        .where(SiteVisit.visit_date >= since)
+        .group_by(bucket)
+        .order_by(bucket)
+    ).all()
+    serialized_rows: list[dict[str, int | str]] = []
+    for period, visits, unique_visitors in rows:
+        period_date = period.date() if isinstance(period, datetime) else period
+        serialized_rows.append(
+            {
+                "period": period_date.isoformat(),
+                "visits": int(visits or 0),
+                "unique_visitors": int(unique_visitors or 0),
+            }
+        )
+    return serialized_rows
+
+
+def _analytics_report() -> dict[str, Any]:
+    """Return bounded, aggregate-only metrics for the token-protected route."""
+    today = datetime.now(timezone.utc).date()
+    total_visits, total_visitors = db.session.execute(
+        select(
+            func.coalesce(func.sum(SiteVisit.visit_count), 0),
+            func.count(func.distinct(SiteVisit.visitor_token_hash)),
+        )
+    ).one()
+    category_rows = db.session.execute(
+        select(
+            SiteVisit.route,
+            func.coalesce(func.sum(SiteVisit.visit_count), 0),
+            func.count(func.distinct(SiteVisit.visitor_token_hash)),
+        )
+        .group_by(SiteVisit.route)
+        .order_by(SiteVisit.route)
+    ).all()
+    return {
+        "total": {
+            "visits": int(total_visits or 0),
+            "unique_visitors": int(total_visitors or 0),
+        },
+        "daily": _analytics_period_rows(
+            SiteVisit.visit_date,
+            since=today - timedelta(days=6),
+        ),
+        "weekly": _analytics_period_rows(
+            cast(func.date_trunc("week", SiteVisit.visit_date), Date),
+            since=today - timedelta(weeks=11),
+        ),
+        "monthly": _analytics_period_rows(
+            cast(func.date_trunc("month", SiteVisit.visit_date), Date),
+            since=today - timedelta(days=366),
+        ),
+        "categories": [
+            {
+                "category": route,
+                "visits": int(visits or 0),
+                "unique_visitors": int(unique_visitors or 0),
+            }
+            for route, visits, unique_visitors in category_rows
+        ],
+    }
+
+
+def _admin_analytics_access_error():
+    expected_token = os.getenv("ADMIN_ANALYTICS_TOKEN")
+    if not expected_token:
+        return (
+            jsonify({"error": {"message": "Analytics access is unavailable"}}),
+            403,
+        )
+
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, supplied_token = authorization.partition(" ")
+    if scheme.casefold() != "bearer" or not supplied_token:
+        response = jsonify({"error": {"message": "Authorization required"}})
+        response.status_code = 401
+        response.headers["WWW-Authenticate"] = "Bearer"
+        return response
+    if not hmac.compare_digest(supplied_token, expected_token):
+        return jsonify({"error": {"message": "Forbidden"}}), 403
+    return None
 
 
 @app.before_request
@@ -1915,6 +2099,62 @@ def list_filter_ranges():
         lambda: _load_filter_ranges(content_types),
     )
     return jsonify({"ranges": ranges})
+
+
+@app.get(f"{API_PREFIX}/admin/analytics/visits")
+def admin_visit_analytics():
+    """Return aggregate visit metrics to an authorized administrator only."""
+    access_error = _admin_analytics_access_error()
+    if access_error is not None:
+        return access_error
+    try:
+        report = analytics_response_cache.get_or_create(
+            ("admin-visit-analytics",),
+            _analytics_report,
+        )
+    except SQLAlchemyError:
+        db.session.rollback()
+        return (
+            jsonify(
+                {"error": {"message": "Analytics are temporarily unavailable"}}
+            ),
+            503,
+        )
+
+    response = jsonify(report)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.after_request
+def track_public_frontend_visit(response):
+    """Record an anonymous aggregate visit without affecting site delivery."""
+    if not _analytics_request_is_trackable(response):
+        return response
+
+    visitor_token = request.cookies.get(ANALYTICS_COOKIE_NAME)
+    is_new_visitor = not _is_valid_analytics_cookie(visitor_token)
+    if is_new_visitor:
+        visitor_token = secrets.token_urlsafe(32)
+        response.set_cookie(
+            ANALYTICS_COOKIE_NAME,
+            visitor_token,
+            max_age=ANALYTICS_COOKIE_MAX_AGE_SECONDS,
+            secure=_analytics_cookie_is_secure(),
+            httponly=True,
+            samesite="Lax",
+            path="/",
+        )
+    try:
+        _record_site_visit(visitor_token)
+    except SQLAlchemyError:
+        # Analytics is optional: discard only its failed transaction and keep
+        # serving the frontend response normally.
+        db.session.rollback()
+    except Exception:
+        # Do not allow an unexpected analytics issue to affect public traffic.
+        db.session.rollback()
+    return response
 
 
 @app.after_request

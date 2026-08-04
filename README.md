@@ -105,6 +105,45 @@ The existing `/api/v1/anime`, `/api/v1/anime/random`,
 Convenience `/api/v1/manga` and `/api/v1/manhwa` list, random, and detail routes
 are also provided.
 
+## Private visit analytics
+
+KyoQuan records lightweight, privacy-conscious frontend visit aggregates in
+PostgreSQL. A browser receives an HttpOnly, SameSite `Lax` random cookie that
+expires after 30 days. The database stores only a SHA-256 digest of that random
+value, the UTC date, a fixed `frontend` category, and an aggregate visit count.
+It does **not** store IP addresses, user-agent strings, query strings, search
+terms, authentication data, or raw cookie values. A unique database constraint
+on cookie digest, date, and category prevents repeat refreshes from increasing
+the same day's anonymous-visitor count, while `visit_count` still preserves the
+total number of page visits.
+
+Only successful browser HTML page loads are eligible. API requests, static
+assets, health/probe paths, and recognizable bots are excluded. Tracking is
+best-effort: a database problem is rolled back and never prevents KyoQuan from
+serving a page.
+
+Analytics are intentionally backend-only. Set these Render environment
+variables (never commit their real values):
+
+```text
+ADMIN_ANALYTICS_TOKEN=<a-long-random-secret>
+ANALYTICS_COOKIE_SECURE=true
+```
+
+`ADMIN_ANALYTICS_TOKEN` protects the private reporting route. Call it from a
+terminal, Postman, or another trusted server-side tool; do not place this token
+in the React application or a public URL:
+
+```bash
+curl -H "Authorization: Bearer <ADMIN_ANALYTICS_TOKEN>" \
+  https://kyoquan.onrender.com/api/v1/admin/analytics/visits
+```
+
+The response includes aggregate total, daily (last 7 days), weekly (last 12
+weeks), monthly (last 12 months), and category counts. Missing credentials
+receive `401`, invalid credentials receive `403`, and the endpoint is not part
+of any public catalogue payload.
+
 ## Provider client
 
 `backend.services.jikan_client` uses Tenrai's Jikan-compatible v1 API as its
