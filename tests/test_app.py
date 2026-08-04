@@ -1,15 +1,19 @@
 import json
+import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import SQLAlchemyError
 
 from backend.app import (
     CacheGenerationMonitor,
     FRONTEND_BUILD_DIR,
     TtlCache,
+    _analytics_report,
+    _record_site_visit,
     _anime_statement,
     _catalogue_rows_subquery,
     _filtered_anime_statement,
@@ -29,6 +33,7 @@ from backend.app import (
     _serialize_anime,
     _serialize_manga,
     app,
+    analytics_response_cache,
     response_cache,
 )
 from backend.models import (
@@ -46,6 +51,7 @@ from backend.models import (
 class AppTests(unittest.TestCase):
     def setUp(self):
         response_cache.clear()
+        analytics_response_cache.clear()
         self.client = app.test_client()
 
     def test_anime_list_returns_paginated_json(self):
@@ -1378,6 +1384,135 @@ class AppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.get_json()["error"]["message"], "Anime not found")
+
+
+class PrivacyAnalyticsTests(unittest.TestCase):
+    def setUp(self):
+        analytics_response_cache.clear()
+        self.client = app.test_client()
+
+    def test_first_and_repeat_html_visits_use_the_same_anonymous_cookie(self):
+        with (
+            patch.dict(os.environ, {"ANALYTICS_COOKIE_SECURE": "false"}),
+            patch("backend.app._record_site_visit") as record_visit,
+        ):
+            first = self.client.get("/", headers={"User-Agent": "Mozilla/5.0"})
+            second = self.client.get("/", headers={"User-Agent": "Mozilla/5.0"})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(record_visit.call_count, 2)
+        self.assertEqual(
+            record_visit.call_args_list[0].args[0],
+            record_visit.call_args_list[1].args[0],
+        )
+        self.assertIn("HttpOnly", first.headers["Set-Cookie"])
+        self.assertIn("SameSite=Lax", first.headers["Set-Cookie"])
+        first.close()
+        second.close()
+
+    def test_api_bot_and_health_requests_are_not_tracked(self):
+        with patch("backend.app._record_site_visit") as record_visit:
+            bot_response = self.client.get(
+                "/", headers={"User-Agent": "Googlebot/2.1"}
+            )
+            health_response = self.client.get(
+                "/health", headers={"User-Agent": "Mozilla/5.0"}
+            )
+            api_response = self.client.get("/api/v1/not-a-route")
+
+        record_visit.assert_not_called()
+        bot_response.close()
+        health_response.close()
+        api_response.close()
+
+    def test_daily_aggregate_uses_an_atomic_unique_keyed_upsert(self):
+        with (
+            patch.object(db.session, "execute") as execute,
+            patch.object(db.session, "commit") as commit,
+        ):
+            _record_site_visit("x" * 43)
+
+        statement = execute.call_args.args[0]
+        rendered_sql = str(statement.compile(dialect=postgresql.dialect())).lower()
+        self.assertIn(
+            "on conflict on constraint uq_site_visit_visitor_day_route",
+            rendered_sql,
+        )
+        self.assertIn("visit_count = (site_visit.visit_count +", rendered_sql)
+        commit.assert_called_once_with()
+
+    def test_analytics_failure_never_breaks_a_frontend_page_load(self):
+        with (
+            patch.dict(os.environ, {"ANALYTICS_COOKIE_SECURE": "false"}),
+            patch(
+                "backend.app._record_site_visit",
+                side_effect=SQLAlchemyError("database unavailable"),
+            ),
+            patch.object(db.session, "rollback") as rollback,
+        ):
+            response = self.client.get("/", headers={"User-Agent": "Mozilla/5.0"})
+
+        self.assertEqual(response.status_code, 200)
+        rollback.assert_called_once_with()
+        response.close()
+
+    def test_admin_analytics_requires_a_configured_bearer_token(self):
+        with patch.dict(os.environ, {}, clear=True):
+            missing_configuration = self.client.get("/api/v1/admin/analytics/visits")
+        self.assertEqual(missing_configuration.status_code, 403)
+
+        with patch.dict(os.environ, {"ADMIN_ANALYTICS_TOKEN": "expected-token"}):
+            missing_token = self.client.get("/api/v1/admin/analytics/visits")
+            invalid_token = self.client.get(
+                "/api/v1/admin/analytics/visits",
+                headers={"Authorization": "Bearer wrong-token"},
+            )
+        self.assertEqual(missing_token.status_code, 401)
+        self.assertEqual(invalid_token.status_code, 403)
+
+    def test_authorized_admin_analytics_returns_aggregate_data_only(self):
+        report = {
+            "total": {"visits": 12, "unique_visitors": 4},
+            "daily": [],
+            "weekly": [],
+            "monthly": [],
+            "categories": [
+                {"category": "frontend", "visits": 12, "unique_visitors": 4}
+            ],
+        }
+        with (
+            patch.dict(os.environ, {"ADMIN_ANALYTICS_TOKEN": "expected-token"}),
+            patch("backend.app._analytics_report", return_value=report),
+        ):
+            response = self.client.get(
+                "/api/v1/admin/analytics/visits",
+                headers={"Authorization": "Bearer expected-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["total"]["unique_visitors"], 4)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    def test_analytics_report_contains_only_aggregate_periods(self):
+        total_result = Mock()
+        total_result.one.return_value = (12, 4)
+        category_result = Mock()
+        category_result.all.return_value = [("frontend", 12, 4)]
+        with (
+            patch.object(
+                db.session,
+                "execute",
+                side_effect=(total_result, category_result),
+            ),
+            patch("backend.app._analytics_period_rows", return_value=[]),
+        ):
+            report = _analytics_report()
+
+        self.assertEqual(report["total"], {"visits": 12, "unique_visitors": 4})
+        self.assertEqual(report["categories"][0]["category"], "frontend")
+        self.assertNotIn("ip", json.dumps(report).casefold())
+        self.assertNotIn("user_agent", json.dumps(report).casefold())
 
 
 if __name__ == "__main__":

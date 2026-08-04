@@ -1,6 +1,15 @@
-from datetime import datetime
+from datetime import date, datetime, timezone
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -395,3 +404,55 @@ class JikanSyncState(db.Model):
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(String(500))
+
+
+class SiteVisit(db.Model):
+    """Privacy-preserving daily visit totals for the public application.
+
+    The browser cookie itself is never persisted. ``visitor_token_hash`` is a
+    one-way digest of a randomly generated cookie value and is only used to
+    count a returning anonymous browser once per day and visit category.
+    """
+
+    __tablename__ = "site_visit"
+    __table_args__ = (
+        UniqueConstraint(
+            "visitor_token_hash",
+            "visit_date",
+            "route",
+            name="uq_site_visit_visitor_day_route",
+        ),
+        CheckConstraint(
+            "visit_count >= 1",
+            name="ck_site_visit_visit_count_positive",
+        ),
+        Index("ix_site_visit_date", "visit_date"),
+        Index("ix_site_visit_date_route", "visit_date", "route"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    visitor_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    visit_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # Store a fixed category rather than a raw browser path, which could hold
+    # user-provided text in a client-side route.
+    route: Mapped[str] = mapped_column(
+        String(80),
+        nullable=False,
+        default="frontend",
+    )
+    visit_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+    first_visited_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    last_visited_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )

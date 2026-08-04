@@ -15,6 +15,7 @@ from backend.models import (
     Manga,
     MangaAuthor,
     MangaGenre,
+    SiteVisit,
     StreamingService,
     Studio,
 )
@@ -60,7 +61,7 @@ class MangaSchemaTests(unittest.TestCase):
         self.assertTrue(Manga.__table__.c.members.nullable)
 
         schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
-        self.assertIn("CATALOGUE_SCHEMA_VERSION = 5", schema_source)
+        self.assertIn("CATALOGUE_SCHEMA_VERSION = 6", schema_source)
         self.assertIn('"popularity INTEGER"', schema_source)
         self.assertIn('"members INTEGER"', schema_source)
         for index_name in (
@@ -245,7 +246,7 @@ class MangaSchemaTests(unittest.TestCase):
     def test_top_rated_indexes_are_applied_by_versioned_migration(self):
         schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("CATALOGUE_SCHEMA_VERSION = 5", schema_source)
+        self.assertIn("CATALOGUE_SCHEMA_VERSION = 6", schema_source)
         self.assertIn("ix_anime_public_top_rated", schema_source)
         self.assertIn("ix_manga_public_top_rated", schema_source)
         self.assertIn("score DESC NULLS LAST", schema_source)
@@ -308,6 +309,39 @@ class MangaSchemaTests(unittest.TestCase):
             "constraint_facet_types != required_facet_types",
             schema_source,
         )
+
+    def test_site_visit_uses_anonymous_daily_aggregates_and_indexes(self):
+        columns = set(SiteVisit.__table__.columns.keys())
+        self.assertTrue(
+            {
+                "visitor_token_hash",
+                "visit_date",
+                "route",
+                "visit_count",
+                "first_visited_at",
+                "last_visited_at",
+            }.issubset(columns)
+        )
+        self.assertNotIn("ip_address", columns)
+        self.assertNotIn("user_agent", columns)
+
+        constraint_names = {
+            constraint.name for constraint in SiteVisit.__table__.constraints
+        }
+        self.assertIn("uq_site_visit_visitor_day_route", constraint_names)
+        self.assertIn("ck_site_visit_visit_count_positive", constraint_names)
+        self.assertTrue(
+            {
+                "ix_site_visit_date",
+                "ix_site_visit_date_route",
+            }.issubset({index.name for index in SiteVisit.__table__.indexes})
+        )
+
+        schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("CATALOGUE_SCHEMA_VERSION = 6", schema_source)
+        self.assertIn("CREATE TABLE IF NOT EXISTS site_visit", schema_source)
+        self.assertIn("uq_site_visit_visitor_day_route", schema_source)
+        self.assertIn("ix_site_visit_date_route", schema_source)
 
     def test_schema_bootstrap_double_checks_under_lock_and_runs_once(self):
         mock_db = MagicMock()
