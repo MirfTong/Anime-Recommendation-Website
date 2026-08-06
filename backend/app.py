@@ -1658,9 +1658,7 @@ def popular_current_season():
     period = request.args.get("period", "current").strip().lower()
     if period not in {"current", "next"}:
         raise ApiError("period must be current or next")
-    sort = request.args.get(
-        "sort", "most_popular" if period == "next" else "top_rated"
-    ).strip().lower()
+    sort = request.args.get("sort", "most_popular").strip().lower()
     if sort not in {"top_rated", "most_popular", "most_members"}:
         raise ApiError("seasonal sort must be top_rated, most_popular, or most_members")
 
