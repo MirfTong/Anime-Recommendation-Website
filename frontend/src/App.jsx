@@ -1605,7 +1605,7 @@ export default function App() {
         page: String(page),
         preview: "1",
         period,
-        sort: isUpcoming ? "most_popular" : "top_rated",
+        sort: "most_popular",
       });
       const { ok, body } = await getJson(
         `/api/v1/anime/seasonal?${params}`,

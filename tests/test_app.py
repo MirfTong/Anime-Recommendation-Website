@@ -1328,6 +1328,7 @@ class AppTests(unittest.TestCase):
 
         body = response.get_json()
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["sort"], "most_popular")
         self.assertEqual(body["season"], "summer")
         self.assertEqual(body["year"], 2026)
         self.assertLessEqual(len(body["items"]), 6)
