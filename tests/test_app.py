@@ -1412,11 +1412,15 @@ class PrivacyAnalyticsTests(unittest.TestCase):
         first.close()
         second.close()
 
-    def test_api_bot_and_health_requests_are_not_tracked(self):
+    def test_api_bot_probe_and_health_requests_are_not_tracked(self):
         with patch("backend.app._record_site_visit") as record_visit:
             bot_response = self.client.get(
                 "/", headers={"User-Agent": "Googlebot/2.1"}
             )
+            render_probe_response = self.client.get(
+                "/", headers={"User-Agent": "Go-http-client/2.0"}
+            )
+            non_browser_response = self.client.get("/")
             health_response = self.client.get(
                 "/health", headers={"User-Agent": "Mozilla/5.0"}
             )
@@ -1424,6 +1428,8 @@ class PrivacyAnalyticsTests(unittest.TestCase):
 
         record_visit.assert_not_called()
         bot_response.close()
+        render_probe_response.close()
+        non_browser_response.close()
         health_response.close()
         api_response.close()
 

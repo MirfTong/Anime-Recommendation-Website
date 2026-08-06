@@ -93,6 +93,11 @@ ANALYTICS_BOT_MARKERS = (
     "kube-probe",
     "elb-healthchecker",
     "github-actions",
+    "go-http-client",
+    "headlesschrome",
+    "insomnia",
+    "okhttp",
+    "postmanruntime",
     "python-requests",
     "curl/",
     "wget/",
@@ -236,7 +241,14 @@ def _analytics_request_is_trackable(response) -> bool:
     ):
         return False
     user_agent = request.headers.get("User-Agent", "").casefold()
-    return not any(marker in user_agent for marker in ANALYTICS_BOT_MARKERS)
+    if not user_agent.startswith("mozilla/"):
+        return False
+    if any(marker in user_agent for marker in ANALYTICS_BOT_MARKERS):
+        return False
+    # Real navigations advertise HTML. Keeping an absent header compatible
+    # with minimal browser test clients, while known probes are rejected above.
+    accept = request.headers.get("Accept", "").casefold()
+    return not accept or "text/html" in accept
 
 
 def _record_site_visit(visitor_token: str) -> None:
