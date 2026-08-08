@@ -63,6 +63,54 @@ skip repeated DDL.
 
 For production, build the frontend and start `gunicorn backend.app:app`.
 
+## Production database (Neon)
+
+KyoQuan uses a managed Neon PostgreSQL database in production. The Flask web
+service and the scheduled GitHub Actions ETL must use the **same pooled Neon
+connection string**; otherwise the website and ETL will read and write different
+catalogues.
+
+Create a Neon project without enabling Neon Auth, then use its pooled
+PostgreSQL connection string. Neon includes the required SSL settings in that
+string. Keep the real value secret and set it only in these two locations:
+
+```text
+# Render web service environment variable
+DATABASE_URL=<pooled-neon-postgresql-url>
+
+# GitHub Actions repository secret
+DATABASE_URL=<same-pooled-neon-postgresql-url>
+```
+
+On an empty database, importing the Flask app runs the additive schema setup
+and creates the tables, indexes, normalized relationship tables, ETL cursors,
+cached facets, and analytics tables. The first Jikan ETL run then rebuilds the
+catalogue incrementally. It is normal for Anime to appear before Manga and
+Manhwa during an initial run.
+
+Neon's free plan can suspend compute after inactivity, so the first database
+request after a quiet period can be briefly slower. Monitor the Neon dashboard
+for storage use throughout the rebuild. If the catalogue approaches the free
+storage limit, pause additional bulk imports and move to a plan with sufficient
+storage before writes are rejected.
+
+### Backups and rollback
+
+Create regular off-site PostgreSQL backups from Neon. Do not commit dump files
+or database URLs:
+
+```powershell
+$env:PGDATABASE_URL = '<pooled-neon-postgresql-url>'
+& 'C:\Program Files\PostgreSQL\17\bin\pg_dump.exe' `
+  --format=custom --no-owner --file kyoquan-backup.dump $env:PGDATABASE_URL
+```
+
+To restore to a replacement database, use `pg_restore` with a new, empty Neon
+database and then point both `DATABASE_URL` settings to that replacement.
+Before retiring a previous provider, keep its database and at least one verified
+off-site dump until row counts, API responses, and a small ETL batch have been
+validated against Neon.
+
 ## REST API
 
 The canonical endpoints are:
