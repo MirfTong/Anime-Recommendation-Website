@@ -11,6 +11,7 @@ from urllib.error import HTTPError
 from backend.jobs.jikan_etl import (
     AnimeAssociationCaches,
     AnimeAssociationStats,
+    BULK_SEASON_STATE_KEY,
     BulkSeasonSyncResult,
     CatalogueMetricCoverage,
     CatalogueRefreshResult,
@@ -1413,8 +1414,8 @@ class JikanEtlTests(unittest.TestCase):
     def test_bulk_season_sync_commits_multiple_catalogue_pages(self):
         requested_pages = []
 
-        def fetch_page(*, page):
-            requested_pages.append(page)
+        def fetch_page(*, anime_type, page):
+            requested_pages.append((anime_type, page))
             return JikanAnimePage(
                 entries=[{"mal_id": page, "type": "TV", "season": "summer"}],
                 page=page,
@@ -1432,7 +1433,7 @@ class JikanEtlTests(unittest.TestCase):
         ):
             result = sync_bulk_anime_seasons(fetch_page=fetch_page)
 
-        self.assertEqual(requested_pages, [1, 2])
+        self.assertEqual(requested_pages, [("tv", 1), ("tv", 2)])
         self.assertEqual(result.pages_attempted, 2)
         self.assertEqual(result.pages_completed, 2)
         self.assertEqual(result.updated, 2)
@@ -1470,7 +1471,7 @@ class JikanEtlTests(unittest.TestCase):
             ) as apply_page,
         ):
             result = sync_bulk_anime_seasons(
-                fetch_page=lambda *, page: catalogue_page,
+                fetch_page=lambda *, anime_type, page: catalogue_page,
             )
 
         self.assertEqual(result.associations.anime_with_studios_updated, 1)
@@ -1480,8 +1481,20 @@ class JikanEtlTests(unittest.TestCase):
             "Bones",
         )
 
+    def test_bulk_tv_sync_uses_new_discovery_cursor(self):
+        with patch(
+            "backend.jobs.jikan_etl._sync_bulk_anime_type",
+            return_value=BulkSeasonSyncResult(),
+        ) as sync_type:
+            sync_bulk_anime_seasons(max_pages=7)
+
+        self.assertEqual(sync_type.call_args.kwargs["anime_type"], "tv")
+        self.assertEqual(sync_type.call_args.kwargs["state_key"], BULK_SEASON_STATE_KEY)
+        self.assertTrue(sync_type.call_args.kwargs["discover_missing"])
+        self.assertEqual(sync_type.call_args.kwargs["max_pages"], 7)
+
     def test_bulk_season_sync_preserves_failed_page_and_stops_during_outage(self):
-        def fetch_page(*, page):
+        def fetch_page(*, anime_type, page):
             raise JikanTemporaryError(f"page {page} unavailable")
 
         with (
@@ -1593,6 +1606,57 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(result.inserted, 1)
         self.assertEqual(result.saved, 1)
         self.assertEqual(anime.type, "OVA")
+
+    def test_tv_discovery_inserts_safe_titles_and_skips_hentai(self):
+        anime = SimpleNamespace(mal_id=1, season=None)
+        state = SimpleNamespace(
+            next_page=1,
+            last_attempt_at=None,
+            last_error=None,
+            last_completed_at=None,
+        )
+        page = JikanAnimePage(
+            entries=[
+                {"mal_id": 1, "title": "Safe TV title", "type": "TV"},
+                {
+                    "mal_id": 2,
+                    "title": "Adult TV title",
+                    "type": "TV",
+                    "rating": "Rx - Hentai",
+                },
+            ],
+            page=1,
+            has_next_page=True,
+        )
+        with (
+            patch("backend.jobs.jikan_etl._new_anime", return_value=anime),
+            patch(
+                "backend.jobs.jikan_etl._update_anime",
+                side_effect=lambda record, data, _genres: setattr(
+                    record, "type", data["type"]
+                ),
+            ),
+            patch("backend.jobs.jikan_etl._sync_state", return_value=state),
+            patch("backend.jobs.jikan_etl.db") as mock_db,
+        ):
+            mock_db.session.scalars.side_effect = [[], []]
+            result = _apply_season_page(
+                page,
+                state_key=BULK_SEASON_STATE_KEY,
+                year=None,
+                season=None,
+                discover_missing=True,
+                tv_only=False,
+                allowed_types=frozenset({"TV"}),
+                default_type="TV",
+            )
+
+        self.assertEqual(result.inserted, 1)
+        self.assertEqual(result.saved, 1)
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(anime.type, "TV")
+        self.assertEqual(state.next_page, 2)
+        mock_db.session.add.assert_called_once_with(anime)
 
     def test_type_filtered_page_removes_existing_hentai_record(self):
         anime = SimpleNamespace(mal_id=1)
@@ -1713,7 +1777,7 @@ class JikanEtlTests(unittest.TestCase):
         mock_db.session.commit.assert_called_once()
 
     def test_bulk_rate_limit_stops_without_advancing_cursor(self):
-        def rate_limited(*, page):
+        def rate_limited(*, anime_type, page):
             raise HTTPError(
                 f"https://example.test/anime?page={page}",
                 429,
