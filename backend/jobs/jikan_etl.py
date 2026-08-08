@@ -81,7 +81,10 @@ DEFAULT_SEASON_BACKFILL_LIMIT = 1000
 DEFAULT_STREAMING_BACKFILL_LIMIT = 2000
 BULK_SEASON_MAX_PAGES_PER_RUN = 40
 BULK_SEASON_MAX_CONSECUTIVE_FAILURES = 3
-BULK_SEASON_STATE_KEY = "bulk:tv-catalogue-seasons:v2"
+# The previous TV cursor read unfiltered catalogue pages and only refreshed
+# already-known rows. Keep that recorded cursor untouched and start the
+# corrected TV-only discovery scan with an independent key.
+BULK_SEASON_STATE_KEY = "bulk:catalogue:tv:v3"
 DEGRADED_SUCCESS_RATE = 0.25
 ENTITY_NAME_MAX_LENGTH = 150
 
@@ -1579,19 +1582,15 @@ def sync_bulk_anime_seasons(
     max_consecutive_failures: int = BULK_SEASON_MAX_CONSECUTIVE_FAILURES,
     fetch_page: Callable[..., JikanAnimePage] = get_anime_catalogue_page,
 ) -> BulkSeasonSyncResult:
-    """Update existing TV records while preserving the deployed TV cursor."""
-
-    def fetch_tv_page(*, anime_type: str, page: int) -> JikanAnimePage:
-        del anime_type
-        return fetch_page(page=page)
+    """Discover and refresh TV catalogue pages with an independent cursor."""
 
     return _sync_bulk_anime_type(
         anime_type="tv",
         state_key=BULK_SEASON_STATE_KEY,
-        discover_missing=False,
+        discover_missing=True,
         max_pages=max_pages,
         max_consecutive_failures=max_consecutive_failures,
-        fetch_page=fetch_tv_page,
+        fetch_page=fetch_page,
     )
 
 
