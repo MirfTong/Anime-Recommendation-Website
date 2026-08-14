@@ -2442,6 +2442,15 @@ export default function App() {
     });
   };
 
+  const retryCatalogue = () => {
+    loadCatalogue(
+      Math.max(1, pagination.page || 1),
+      appliedFilters,
+      contentType,
+      sort,
+    );
+  };
+
   const submitPageJump = (event) => {
     event.preventDefault();
     const page = validatedPage(jumpPage, pagination.pages);
@@ -2945,8 +2954,18 @@ export default function App() {
       </div>
 
       {error && (
-        <div className="mb-6 rounded-xl border border-rose-400/40 bg-rose-950/60 p-4 text-rose-100">
-          {error}
+        <div
+          className="mb-6 rounded-xl border border-rose-400/40 bg-rose-950/60 p-4 text-rose-100"
+          role="alert"
+        >
+          <p className="font-semibold">{error}</p>
+          <button
+            className="mt-3 rounded-lg border border-rose-200/30 px-3 py-2 text-sm font-bold transition hover:bg-rose-100/10"
+            type="button"
+            onClick={retryCatalogue}
+          >
+            Try again
+          </button>
         </div>
       )}
 

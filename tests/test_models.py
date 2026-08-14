@@ -263,6 +263,14 @@ class MangaSchemaTests(unittest.TestCase):
         schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
         self.assertIn("refresh_catalogue_facets", schema_source)
         self.assertIn("INSERT INTO catalogue_facet", schema_source)
+        self.assertIn(
+            "DELETE FROM catalogue_facet AS existing WHERE NOT EXISTS",
+            schema_source,
+        )
+        self.assertNotIn(
+            'db.session.execute(text("DELETE FROM catalogue_facet"))',
+            schema_source,
+        )
         self.assertIn("catalogue_cache_generation", schema_source)
 
     def test_catalogue_facets_support_relationship_options(self):

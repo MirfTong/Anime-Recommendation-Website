@@ -47,6 +47,10 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(app)
 
 API_PREFIX = "/api/v1"
+DATABASE_UNAVAILABLE_MESSAGE = (
+    "The catalogue is temporarily unavailable because its database cannot be "
+    "reached. Please try again shortly."
+)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_BUILD_DIR = PROJECT_ROOT / "static" / "react"
 MAX_PAGE_SIZE = 100
@@ -458,6 +462,27 @@ class ApiError(Exception):
 @app.errorhandler(ApiError)
 def handle_api_error(error: ApiError):
     return jsonify({"error": {"message": error.message}}), error.status_code
+
+
+@app.errorhandler(SQLAlchemyError)
+def handle_database_error(_error: SQLAlchemyError):
+    """Keep database outages from becoming blank or provider-generated pages."""
+    try:
+        db.session.rollback()
+    except Exception:
+        # The connection may already be gone; the response must still be safe.
+        pass
+    response = jsonify(
+        {
+            "error": {
+                "code": "database_unavailable",
+                "message": DATABASE_UNAVAILABLE_MESSAGE,
+            }
+        }
+    )
+    response.status_code = 503
+    response.headers["Retry-After"] = "300"
+    return response
 
 
 @app.errorhandler(404)
@@ -2191,8 +2216,25 @@ def react_app(path: str = ""):
     return send_from_directory(FRONTEND_BUILD_DIR, "index.html")
 
 
+def initialize_database_schema() -> bool:
+    """Apply schema updates without preventing the static frontend from booting."""
+    try:
+        ensure_anime_schema()
+    except SQLAlchemyError:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        app.logger.warning(
+            "Database schema initialization is unavailable; starting in "
+            "frontend-only degraded mode."
+        )
+        return False
+    return True
+
+
 with app.app_context():
-    ensure_anime_schema()
+    initialize_database_schema()
 
 
 if __name__ == "__main__":

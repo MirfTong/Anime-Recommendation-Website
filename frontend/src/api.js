@@ -3,6 +3,10 @@ const MAX_CACHE_ENTRIES = 80;
 
 const getCache = new Map();
 const inFlightRequests = new Map();
+const SERVICE_UNAVAILABLE_MESSAGE = (
+  "The catalogue is temporarily unavailable because its database cannot be reached. "
+  + "Please try again shortly."
+);
 
 function cachedEntry(url, now) {
   const entry = getCache.get(url);
@@ -45,10 +49,27 @@ export async function getJson(url, {
   let request = shareRequest ? inFlightRequests.get(url) : null;
   if (!request) {
     request = (async () => {
-      const response = await fetch(url, { signal });
-      const body = await response.json();
+      let response;
+      try {
+        response = await fetch(url, { signal });
+      } catch (error) {
+        if (error?.name === "AbortError") throw error;
+        throw new Error(SERVICE_UNAVAILABLE_MESSAGE, { cause: error });
+      }
+      let body;
+      try {
+        body = await response.json();
+      } catch {
+        body = {
+          error: {
+            message: response.status >= 500
+              ? SERVICE_UNAVAILABLE_MESSAGE
+              : "The server returned an invalid response. Please try again.",
+          },
+        };
+      }
       const result = {
-        ok: response.ok,
+        ok: response.ok && !body.error,
         status: response.status,
         body,
       };

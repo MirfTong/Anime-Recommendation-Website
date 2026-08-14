@@ -34,6 +34,7 @@ from backend.app import (
     _serialize_manga,
     app,
     analytics_response_cache,
+    initialize_database_schema,
     response_cache,
 )
 from backend.models import (
@@ -1373,6 +1374,35 @@ class AppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("error", response.get_json())
+
+    def test_database_failure_returns_safe_retryable_json(self):
+        with patch.object(
+            db.session,
+            "scalar",
+            side_effect=SQLAlchemyError("provider storage quota exceeded"),
+        ):
+            response = self.client.get("/api/v1/catalogue")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.get_json()["error"]["code"], "database_unavailable"
+        )
+        self.assertNotIn("quota", response.get_json()["error"]["message"])
+        self.assertEqual(response.headers["Retry-After"], "300")
+
+    def test_schema_failure_allows_frontend_only_degraded_startup(self):
+        with (
+            app.app_context(),
+            patch(
+                "backend.app.ensure_anime_schema",
+                side_effect=SQLAlchemyError("database unavailable"),
+            ),
+            patch.object(db.session, "rollback") as rollback,
+        ):
+            initialized = initialize_database_schema()
+
+        self.assertFalse(initialized)
+        rollback.assert_called_once_with()
 
     def test_invalid_season_returns_json_error(self):
         response = self.client.get("/api/v1/anime?season=monsoon")
