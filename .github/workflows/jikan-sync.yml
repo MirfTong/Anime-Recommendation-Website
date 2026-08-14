@@ -2,12 +2,13 @@ name: Scheduled catalogue metadata sync
 
 on:
   schedule:
-    # Anime, Manga, and Manhwa share one limiter across eight daily runs.
-    - cron: "0 */3 * * *"
+    # Check daily; the cadence guard runs the ETL only after 72 hours.
+    - cron: "17 5 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 # Scheduled and manual runs never write to the database concurrently.
 concurrency:
@@ -23,10 +24,18 @@ jobs:
       PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v7
+      - name: Enforce the 72-hour scheduled cadence
+        id: cadence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m backend.jobs.sync_guard --workflow jikan-sync.yml --minimum-hours 72
       - uses: actions/setup-python@v7
+        if: steps.cadence.outputs.should_run == 'true'
         with:
           python-version: "3.14"
       - name: Install dependencies
+        if: steps.cadence.outputs.should_run == 'true'
         run: pip install -r requirements.txt
       - name: Sync Anime, Manga, and Manhwa
+        if: steps.cadence.outputs.should_run == 'true'
         run: python -m backend.jobs.jikan_etl --scheduled-sync --page-limit 40 --limit 1000 --streaming-limit 2000

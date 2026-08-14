@@ -90,9 +90,40 @@ Manhwa during an initial run.
 
 Neon's free plan can suspend compute after inactivity, so the first database
 request after a quiet period can be briefly slower. Monitor the Neon dashboard
-for storage use throughout the rebuild. If the catalogue approaches the free
-storage limit, pause additional bulk imports and move to a plan with sufficient
-storage before writes are rejected.
+for storage use throughout the rebuild. The provider's billed project or branch
+storage can differ from PostgreSQL's logical database size because retained
+history and branches are outside the live relation-size total.
+
+Run the storage and duplicate audit before attempting cleanup. It is read-only
+by default and prints the logical database size, table/index sizes, duplicate
+natural keys, expired analytics rows, and unreferenced lookup rows:
+
+```powershell
+.\.venv\Scripts\python.exe -m backend.jobs.database_maintenance
+```
+
+The catalogue tables and join tables have unique keys, so repeated imports
+update existing records rather than appending duplicate titles or links. The
+maintenance command never proposes deleting Anime, Manga, or Manhwa. After a
+backup and review of the dry-run counts, the bounded analytics/orphan cleanup
+can be applied explicitly:
+
+```powershell
+.\.venv\Scripts\python.exe -m backend.jobs.database_maintenance --retention-days 365 --apply --confirm CLEANUP
+```
+
+If Neon rejects writes or connections, disable the scheduled workflow first,
+then compare the web-service `DATABASE_URL` and GitHub Actions `DATABASE_URL`
+without printing either secret. In the Neon dashboard, inspect all branches and
+retained history as well as the primary database. Take a backup before removing
+any branch or changing history retention. Run the read-only audit against the
+intended production URL, restore capacity or move the verified backup to a new
+database, and test `GET /api/v1/catalogue` before re-enabling the workflow.
+
+When the database is temporarily unavailable, the Flask process still serves
+the React application. API database failures return a retryable JSON `503`, and
+the interface shows a service-unavailable message with a **Try again** button
+instead of an empty result page.
 
 ### Backups and rollback
 
@@ -274,10 +305,18 @@ Useful focused commands are:
 
 ## Scheduled GitHub Actions sync
 
-`.github/workflows/jikan-sync.yml` runs every three hours and uses a concurrency
-group so manual and scheduled jobs never write simultaneously. All phases run
-inside one Python process, which preserves the shared rate limiter. The GitHub
-Actions step summary reports Manga and Manhwa pages completed and failed,
+`.github/workflows/jikan-sync.yml` wakes once per day. A read-only GitHub Actions
+API guard starts the ETL only when at least 72 hours have passed since the last
+successful scheduled run, so a successful catalogue write occurs no more than
+once every three days. If the guard cannot verify the previous success, it
+fails closed and does not start the database-writing job. Manual
+`workflow_dispatch` runs bypass the cadence guard, while the existing
+concurrency group ensures manual and scheduled jobs never write simultaneously.
+
+Run a manual sync from the repository's **Actions** page by selecting
+**Scheduled catalogue metadata sync** and choosing **Run workflow**. All phases
+run inside one Python process, which preserves the shared rate limiter. The
+GitHub Actions step summary reports Manga and Manhwa pages completed and failed,
 records inserted and updated, adult records removed, and each independent next
 page cursor, alongside the existing Anime metrics. It also reports the 2,000
 Anime streaming-service backfill selections, created relationships, and empty
@@ -287,6 +326,11 @@ Manga and Manhwa summaries include the equivalent author relationship metrics.
 
 Add the external PostgreSQL URL as a repository Actions secret named
 `DATABASE_URL` before running the workflow.
+
+The facet publication step is incremental: it inserts new filter values and
+deletes only stale values. It no longer deletes and reinserts the entire indexed
+facet table on every ETL run, reducing persistent write amplification and
+retained database history.
 
 For Render, use:
 

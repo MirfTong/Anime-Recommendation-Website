@@ -351,6 +351,19 @@ describe("browser response cache", () => {
     await expect(first).resolves.toMatchObject({ body: { item: { mal_id: 1 } } });
     await expect(second).resolves.toMatchObject({ body: { item: { mal_id: 1 } } });
   });
+
+  test("turns a non-JSON provider outage into a useful API error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 503,
+      json: async () => { throw new SyntaxError("HTML response"); },
+    })));
+
+    const result = await getJson("/api/v1/catalogue", { cache: false });
+
+    expect(result.ok).toBe(false);
+    expect(result.body.error.message).toMatch(/temporarily unavailable/i);
+  });
 });
 
 describe("catalogue filter integration", () => {
@@ -691,6 +704,30 @@ describe("catalogue filter integration", () => {
 
     expect(await screen.findByText("Refresh failed.")).toBeInTheDocument();
     expect(screen.queryByText("Existing Result")).toBeNull();
+  });
+
+  test("a database outage shows a retryable service message", async () => {
+    fetchMock.mockImplementation(async () => ({
+      ok: false,
+      status: 503,
+      json: async () => ({
+        error: {
+          code: "database_unavailable",
+          message: "The catalogue is temporarily unavailable. Please try again shortly.",
+        },
+      }),
+    }));
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The catalogue is temporarily unavailable",
+    );
+    const requestsBeforeRetry = fetchMock.mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(
+      requestsBeforeRetry,
+    ));
   });
 
   test("slider motion is debounced into one catalogue request", async () => {
