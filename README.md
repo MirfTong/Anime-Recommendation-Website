@@ -307,9 +307,10 @@ Useful focused commands are:
 
 `.github/workflows/jikan-sync.yml` wakes once per day. A read-only GitHub Actions
 API guard starts the ETL only when at least 72 hours have passed since the last
-successful scheduled run, so a successful catalogue write occurs no more than
-once every three days. If the guard cannot verify the previous success, it
-fails closed and does not start the database-writing job. Manual
+scheduled run whose **Sync Anime, Manga, and Manhwa** step completed successfully.
+Successful daily runs where that step was skipped do not reset the interval. The
+guard inspects workflow jobs and steps, and fails closed without starting a
+database-writing sync if the GitHub API history cannot be verified. Manual
 `workflow_dispatch` runs bypass the cadence guard, while the existing
 concurrency group ensures manual and scheduled jobs never write simultaneously.
 
