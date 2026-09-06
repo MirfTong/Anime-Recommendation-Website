@@ -61,7 +61,7 @@ class MangaSchemaTests(unittest.TestCase):
         self.assertTrue(Manga.__table__.c.members.nullable)
 
         schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
-        self.assertIn("CATALOGUE_SCHEMA_VERSION = 6", schema_source)
+        self.assertIn("CATALOGUE_SCHEMA_VERSION = 7", schema_source)
         self.assertIn('"popularity INTEGER"', schema_source)
         self.assertIn('"members INTEGER"', schema_source)
         for index_name in (
@@ -246,7 +246,7 @@ class MangaSchemaTests(unittest.TestCase):
     def test_top_rated_indexes_are_applied_by_versioned_migration(self):
         schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("CATALOGUE_SCHEMA_VERSION = 6", schema_source)
+        self.assertIn("CATALOGUE_SCHEMA_VERSION = 7", schema_source)
         self.assertIn("ix_anime_public_top_rated", schema_source)
         self.assertIn("ix_manga_public_top_rated", schema_source)
         self.assertIn("score DESC NULLS LAST", schema_source)
@@ -346,7 +346,7 @@ class MangaSchemaTests(unittest.TestCase):
         )
 
         schema_source = SCHEMA_SOURCE.read_text(encoding="utf-8")
-        self.assertIn("CATALOGUE_SCHEMA_VERSION = 6", schema_source)
+        self.assertIn("CATALOGUE_SCHEMA_VERSION = 7", schema_source)
         self.assertIn("CREATE TABLE IF NOT EXISTS site_visit", schema_source)
         self.assertIn("uq_site_visit_visitor_day_route", schema_source)
         self.assertIn("ix_site_visit_date_route", schema_source)

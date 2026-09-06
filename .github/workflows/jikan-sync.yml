@@ -33,9 +33,11 @@ jobs:
         if: steps.cadence.outputs.should_run == 'true'
         with:
           python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements.txt
       - name: Install dependencies
         if: steps.cadence.outputs.should_run == 'true'
         run: pip install -r requirements.txt
       - name: Sync Anime, Manga, and Manhwa
         if: steps.cadence.outputs.should_run == 'true'
-        run: python -m backend.jobs.jikan_etl --scheduled-sync --page-limit 40 --limit 1000 --streaming-limit 2000
+        run: python -m backend.jobs.jikan_etl --scheduled-sync --page-limit 10 --limit 200 --streaming-limit 100 --request-budget 800

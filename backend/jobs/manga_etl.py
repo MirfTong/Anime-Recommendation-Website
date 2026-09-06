@@ -13,7 +13,7 @@ from time import sleep
 from typing import Any
 from urllib.error import HTTPError
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, or_, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import lazyload, selectinload
 
@@ -83,6 +83,7 @@ class AuthorCaches:
 @dataclass
 class MangaPageApplyResult:
     saved: int = 0
+    changed: int = 0
     inserted: int = 0
     updated: int = 0
     removed_adult: int = 0
@@ -265,8 +266,20 @@ def _author_values(
     return list(parsed.values()), malformed, malformed == 0
 
 
-def _author_caches() -> AuthorCaches:
-    authors = list(db.session.scalars(select(Author)))
+def _author_caches(payloads=None) -> AuthorCaches:
+    query = select(Author).options(lazyload("*"))
+    if payloads is not None:
+        names, ids = set(), set()
+        for data in payloads:
+            parsed = _author_values(data.get("authors"))
+            for provider_id, _name, normalized, _role in parsed[0] if parsed else []:
+                names.add(normalized)
+                if provider_id is not None:
+                    ids.add(provider_id)
+        query = query.where(or_(
+            Author.mal_id.in_(ids), Author.normalized_name.in_(names)
+        ))
+    authors = list(db.session.scalars(query))
     return AuthorCaches(
         by_name={author.normalized_name: author for author in authors},
         by_mal_id={
@@ -580,7 +593,9 @@ def _apply_manga_page(
     *,
     provider_type: str,
     state_key: str,
+    track_changes: bool = False,
 ) -> MangaPageApplyResult:
+    from backend.jobs.refresh_policy import content_snapshot
     expected_content_type = MANGA_CONTENT_TYPES[provider_type]
     data_by_mal_id: dict[int, dict[str, Any]] = {}
     adult_ids: set[int] = set()
@@ -631,7 +646,9 @@ def _apply_manga_page(
                 select(Genre).options(lazyload("*"))
             )
         }
-        authors = _author_caches()
+        authors = (
+            _author_caches(data_by_mal_id.values()) if track_changes else _author_caches()
+        )
         result = MangaPageApplyResult(
             skipped=len(page_result.entries) - len(data_by_mal_id)
         )
@@ -644,6 +661,9 @@ def _apply_manga_page(
 
         for mal_id, data in data_by_mal_id.items():
             manga = existing.get(mal_id)
+            before = old_sync = None
+            if track_changes and manga is not None:
+                before, old_sync = content_snapshot(manga), manga.last_jikan_sync
             if manga is None:
                 manga = _new_manga(
                     data,
@@ -666,6 +686,11 @@ def _apply_manga_page(
                     author_stats=result.author_stats,
                 )
             result.saved += 1
+            if track_changes:
+                changed = before != content_snapshot(manga)
+                result.changed += int(changed)
+                if not changed:
+                    manga.last_jikan_sync = old_sync
 
         state = _sync_state(state_key)
         state.next_page = (

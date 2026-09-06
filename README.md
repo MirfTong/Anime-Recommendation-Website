@@ -240,52 +240,95 @@ change during a cursor-based run.
 
 ## ETL behavior
 
-Run all scheduled phases locally with:
+The scheduled worker plans due work, closes its database session and connections,
+fetches provider data into temporary files on the runner, and then applies the
+results in short transactions. No database transaction spans the rate limiter
+or external API requests. Small runs may finish fetching before Neon can
+suspend; the worker does not add sleeps to force suspension.
+
+The same bounded pipeline runs locally or through GitHub Actions:
 
 ```powershell
-.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --scheduled-sync --page-limit 40 --limit 1000
+.\.venv\Scripts\python.exe -m backend.jobs.jikan_etl --scheduled-sync --page-limit 10 --limit 200 --streaming-limit 100 --request-budget 800
 ```
 
-The scheduled orchestration:
+Scheduled defaults (standalone focused commands keep their existing behavior):
 
-1. cleans stored adult-only records;
-2. discovers current and historical Anime, including Movies, OVA, ONA, and
-   Specials;
-3. scans Manga and Manhwa catalogue pages independently;
-4. refreshes Anime detail and missing-season queues;
-5. refreshes the oldest-attempted Manga/Manhwa detail rows; and
-6. reports coverage, failures, removals, and cursor progress.
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `--request-budget` | 800 | Maximum actual HTTP attempts, including retries and fallbacks; minimum 40 |
+| `--page-limit` | 10 | Maximum pages per TV, Movie, OVA, ONA, Special, TV Special, Manga and Manhwa cursor |
+| `--limit` | 200 | Maximum Anime detail selections, plus 200 readable-title detail selections split between Manga and Manhwa; minimum 2 |
+| `--streaming-limit` | 100 | Maximum due Anime without saved streaming links |
+| `--batch-size` | 25 | Maximum detail attempts applied per transaction; pages commit independently |
 
-Manga and Manhwa use separate persistent `jikan_sync_state` cursor keys. Each
-successful page is committed with its next cursor, while a failed page remains
-pending for a later run. A completed scan wraps to page 1 so new provider
-records and changed listing metadata are discovered on future passes. Detail
-refresh uses `last_jikan_attempt` ordering so missing, invalid, or temporarily
-unavailable records are still marked attempted and cannot trap the queue.
+Current season discovery has a separate ten-page cap; upcoming season discovery
+has a one-page cap. HTTP shares are reserved: 25% discovery, 30% Anime details,
+15% Manga details, 15% Manhwa details, and 15% streaming. Requests are interleaved
+across queues and discovery cursors. Unused shares are not borrowed, so an outage
+or large queue cannot consume another category's allocation. Caps can mean fewer
+records are handled than selected.
 
-Studio metadata is available on Anime listing and detail payloads, so the
-shared Anime mapper updates it across seasonal, bulk, supplemental, and detail
-phases. Streaming data comes from Jikan's full Anime endpoint. In addition to the
-normal detail refresh, each scheduled run checks 2,000 Anime with no saved
-service links through a separate, indexed streaming-attempt queue. This lets
-missing links be retried without waiting for rating and season refresh cycles.
-The streaming-only queue reconciles only service relationships and its attempt
-timestamp, avoiding unnecessary genre, studio, rating, and title rewrites.
-If a normal metadata request falls back to a sparse basic response, missing
-relationship
-fields preserve existing data. A valid empty relationship array clears stale
-links, while partially malformed arrays only add or update valid entries and
-do not destructively remove known links. Only HTTP(S) streaming URLs are
-stored. GitHub Actions summaries include relationship payloads processed,
-links created or removed, changed URLs, malformed entries, reconciliation
-failures, sparse/empty streaming responses, and cursor progress.
+Existing `jikan_sync_state` keys and progress are retained. Pages commit their
+catalogue changes and next cursor atomically. A failed page is retried on a later
+run; completed bulk scans wrap to page 1 but wait 14 days before beginning a new
+pass. Completed seasonal scans wait three days. Partial scans remain eligible,
+and the oldest-attempted discovery cursors are considered first. Existing
+provider limits and shrinking-catalogue recovery still apply.
+Reaching Manga's provider page cap finishes the accessible pass atomically,
+waits before restarting, and is reported separately as limited coverage.
 
-Manga and Manhwa author credits are reconciled during catalogue discovery and
-detail refreshes. Missing or malformed author fields preserve known links,
-valid empty arrays clear stale credits, and partially malformed arrays remain
-additive-only. Action summaries report authors processed, author records and
-links created or removed, role changes, malformed entries, and reconciliation
-failures.
+Schema version 7 adds `jikan_refresh_state`; it does not reset existing cursors or
+rewrite the catalogue. This records successful detail refreshes independently
+of listing timestamps. Listing updates cannot postpone missing detail data.
+On the first optimized run, titles without this new state are eligible and are
+gradually processed within the budget.
+
+Detail slots rotate between active and archive titles, and between never
+attempted and previously attempted titles within each group. Overdue attempts
+are oldest first. This reserves progress for older titles while new titles
+continue to arrive. Missing seasons are filled by normal detail responses and
+listings; the scheduled worker no longer makes an extra per-title season request.
+The standalone `--backfill-seasons` repair command remains available.
+
+Refresh intervals are configurable through environment variables:
+
+| Variable | Days | Applies to |
+| --- | --- | --- |
+| `ETL_AIRING_DAYS` | 3 | Airing Anime and publishing Manga/Manhwa; completed seasonal scan restart |
+| `ETL_RECENT_DAYS` | 7 | Upcoming, recently finished, unknown status or unknown finish date |
+| `ETL_STABLE_DAYS` | 60 | Finished titles whose provider end date is at least 90 days ago |
+| `ETL_RETRY_DAYS` | 1 | Temporary failures, malformed results, incomplete detail/streaming responses |
+| `ETL_DISCOVERY_DAYS` | 14 | Restarting a completed bulk catalogue pass |
+
+All intervals must be positive. They describe eligibility, not a guarantee that
+the next run will reach a title: the 72-hour guard and queue budgets still apply.
+A missing detail endpoint (404) is eligible again after 30 days. A basic-endpoint
+fallback can update available metadata but does not mark full details successful.
+
+Valid empty streaming responses back off for 7, 30, then 90 days. Failures retain
+the empty-result streak and retry sooner. Successful detail responses supply
+streaming data when that field is usable; an equivalent full-URL HTTP request
+is also cached within the run. Different providers remain distinct. Both the
+response cache and fetched payload spool are temporary runner files, deleted
+on exit and never uploaded to Actions caches or artifacts.
+
+Missing/malformed relationship fields preserve known links. Valid empty
+studio, streaming and author arrays clear stale links; partially malformed
+arrays remain additive. Malformed genre arrays preserve existing genres. Only
+HTTP(S) streaming URLs are saved. Scheduled writes compare business data and
+preserve an unchanged catalogue row's `last_jikan_sync`; detail freshness is
+tracked separately. Streaming-only batches do not read title descriptions or
+unrelated relationships. Author/studio/service lookups are limited to the
+incoming batch. Existing adult-only cleanup remains; no catalogue pruning is
+performed to meet a storage quota. Facets are published only after changes.
+
+A fully applied budget-limited run is successful even when work remains, and
+counts toward the 72-hour cadence. Deferred/unfetched titles are not marked
+attempted. Provider failures or incomplete responses make the run fail after
+saving valid progress and retry state. Database failures roll back the current
+transaction; earlier committed pages/batches remain resumable. Interruptions
+during fetching leave planned work pending, and the next run may fetch it again.
 
 Useful focused commands are:
 
@@ -317,13 +360,20 @@ concurrency group ensures manual and scheduled jobs never write simultaneously.
 Run a manual sync from the repository's **Actions** page by selecting
 **Scheduled catalogue metadata sync** and choosing **Run workflow**. All phases
 run inside one Python process, which preserves the shared rate limiter. The
-GitHub Actions step summary reports Manga and Manhwa pages completed and failed,
-records inserted and updated, adult records removed, and each independent next
-page cursor, alongside the existing Anime metrics. It also reports the 2,000
-Anime streaming-service backfill selections, created relationships, and empty
-or sparse provider responses, plus Anime studio or streaming changes,
-relationships removed, changed URLs, and malformed provider entries skipped.
-Manga and Manhwa summaries include the equivalent author relationship metrics.
+workflow caches only pip dependencies, keyed by requirements.txt. The step
+summary and `ETL efficiency` JSON log report HTTP attempts, successes, failures,
+requests avoided, selected/changed/unchanged/failed/deferred records, adult-only
+removals, applied/failed pages, cursor positions, fetch/apply seconds, and exhausted
+budget categories. Record counters are phase operations, not unique title counts;
+deferred counts cover due detail/streaming queues, while page progress is shown
+by cursor. HTTP success means a parsed response, not necessarily valid title data.
+
+Compare several runs by saving these summaries and the corresponding Neon
+dashboard compute/transfer measurements over matching time windows. Compare
+similar backlog sizes and account for manual runs and site visits. Fetch/apply
+timings are not measured Neon CU-hours or transfer, and do not establish a
+specific saving. Smaller defaults reduce throughput: older titles and initial
+catalogue discovery take more runs. Increase budgets only after observing usage.
 
 Add the external PostgreSQL URL as a repository Actions secret named
 `DATABASE_URL` before running the workflow.
@@ -346,6 +396,18 @@ Run the complete backend suite:
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
+
+The application endpoint tests require a populated local PostgreSQL fixture and
+a frontend build. For isolated ETL validation, set `DATABASE_URL=sqlite://` in
+the test process and run:
+
+```powershell
+python -m unittest tests.test_efficient_sync tests.test_jikan_client tests.test_jikan_etl tests.test_manga_etl tests.test_sync_guard tests.test_workflow tests.test_models tests.test_database_maintenance
+```
+
+These tests use mocked providers and isolated SQLite transactions (with JSON
+standing in for PostgreSQL arrays), plus PostgreSQL model/schema checks. They
+do not connect to Neon or run a live ETL.
 
 Run the frontend production-build validation:
 

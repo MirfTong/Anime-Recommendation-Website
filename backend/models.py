@@ -394,6 +394,24 @@ class CatalogueFacet(db.Model):
     value: Mapped[str] = mapped_column(String(255), primary_key=True)
 
 
+class JikanRefreshState(db.Model):
+    """Detail freshness is independent from catalogue listing timestamps."""
+
+    __tablename__ = "jikan_refresh_state"
+    __table_args__ = (
+        Index("ix_jikan_refresh_due", "kind", "queue", "next_attempt_at"),
+    )
+
+    kind: Mapped[str] = mapped_column(String(10), primary_key=True)
+    mal_id: Mapped[int] = mapped_column(primary_key=True)
+    queue: Mapped[str] = mapped_column(String(10), primary_key=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    empty_streak: Mapped[int] = mapped_column(default=0, server_default="0")
+    last_failure: Mapped[str | None] = mapped_column(String(30))
+
+
 class JikanSyncState(db.Model):
     """Persistent cursor and health state for resumable Jikan page imports."""
 

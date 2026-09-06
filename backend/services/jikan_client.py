@@ -13,6 +13,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from backend.services.jikan_budget import RequestBudget, ResponseCache
+
 
 DEFAULT_BASE_URL = "https://api.tenrai.org/v1"
 DEFAULT_FALLBACK_BASE_URL = "https://api.jikan.moe/v4"
@@ -86,10 +88,14 @@ class JikanClient:
         base_url: str | None = None,
         fallback_base_url: str | None = None,
         streaming_base_url: str | None = None,
+        budget: RequestBudget | None = None,
+        response_cache: ResponseCache | None = None,
     ) -> None:
         if transient_retry_budget < 0:
             raise ValueError("transient_retry_budget cannot be negative")
         self._opener = opener
+        self.budget = budget
+        self.response_cache = response_cache
         self._clock = clock
         self._sleeper = sleeper
         self._request_times: deque[float] = deque()
@@ -140,7 +146,8 @@ class JikanClient:
                 and error.code not in SERVER_ERROR_STATUS_CODES
             ):
                 raise
-            return self.get_anime(mal_id)
+            payload = self.get_anime(mal_id)
+            return {**payload, "_etl_basic_fallback": True} if self.budget is not None else payload
 
     def get_anime_streaming(self, mal_id: int) -> dict[str, Any]:
         """Fetch streaming metadata directly from its configured provider.
@@ -182,7 +189,8 @@ class JikanClient:
                 and error.code not in SERVER_ERROR_STATUS_CODES
             ):
                 raise
-            return self.get_manga(mal_id)
+            payload = self.get_manga(mal_id)
+            return {**payload, "_etl_basic_fallback": True} if self.budget is not None else payload
 
     def get_manga(self, mal_id: int) -> dict[str, Any]:
         """Return basic manga data with one bounded 5xx/network retry."""
@@ -394,9 +402,18 @@ class JikanClient:
     ) -> dict[str, Any]:
         """Fetch JSON with independent 429 and bounded transient retry budgets."""
         url = f"{base_url}{path}"
+        cached = self.response_cache.get(url) if self.response_cache is not None else None
+        if cached is not None:
+            if self.budget is not None:
+                self.budget.avoided += 1
+            return cached
         rate_retries = transient_retries = 0
         while True:
+            if self.budget is not None:
+                self.budget.check()
             self._throttle()
+            if self.budget is not None:
+                self.budget.claim()
             request = Request(
                 url,
                 headers={"Accept": "application/json", "User-Agent": USER_AGENT},
@@ -413,8 +430,14 @@ class JikanClient:
                         raise JikanTemporaryError(
                             f"Anime API returned a non-object response: {path}"
                         )
+                    if self.budget is not None:
+                        self.budget.successful += 1
+                    if self.response_cache is not None:
+                        self.response_cache.put(url, payload)
                     return payload
             except HTTPError as error:
+                if self.budget is not None:
+                    self.budget.failed += 1
                 if error.code == 429 and rate_retries < MAX_429_RETRIES:
                     delay = self._retry_delay(error, rate_retries)
                     rate_retries += 1
@@ -434,6 +457,8 @@ class JikanClient:
                 error.close()
                 raise
             except (TimeoutError, URLError) as error:
+                if self.budget is not None:
+                    self.budget.failed += 1
                 if (
                     retry_network_errors
                     and transient_retries < max_transient_retries
@@ -445,6 +470,10 @@ class JikanClient:
                 raise JikanTemporaryError(
                     f"Anime API request failed: {path}"
                 ) from error
+            except JikanTemporaryError:
+                if self.budget is not None:
+                    self.budget.failed += 1
+                raise
 
     @staticmethod
     def _page_data(

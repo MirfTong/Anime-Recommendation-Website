@@ -13,22 +13,17 @@ from backend.jobs.jikan_etl import (
     AnimeAssociationStats,
     BULK_SEASON_STATE_KEY,
     BulkSeasonSyncResult,
-    CatalogueMetricCoverage,
     CatalogueRefreshResult,
     CurrentSeasonSyncResult,
     SUPPLEMENTAL_PROVIDER_TYPES,
     SUPPLEMENTAL_STATE_KEYS,
     SeasonPageApplyResult,
     SeasonBackfillResult,
-    SeasonCoverage,
-    StreamingBackfillResult,
-    SupplementalCatalogueSyncResult,
     _apply_season_page,
     _anime_status,
     _anime_type,
     _detailed_genres,
     _current_season_identity,
-    _next_season_identity,
     _fetch_anime_data,
     _is_hentai,
     _names,
@@ -60,7 +55,6 @@ from backend.models import Anime
 from backend.jobs.manga_etl import (
     MangaCatalogueSyncResult,
     MangaRefreshResult,
-    MangaTypeSyncResult,
 )
 from backend.services.jikan_client import (
     JikanAnimePage,
@@ -873,157 +867,17 @@ class JikanEtlTests(unittest.TestCase):
         self.assertEqual(fetched_requests, [(2027, "winter", 1)])
         self.assertTrue(result.complete)
 
-    def test_scheduled_sync_runs_every_phase_and_reports_coverage(self):
-        current = CurrentSeasonSyncResult(removed_hentai=1)
-        upcoming = CurrentSeasonSyncResult(removed_hentai=2)
-        bulk = BulkSeasonSyncResult(removed_hentai=2)
-        supplemental = SupplementalCatalogueSyncResult(
-            scans={"ova": BulkSeasonSyncResult(removed_hentai=3)}
-        )
-        backfill = SeasonBackfillResult(removed_hentai=4)
-        catalogue = CatalogueRefreshResult(removed_hentai=5)
-        streaming_backfill = StreamingBackfillResult(removed_hentai=6)
-        manga_catalogue = MangaCatalogueSyncResult(
-            scans={"manga": MangaTypeSyncResult(removed_adult=2)}
-        )
-        manga_refresh = MangaRefreshResult(removed_adult=3)
-        coverage = SeasonCoverage(total_tv=100, classified_tv=75)
-        metric_coverage = CatalogueMetricCoverage(
-            anime_total=100,
-            anime_with_popularity=90,
-            anime_with_members=85,
-            manga_total=50,
-            manga_with_popularity=45,
-            manga_with_members=40,
-            manhwa_total=25,
-            manhwa_with_popularity=20,
-            manhwa_with_members=18,
-        )
-        with ExitStack() as stack:
-            stack.enter_context(
-                patch("backend.jobs.jikan_etl.remove_hentai_anime", return_value=6)
-            )
-            stack.enter_context(
-                patch("backend.jobs.jikan_etl.remove_adult_manga", return_value=7)
-            )
-            stack.enter_context(
-                patch(
-                    "backend.jobs.jikan_etl.sync_current_season",
-                    return_value=current,
-                )
-            )
-            upcoming_sync = stack.enter_context(
-                patch(
-                    "backend.jobs.jikan_etl.sync_upcoming_season",
-                    return_value=upcoming,
-                )
-            )
-            bulk_sync = stack.enter_context(
-                patch(
-                    "backend.jobs.jikan_etl.sync_bulk_anime_seasons",
-                    return_value=bulk,
-                )
-            )
-            supplemental_sync = stack.enter_context(
-                patch(
-                    "backend.jobs.jikan_etl.sync_supplemental_anime_types",
-                    return_value=supplemental,
-                )
-            )
-            backfill_sync = stack.enter_context(
-                patch(
-                    "backend.jobs.jikan_etl.backfill_missing_seasons",
-                    return_value=backfill,
-                )
-            )
-            catalogue_sync = stack.enter_context(
-                patch(
-                    "backend.jobs.jikan_etl.refresh_catalogue",
-                    return_value=catalogue,
-                )
-            )
-            streaming_backfill_sync = stack.enter_context(
-                patch(
-                    "backend.jobs.jikan_etl.backfill_streaming_services",
-                    return_value=streaming_backfill,
-                )
-            )
-            manga_sync = stack.enter_context(
-                patch(
-                    "backend.jobs.jikan_etl.sync_manga_catalogue",
-                    return_value=manga_catalogue,
-                )
-            )
-            manga_refresh_sync = stack.enter_context(
-                patch(
-                    "backend.jobs.jikan_etl.refresh_manga_catalogue",
-                    return_value=manga_refresh,
-                )
-            )
-            facet_sync = stack.enter_context(
-                patch(
-                    "backend.jobs.jikan_etl.refresh_catalogue_facets",
-                    return_value=123,
-                )
-            )
-            stack.enter_context(
-                patch(
-                    "backend.jobs.jikan_etl.get_season_coverage",
-                    return_value=coverage,
-                )
-            )
-            stack.enter_context(
-                patch(
-                    "backend.jobs.jikan_etl.get_catalogue_metric_coverage",
-                    return_value=metric_coverage,
-                )
-            )
-            for report_name in (
-                "_report_current_season",
-                "_report_upcoming_season",
-                "_report_bulk_seasons",
-                "_report_supplemental_catalogue",
-                "_report_season_backfill",
-                "_report_catalogue",
-                "_report_streaming_backfill",
-                "_report_anime_associations",
-                "report_manga_catalogue",
-                "report_manga_cleanup",
-                "report_manga_refresh",
-                "_report_hentai_cleanup",
-                "_report_catalogue_facets",
-                "_report_season_coverage",
-                "_report_catalogue_metric_coverage",
-            ):
-                stack.enter_context(
-                    patch(f"backend.jobs.jikan_etl.{report_name}")
-                )
+    def test_scheduled_sync_uses_bounded_offline_worker(self):
+        with patch("backend.jobs.efficient_sync.run") as run:
             result = run_scheduled_sync(
-                limit=7,
-                streaming_limit=11,
-                batch_size=2,
-                page_limit=3,
+                limit=7, streaming_limit=11, batch_size=2, page_limit=3,
+                request_budget=120,
             )
-
-        bulk_sync.assert_called_once_with(max_pages=3)
-        upcoming_sync.assert_called_once_with()
-        supplemental_sync.assert_called_once_with(max_pages=3)
-        backfill_sync.assert_called_once_with(limit=7, batch_size=2)
-        catalogue_sync.assert_called_once_with(limit=7, batch_size=2)
-        streaming_backfill_sync.assert_called_once_with(limit=11, batch_size=2)
-        manga_sync.assert_called_once_with(max_pages=3)
-        manga_refresh_sync.assert_called_once_with(limit=7, batch_size=2)
-        facet_sync.assert_called_once_with()
-        self.assertEqual(result.supplemental_catalogue, supplemental)
-        self.assertEqual(result.upcoming_season, upcoming)
-        self.assertEqual(result.manga_catalogue, manga_catalogue)
-        self.assertEqual(result.manga_refresh, manga_refresh)
-        self.assertEqual(result.streaming_backfill, streaming_backfill)
-        self.assertEqual(result.removed_adult_manga, 12)
-        self.assertEqual(result.removed_hentai, 29)
-        self.assertEqual(result.coverage, coverage)
-        self.assertEqual(result.metric_coverage, metric_coverage)
-        self.assertEqual(coverage.rate, 0.75)
+        run.assert_called_once_with(
+            limit=7, streaming_limit=11, batch_size=2, page_limit=3,
+            request_budget=120,
+        )
+        self.assertIs(result, run.return_value)
 
     def test_scheduled_sync_rejects_invalid_limits_before_running(self):
         with (

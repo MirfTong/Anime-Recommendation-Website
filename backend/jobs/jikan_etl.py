@@ -14,8 +14,8 @@ from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 
-from sqlalchemy import delete, func, inspect as sa_inspect, select, text
-from sqlalchemy.orm import selectinload
+from sqlalchemy import delete, func, inspect as sa_inspect, or_, select, text
+from sqlalchemy.orm import lazyload, selectinload
 
 from backend.app import app
 from backend.jobs.manga_etl import (
@@ -23,9 +23,7 @@ from backend.jobs.manga_etl import (
     MangaCatalogueSyncResult,
     MangaRefreshResult,
     refresh_manga_catalogue,
-    remove_adult_manga,
     report_manga_catalogue,
-    report_manga_cleanup,
     report_manga_refresh,
     sync_manga_catalogue,
 )
@@ -181,6 +179,7 @@ class StreamingBackfillResult:
 @dataclass
 class SeasonPageApplyResult:
     saved: int = 0
+    changed: int = 0
     inserted: int = 0
     removed_hentai: int = 0
     skipped: int = 0
@@ -418,9 +417,28 @@ def _streaming_values(
     return list(parsed.values()), malformed, malformed == 0
 
 
-def _association_caches() -> AnimeAssociationCaches:
-    studios = list(db.session.scalars(select(Studio)))
-    streaming_services = list(db.session.scalars(select(StreamingService)))
+def _association_caches(payloads=None) -> AnimeAssociationCaches:
+    studio_query = select(Studio)
+    service_query = select(StreamingService)
+    if payloads is not None:
+        studio_names, studio_ids, service_names = set(), set(), set()
+        for data in payloads:
+            parsed = _studio_values(data.get("studios"))
+            for provider_id, _name, normalized in parsed[0] if parsed else []:
+                studio_names.add(normalized)
+                if provider_id is not None:
+                    studio_ids.add(provider_id)
+            parsed = _streaming_values(data.get("streaming"))
+            for _name, normalized, _url in parsed[0] if parsed else []:
+                service_names.add(normalized)
+        studio_query = studio_query.where(or_(
+            Studio.mal_id.in_(studio_ids), Studio.normalized_name.in_(studio_names)
+        ))
+        service_query = service_query.where(
+            StreamingService.normalized_name.in_(service_names)
+        )
+    studios = list(db.session.scalars(studio_query.options(lazyload("*"))))
+    streaming_services = list(db.session.scalars(service_query.options(lazyload("*"))))
     return AnimeAssociationCaches(
         studios_by_name={
             studio.normalized_name: studio for studio in studios
@@ -453,11 +471,12 @@ def _streaming_association_caches() -> AnimeAssociationCaches:
 def _anime_etl_load_options():
     """Eager-load normalized links used while reconciling one ETL batch."""
     return (
-        selectinload(Anime.genre_links).selectinload(AnimeGenre.genre),
-        selectinload(Anime.studio_links).selectinload(AnimeStudio.studio),
+        lazyload("*"),
+        selectinload(Anime.genre_links).selectinload(AnimeGenre.genre).lazyload("*"),
+        selectinload(Anime.studio_links).selectinload(AnimeStudio.studio).lazyload("*"),
         selectinload(Anime.streaming_links).selectinload(
             AnimeStreamingService.streaming_service
-        ),
+        ).lazyload("*"),
     )
 
 
@@ -1300,8 +1319,10 @@ def _apply_season_page(
     tv_only: bool,
     allowed_types: frozenset[str] | None = None,
     default_type: str | None = None,
+    track_changes: bool = False,
 ) -> SeasonPageApplyResult:
     """Persist one page and its next-page cursor in the same transaction."""
+    from backend.jobs.refresh_policy import content_snapshot
     data_by_mal_id: dict[int, dict[str, Any]] = {}
     hentai_ids: set[int] = set()
     for entry in page_result.entries:
@@ -1335,7 +1356,9 @@ def _apply_season_page(
         statement = statement.options(*_anime_etl_load_options())
         existing = {anime.mal_id: anime for anime in db.session.scalars(statement)}
         genres = {genre.name: genre for genre in db.session.scalars(select(Genre))}
-        association_caches = None
+        association_caches = (
+            _association_caches(data_by_mal_id.values()) if track_changes else None
+        )
         result = SeasonPageApplyResult(
             skipped=len(page_result.entries) - len(data_by_mal_id)
         )
@@ -1348,6 +1371,9 @@ def _apply_season_page(
 
         for mal_id, data in data_by_mal_id.items():
             anime = existing.get(mal_id)
+            before = old_sync = None
+            if track_changes and anime is not None:
+                before, old_sync = content_snapshot(anime), anime.last_jikan_sync
             previous_season = anime.season if anime is not None else None
             if anime is None:
                 if not discover_missing:
@@ -1366,6 +1392,11 @@ def _apply_season_page(
                 result.associations,
             )
             result.saved += 1
+            if track_changes:
+                changed = before != content_snapshot(anime)
+                result.changed += int(changed)
+                if not changed:
+                    anime.last_jikan_sync = old_sync
             if previous_season is None and anime.season is not None:
                 result.seasons_assigned += 1
 
@@ -2155,104 +2186,21 @@ def _report_catalogue_metric_coverage(
 
 def run_scheduled_sync(
     *,
-    limit: int = DEFAULT_SEASON_BACKFILL_LIMIT,
-    streaming_limit: int = DEFAULT_STREAMING_BACKFILL_LIMIT,
+    limit: int = 200,
+    streaming_limit: int = 100,
     batch_size: int = 25,
-    page_limit: int = BULK_SEASON_MAX_PAGES_PER_RUN,
-) -> ScheduledSyncResult:
-    """Run every scheduled phase in one process with one shared rate limiter."""
-    if limit <= 0:
-        raise ValueError("limit must be positive")
-    if streaming_limit <= 0:
-        raise ValueError("streaming_limit must be positive")
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-    if page_limit <= 0:
-        raise ValueError("page_limit must be positive")
+    page_limit: int = 10,
+    request_budget: int = 800,
+):
+    """Run the due queues with offline fetching and short apply transactions."""
+    from backend.jobs.efficient_sync import run
 
-    removed_hentai = remove_hentai_anime()
-
-    current_result = sync_current_season()
-    _report_current_season(current_result)
-    upcoming_result = sync_upcoming_season()
-    _report_upcoming_season(upcoming_result)
-
-    bulk_result = sync_bulk_anime_seasons(max_pages=page_limit)
-    _report_bulk_seasons(bulk_result)
-
-    supplemental_result = sync_supplemental_anime_types(max_pages=page_limit)
-    _report_supplemental_catalogue(supplemental_result)
-
-    backfill_result = backfill_missing_seasons(limit=limit, batch_size=batch_size)
-    _report_season_backfill(backfill_result)
-
-    catalogue_result = refresh_catalogue(limit=limit, batch_size=batch_size)
-    _report_catalogue(catalogue_result)
-
-    streaming_backfill_result = backfill_streaming_services(
-        limit=streaming_limit,
+    return run(
+        limit=limit,
+        streaming_limit=streaming_limit,
         batch_size=batch_size,
-    )
-    _report_streaming_backfill(streaming_backfill_result)
-
-    # Preserve the established Anime pipeline even if a new readable-title
-    # provider phase fails unexpectedly.
-    removed_adult_manga = remove_adult_manga()
-    report_manga_cleanup(removed_adult_manga)
-    manga_result = sync_manga_catalogue(max_pages=page_limit)
-    report_manga_catalogue(manga_result)
-
-    manga_refresh_result = refresh_manga_catalogue(
-        limit=limit, batch_size=batch_size
-    )
-    report_manga_refresh(manga_refresh_result)
-    removed_adult_manga += (
-        manga_result.removed_adult + manga_refresh_result.removed_adult
-    )
-    removed_hentai += (
-        current_result.removed_hentai
-        + upcoming_result.removed_hentai
-        + bulk_result.removed_hentai
-        + supplemental_result.removed_hentai
-        + backfill_result.removed_hentai
-        + catalogue_result.removed_hentai
-        + streaming_backfill_result.removed_hentai
-    )
-    _report_hentai_cleanup(removed_hentai)
-
-    association_stats = AnimeAssociationStats()
-    for phase_stats in (
-        current_result.associations,
-        upcoming_result.associations,
-        bulk_result.associations,
-        supplemental_result.associations,
-        backfill_result.associations,
-        catalogue_result.associations,
-        streaming_backfill_result.associations,
-    ):
-        association_stats.add(phase_stats)
-    _report_anime_associations(association_stats)
-
-    _refresh_and_report_catalogue_facets()
-
-    coverage = get_season_coverage()
-    _report_season_coverage(coverage)
-    metric_coverage = get_catalogue_metric_coverage()
-    _report_catalogue_metric_coverage(metric_coverage)
-    return ScheduledSyncResult(
-        current_season=current_result,
-        upcoming_season=upcoming_result,
-        bulk_seasons=bulk_result,
-        supplemental_catalogue=supplemental_result,
-        season_backfill=backfill_result,
-        catalogue=catalogue_result,
-        streaming_backfill=streaming_backfill_result,
-        manga_catalogue=manga_result,
-        manga_refresh=manga_refresh_result,
-        coverage=coverage,
-        metric_coverage=metric_coverage,
-        removed_hentai=removed_hentai,
-        removed_adult_manga=removed_adult_manga,
+        page_limit=page_limit,
+        request_budget=request_budget,
     )
 
 
@@ -2306,7 +2254,19 @@ def main() -> None:
         type=int,
         help="Maximum unlinked Anime to enrich during --scheduled-sync.",
     )
+    parser.add_argument(
+        "--request-budget",
+        type=int,
+        help="Scheduled HTTP request cap including retries (minimum 40).",
+    )
     args = parser.parse_args()
+
+    if args.request_budget is not None and not args.scheduled_sync:
+        parser.error("--request-budget requires --scheduled-sync")
+    if args.request_budget is not None and args.request_budget < 40:
+        parser.error("--request-budget must be at least 40")
+    if args.scheduled_sync and args.limit is not None and args.limit < 2:
+        parser.error("--scheduled-sync --limit must be at least 2")
 
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
@@ -2346,10 +2306,11 @@ def main() -> None:
                 "--scheduled-sync cannot be combined with another sync selection"
             )
         run_scheduled_sync(
-            limit=args.limit or DEFAULT_SEASON_BACKFILL_LIMIT,
-            streaming_limit=args.streaming_limit or DEFAULT_STREAMING_BACKFILL_LIMIT,
+            limit=args.limit or 200,
+            streaming_limit=args.streaming_limit or 100,
             batch_size=args.batch_size,
-            page_limit=page_limit,
+            page_limit=args.page_limit or 10,
+            request_budget=args.request_budget or 800,
         )
         # The scheduled orchestrator already refreshes facets after all phases.
         return
